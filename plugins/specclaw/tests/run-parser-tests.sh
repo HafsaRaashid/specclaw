@@ -406,6 +406,175 @@ fi
 echo
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Case 9 — analyze-codebase collect: manifest detection (Node/Go/Delphi), the
+# single-line `engines.node` version_signal regression, LOC-by-extension,
+# test-location detection, path-scoping exclusion, and discovered_docs parity
+# with a standalone specclaw-discover-context run (all jq-free; the plain
+# fixture copy exercises the `find` fallback, the git-initialized copy
+# exercises the `git ls-files` path).
+# ─────────────────────────────────────────────────────────────────────────────
+echo "--- Case 9: analyze-codebase collect — manifests, LOC, test-locations, docs, scoping ---"
+ANALYZE_BIN="$BIN_DIR/specclaw-analyze-codebase"
+DISCOVER="$BIN_DIR/specclaw-discover-context"
+if [[ ! -f "$ANALYZE_BIN" ]]; then
+  fail "specclaw-analyze-codebase missing"
+else
+  # Plain copy of the fixture tree, no .git anywhere above it -> exercises the
+  # `find` fallback enumeration path.
+  AFIX="$WORK/analyze-proj"
+  mkdir -p "$AFIX/.specclaw"
+  cp -R "$FIXTURES_DIR/analyze/." "$AFIX/"
+  printf 'context:\n  discovery: true\n' > "$AFIX/.specclaw/config.yaml"
+
+  out="$(bash "$ANALYZE_BIN" collect "$AFIX/.specclaw" 2>/dev/null)"
+
+  # 9a (AC1) — output is a well-formed JSON object: balanced braces, starts
+  # with `{`/ends with `}`, and every documented top-level field is present.
+  # (jq is not installed in this environment, so this is the grep/awk
+  # fallback equivalent of `jq -e '.'`.)
+  open_braces="$(grep -o '{' <<<"$out" | wc -l | tr -d ' ')"
+  close_braces="$(grep -o '}' <<<"$out" | wc -l | tr -d ' ')"
+  if [[ "${out:0:1}" == "{" && "${out: -1}" == "}" && "$open_braces" == "$close_braces" ]] \
+     && grep -q '"path":' <<<"$out" && grep -q '"project_root":' <<<"$out" \
+     && grep -q '"top_level_dirs":' <<<"$out" && grep -q '"manifests":' <<<"$out" \
+     && grep -q '"loc_by_extension":' <<<"$out" && grep -q '"test_locations":' <<<"$out" \
+     && grep -q '"discovered_docs":' <<<"$out"; then
+    pass "9a collect output is a well-formed JSON object with all documented fields"
+  else
+    fail "9a collect output is a well-formed JSON object with all documented fields"
+  fi
+
+  # 9b (AC3) — package.json manifest: type=node, both real dependencies, and
+  # the single-line `"engines": { "node": ">=18.0.0" },` version_signal
+  # correctly captured (this exact single-line style was a real bug found and
+  # fixed in the script — regression lock-in).
+  node_line="$(grep -o '{"path": "package.json".*}' <<<"$out")"
+  if grep -q '"type": "node"' <<<"$node_line" \
+     && grep -q '"dependencies": \["express", "lodash"\]' <<<"$node_line" \
+     && grep -q '"version_signal": ">=18.0.0"' <<<"$node_line"; then
+    pass "9b package.json manifest: type=node, deps, single-line engines.node version_signal"
+  else
+    fail "9b package.json manifest: type=node, deps, single-line engines.node version_signal (got: $node_line)"
+  fi
+
+  # 9c (AC3) — go.mod manifest: type=go, both modules from the require( )
+  # block, and the `go 1.21` directive as version_signal.
+  go_line="$(grep -o '{"path": "go.mod".*}' <<<"$out")"
+  if grep -q '"type": "go"' <<<"$go_line" \
+     && grep -q '"dependencies": \["github.com/pkg/errors", "github.com/stretchr/testify"\]' <<<"$go_line" \
+     && grep -q '"version_signal": "1.21"' <<<"$go_line"; then
+    pass "9c go.mod manifest: type=go, deps from require() block, version_signal"
+  else
+    fail "9c go.mod manifest: type=go, deps from require() block, version_signal (got: $go_line)"
+  fi
+
+  # 9d (AC3, NFR1) — the Delphi .dproj manifest: type=delphi and dependencies
+  # extracted from <DCCReference Include="..."> entries. This is the
+  # language-agnostic differentiator the feature exists for.
+  dproj_line="$(grep -o '{"path": "AnalyzeFixture.dproj".*}' <<<"$out")"
+  if grep -q '"type": "delphi"' <<<"$dproj_line" \
+     && grep -q '"dependencies": \["AnalyzeFixture.pas", "Unit1.pas"\]' <<<"$dproj_line"; then
+    pass "9d .dproj manifest: type=delphi, deps from DCCReference entries"
+  else
+    fail "9d .dproj manifest: type=delphi, deps from DCCReference entries (got: $dproj_line)"
+  fi
+
+  # 9e (AC4) — loc_by_extension matches a hand-computed `wc -l` count for the
+  # fixture's known 5-line file (sample.qux, a distinctive extension so the
+  # assertion is unambiguous).
+  qux_loc="$(grep -o '"qux": [0-9]*' <<<"$out" | grep -o '[0-9]*')"
+  hand_count="$(wc -l < "$FIXTURES_DIR/analyze/sample.qux" | tr -d ' ')"
+  assert_eq "9e loc_by_extension[qux] matches wc -l" "$hand_count" "$qux_loc"
+
+  # 9f (AC5) — test_locations includes the fixture's tests/ directory.
+  if grep -q '"test_locations": \["tests"' <<<"$out"; then
+    pass "9f test_locations includes tests/"
+  else
+    fail "9f test_locations includes tests/ (got: $(grep '"test_locations":' <<<"$out"))"
+  fi
+
+  # 9g (AC6) — discovered_docs is identical to what `specclaw-discover-context
+  # <dir> emit` produces standalone against the same directory (same script
+  # invoked, no reimplementation). Compare by applying the same json_escape
+  # transform to the standalone output and diffing against the embedded
+  # field, rather than reverse-unescaping — escaping is the one-way step both
+  # sides actually perform.
+  direct_docs="$(bash "$DISCOVER" "$AFIX/.specclaw" emit 2>/dev/null)"
+  json_escape_9g() {
+    local s="$1"
+    s="${s//\\/\\\\}"
+    s="${s//\"/\\\"}"
+    s="${s//$'\n'/\\n}"
+    s="${s//$'\r'/\\r}"
+    s="${s//$'\t'/\\t}"
+    printf '%s' "$s"
+  }
+  expected_escaped="$(json_escape_9g "$direct_docs")"
+  embedded_escaped="$(grep -o '"discovered_docs": ".*"$' <<<"$out" | sed -E 's/^"discovered_docs": "(.*)"$/\1/')"
+  assert_eq "9g discovered_docs identical to standalone discover-context emit" "$expected_escaped" "$embedded_escaped"
+
+  # 9h (AC2) — scoping to sub/ excludes every root-level manifest, and (AC5
+  # edge case) test_locations is empty since sub/ has no test-like directory.
+  sub_out="$(bash "$ANALYZE_BIN" collect "$AFIX/.specclaw" sub 2>/dev/null)"
+  if grep -q '"path": "package.json"' <<<"$sub_out" \
+     || grep -q '"path": "go.mod"' <<<"$sub_out" \
+     || grep -q '"path": "AnalyzeFixture.dproj"' <<<"$sub_out"; then
+    fail "9h sub/ scoping excludes root-level manifests (found one)"
+  else
+    pass "9h sub/ scoping excludes root-level manifests"
+  fi
+  sub_test_loc_line="$(grep '"test_locations":' <<<"$sub_out")"
+  if grep -q '"tests"' <<<"$sub_test_loc_line"; then
+    fail "9i sub/ scoping: test_locations empty (no test-like dir under sub/) (got: $sub_test_loc_line)"
+  else
+    pass "9i sub/ scoping: test_locations empty (no test-like dir under sub/)"
+  fi
+
+  # 9j (AC2) — scoping to tests/ excludes sub/'s file, every root manifest,
+  # and the root-level sample.qux LOC entry, while still reporting its own
+  # file and test_locations entry.
+  tests_out="$(bash "$ANALYZE_BIN" collect "$AFIX/.specclaw" tests 2>/dev/null)"
+  if grep -q '"path": "package.json"' <<<"$tests_out" \
+     || grep -q 'sub/extra.txt' <<<"$tests_out" \
+     || grep -q '"qux"' <<<"$tests_out"; then
+    fail "9j tests/ scoping excludes files outside it (root manifests, sub/, sample.qux)"
+  else
+    pass "9j tests/ scoping excludes files outside it (root manifests, sub/, sample.qux)"
+  fi
+  if grep -q 'tests/sample.txt' <<<"$tests_out" && grep -q '"test_locations": \["tests"' <<<"$tests_out"; then
+    pass "9k tests/ scoping still reports its own file and test_locations entry"
+  else
+    fail "9k tests/ scoping still reports its own file and test_locations entry"
+  fi
+
+  # 9l — same fixture, git-initialized copy: exercises the `git ls-files`
+  # enumeration path (the plain, non-git copy above exercises the `find`
+  # fallback). Confirms parity on the regression-sensitive facts: node
+  # manifest + version_signal, and LOC.
+  AFIX_GIT="$WORK/analyze-proj-git"
+  mkdir -p "$AFIX_GIT/.specclaw"
+  cp -R "$FIXTURES_DIR/analyze/." "$AFIX_GIT/"
+  printf 'context:\n  discovery: true\n' > "$AFIX_GIT/.specclaw/config.yaml"
+  (
+    cd "$AFIX_GIT"
+    git init -q .
+    git config user.email t@t && git config user.name t
+    git add -A && git commit -qm init
+  ) >/dev/null 2>&1
+  git_out="$(bash "$ANALYZE_BIN" collect "$AFIX_GIT/.specclaw" 2>/dev/null)"
+  node_line_git="$(grep -o '{"path": "package.json".*}' <<<"$git_out")"
+  qux_loc_git="$(grep -o '"qux": [0-9]*' <<<"$git_out" | grep -o '[0-9]*')"
+  if grep -q '"type": "node"' <<<"$node_line_git" \
+     && grep -q '"version_signal": ">=18.0.0"' <<<"$node_line_git" \
+     && [[ "$qux_loc_git" == "$hand_count" ]]; then
+    pass "9l git ls-files enumeration path matches find-fallback facts (node manifest + LOC)"
+  else
+    fail "9l git ls-files enumeration path matches find-fallback facts (got node_line=$node_line_git qux_loc=$qux_loc_git)"
+  fi
+fi
+echo
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Summary
 # ─────────────────────────────────────────────────────────────────────────────
 echo "=================================================="

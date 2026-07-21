@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <PropertyGroup>
+    <ProjectGuid>{12345678-1234-1234-1234-123456789012}</ProjectGuid>
+  </PropertyGroup>
+  <ItemGroup>
+    <DCCReference Include="AnalyzeFixture.pas"/>
+    <DCCReference Include="Unit1.pas"/>
+  </ItemGroup>
+</Project>
