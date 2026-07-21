@@ -50,7 +50,7 @@ once everything else is proven working.
     malformed file). jq-validate the final JSON when `jq` is present, print
     either way (copy `specclaw-verify collect`'s Step 8 pattern exactly).
 
-- [~] `T2` — `templates/codebase-report.md` + `agents/codebase-analyst.md`
+- [x] `T2` — `templates/codebase-report.md` + `agents/codebase-analyst.md`
   - Files: plugins/specclaw/templates/codebase-report.md, plugins/specclaw/agents/codebase-analyst.md
   - Estimate: medium
   - Depends: —
