@@ -1,11 +1,12 @@
 # 🦞 SpecClaw Dashboard
 
 **Project:** specclaw
-**Last Updated:** 2026-07-16 14:54 UTC
+**Last Updated:** 2026-07-21 10:34 UTC
 
 ## Active Changes
 
 
+- ✅ **analyze-command** — 5/5 tasks (100%) | 0 failed
 - ✅ **azure-boards-integration** — 10/10 tasks (100%) | 0 failed
 - ✅ **build-engine** — 6/6 tasks (100%) | 0 failed
 - ✅ **build-error-journal** — 3/3 tasks (100%) | 0 failed
@@ -38,6 +39,6 @@ _None._
 
 ## Stats
 
-- **Total changes:** 21
-- **Active:** 21
+- **Total changes:** 22
+- **Active:** 22
 - **Completed:** 0
