@@ -76,7 +76,7 @@ once everything else is proven working.
 
 ### Wave 2 — Orchestrating skill + regression test
 
-- [ ] `T3` — `skills/analyze/SKILL.md`
+- [x] `T3` — `skills/analyze/SKILL.md`
   - Files: plugins/specclaw/skills/analyze/SKILL.md
   - Estimate: medium
   - Depends: T1, T2
@@ -101,7 +101,7 @@ once everything else is proven working.
     low-confidence flags the agent raised. No `specclaw-validate-change`
     call anywhere in this skill.
 
-- [ ] `T4` — Fixture + parser-test case
+- [~] `T4` — Fixture + parser-test case
   - Files: plugins/specclaw/tests/fixtures/analyze/, plugins/specclaw/tests/run-parser-tests.sh
   - Estimate: medium
   - Depends: T1
