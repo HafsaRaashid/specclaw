@@ -125,7 +125,7 @@ once everything else is proven working.
 
 ### Wave 3 — Release plumbing
 
-- [ ] `T5` — README row + version bump
+- [x] `T5` — README row + version bump
   - Files: README.md, plugins/specclaw/.claude-plugin/plugin.json, .claude-plugin/marketplace.json
   - Estimate: small
   - Depends: T3, T4
