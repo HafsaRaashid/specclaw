@@ -112,6 +112,7 @@ All commands are namespaced under `/specclaw:`. Most are model-invokable — Cla
 | `/specclaw:status` | Show the project dashboard |
 | `/specclaw:analyze [path]` | Analyze an existing/legacy codebase and write `.specclaw/analysis/codebase-report.md` (read-only) |
 | `/specclaw:architecture [path]` | Write a C4-model architecture view (L1→L4, Mermaid) of an existing/legacy codebase to `.specclaw/analysis/architecture.md` (read-only) |
+| `/specclaw:domain [path]` | Write domain/functional documentation (entities, rules, capabilities, workflows, UI inventory) of an existing/legacy codebase to `.specclaw/analysis/domain-model.md` + `.specclaw/analysis/functional-spec.md` (read-only) |
 | `/specclaw:archive <change>` | Archive a completed change |
 | `/specclaw:auto` | Advance the queue of active changes autonomously |
 
