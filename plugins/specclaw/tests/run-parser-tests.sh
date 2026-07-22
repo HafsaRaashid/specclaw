@@ -14,6 +14,12 @@
 #   `<ProjectReference>` resolution kept distinct from `<PackageReference>`
 #   manifest deps, silence for uncovered ecosystems (go.mod), and
 #   path-scoping exclusion (AC1-AC7).
+# Plus FR16 (domain-command, Case 11): specclaw-domain-collect collect's
+#   merged output (delegated fields + new fields), .dfm form parsing
+#   (well-formed + malformed), handler-to-implementation resolution,
+#   Pascal type/const/validation-candidate extraction, main_form_hint,
+#   .xaml element capture, .cshtml detection-only marking, zero-eligible-
+#   file scoping, and subdirectory scoping exclusion (AC1-AC13).
 #
 # Plain bash only — no bats/npm. Run from anywhere:
 #   bash plugins/specclaw/tests/run-parser-tests.sh
@@ -670,6 +676,216 @@ else
     pass "10h Other/ scoping excludes the project_reference edge whose 'from' endpoint is outside scope"
   else
     fail "10h Other/ scoping excludes the project_reference edge whose 'from' endpoint is outside scope (got: $(grep -E '\"from\":' <<<"$scoped_out"))"
+  fi
+fi
+echo
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Case 11 — specclaw-domain-collect collect: merged output (delegated fields
+# plus new domain fields), .dfm form parsing (well-formed + malformed),
+# handler-to-implementation resolution, Pascal type/const/validation-
+# candidate extraction, main_form_hint, .xaml element capture, .cshtml
+# detection-only marking, zero-eligible-file scoping, and subdirectory
+# scoping exclusion (FR16, AC1-AC13). Fixtures live under
+# tests/fixtures/analyze/domain/ — extending the existing analyze/ fixture
+# tree, not a parallel one (domain/MainApp.dpr, domain/ui/*).
+# ─────────────────────────────────────────────────────────────────────────────
+echo "--- Case 11: specclaw-domain-collect collect — forms, handlers, types, consts, validation candidates, main_form_hint, xaml, cshtml, scoping ---"
+DOMAIN_BIN="$BIN_DIR/specclaw-domain-collect"
+if [[ ! -f "$DOMAIN_BIN" ]]; then
+  fail "specclaw-domain-collect missing"
+else
+  DOMFIX="$WORK/domain-proj"
+  mkdir -p "$DOMFIX/.specclaw"
+  cp -R "$FIXTURES_DIR/analyze/." "$DOMFIX/"
+  printf 'context:\n  discovery: true\n' > "$DOMFIX/.specclaw/config.yaml"
+
+  out="$(bash "$DOMAIN_BIN" collect "$DOMFIX/.specclaw" 2>/dev/null)"
+
+  # 11a (AC1) — merged output includes every delegated field
+  # (specclaw-analyze-codebase's own fields) plus every new domain field,
+  # flat (not nested under a sub-key).
+  missing=""
+  for field in '"path":' '"project_root":' '"top_level_dirs":' '"manifests":' \
+               '"loc_by_extension":' '"test_locations":' '"dependency_graph":' \
+               '"discovered_docs":' '"forms":' '"xaml_forms":' '"other_ui_files":' \
+               '"handler_implementations":' '"main_form_hint":' '"type_declarations":' \
+               '"const_declarations":' '"validation_routine_candidates":'; do
+    grep -q "$field" <<<"$out" || missing="$missing $field"
+  done
+  if [[ -z "$missing" ]]; then
+    pass "11a merged output has every delegated field plus every new domain field"
+  else
+    fail "11a merged output has every delegated field plus every new domain field (missing:$missing)"
+  fi
+
+  # 11b (AC2) — the well-formed MainForm.dfm: correct root_name/root_class/
+  # root_caption, header line up through the start of its controls[] array.
+  if grep -qF '{"file": "domain/ui/MainForm.dfm", "parseable": true, "root_name": "MainForm", "root_class": "TMainForm", "root_caption": "Main Form", "controls": [' <<<"$out"; then
+    pass "11b MainForm.dfm: parseable, correct root_name/root_class/root_caption"
+  else
+    fail "11b MainForm.dfm: parseable, correct root_name/root_class/root_caption"
+  fi
+
+  # 11c (AC2) — the top-level TButton control carries its Caption.
+  if grep -qF '{"name": "OKButton", "class": "TButton", "caption": "OK"}' <<<"$out"; then
+    pass "11c MainForm.dfm: top-level control caption (OKButton = 'OK')"
+  else
+    fail "11c MainForm.dfm: top-level control caption (OKButton = 'OK')"
+  fi
+
+  # 11d (AC2) — THE critical assertion: the deepest menu item (root form ->
+  # TMainMenu -> FileMenu -> RecentFilesItem, 4 objects / 3 levels below the
+  # root) still has its OnClick handler captured in handlers[], proving
+  # handler capture is not depth-capped the way controls[] is.
+  if grep -qF '{"object_name": "RecentFilesItem", "object_class": "TMenuItem", "event": "OnClick", "handler_name": "RecentFileClick"}' <<<"$out"; then
+    pass "11d MainForm.dfm: deep (3+ levels) menu item's OnClick handler captured in handlers[]"
+  else
+    fail "11d MainForm.dfm: deep (3+ levels) menu item's OnClick handler captured in handlers[]"
+  fi
+
+  # 11e (AC3) — the malformed Broken.dfm is marked parseable:false with a
+  # reason string — no crash, no silent omission.
+  if grep -qF '{"file": "domain/ui/Broken.dfm", "parseable": false, "reason": "binary DFM format (or unrecognized text structure)"}' <<<"$out"; then
+    pass "11e Broken.dfm: parseable:false with reason, no crash"
+  else
+    fail "11e Broken.dfm: parseable:false with reason, no crash"
+  fi
+
+  # 11f (AC4) — OKButtonClick has a matching `procedure TMainForm.OKButtonClick`
+  # implementation in MainForm.pas; handler_implementations[] resolves it to
+  # the correct file and the correct line (computed dynamically from the
+  # fixture file itself, not hardcoded).
+  expected_line="$(grep -n '^procedure TMainForm\.OKButtonClick' "$FIXTURES_DIR/analyze/domain/ui/MainForm.pas" | head -1 | cut -d: -f1)"
+  if [[ -n "$expected_line" ]] && grep -qF "{\"handler_name\": \"OKButtonClick\", \"file\": \"domain/ui/MainForm.pas\", \"line\": ${expected_line}}" <<<"$out"; then
+    pass "11f handler_implementations: OKButtonClick resolves to MainForm.pas:$expected_line"
+  else
+    fail "11f handler_implementations: OKButtonClick resolves to MainForm.pas:$expected_line (got: $(grep -o '{"handler_name": "OKButtonClick".*}' <<<"$out"))"
+  fi
+
+  # 11g (AC4) — RecentFileClick has NO implementation anywhere in the
+  # fixture; handler_implementations[] must NOT contain an entry for it
+  # (omitted, not guessed). Note: "handler_name": "RecentFileClick" DOES
+  # legitimately appear inside forms[].handlers[] (confirmed by 11d) — this
+  # checks the distinct handler_implementations[] entry shape
+  # (`{"handler_name": ..., "file": ...}`, no "object_name"/"object_class"/
+  # "event" keys), not a bare substring search across the whole output.
+  if grep -q '{"handler_name": "RecentFileClick", "file":' <<<"$out"; then
+    fail "11g handler_implementations: RecentFileClick (no impl in fixture) correctly absent (found an entry)"
+  else
+    pass "11g handler_implementations: RecentFileClick (no impl in fixture) correctly absent"
+  fi
+
+  # 11h (AC5) — the TWaterQuality enum: full, correctly-ordered values[].
+  if grep -qF '{"name": "TWaterQuality", "kind": "enum", "values": ["wqNone", "wqChem", "wqTrace", "wqAge"], "file": "domain/ui/Types.pas"' <<<"$out"; then
+    pass "11h type_declarations: TWaterQuality enum with full, ordered values[]"
+  else
+    fail "11h type_declarations: TWaterQuality enum with full, ordered values[]"
+  fi
+
+  # 11i (AC6) — the TReading record: name/kind only, no fabricated field
+  # list (the JSON shape itself has no field-list key for record/class).
+  if grep -qF '{"name": "TReading", "kind": "record", "file": "domain/ui/Types.pas"' <<<"$out"; then
+    pass "11i type_declarations: TReading record, name/kind only (no fabricated fields)"
+  else
+    fail "11i type_declarations: TReading record, name/kind only (no fabricated fields)"
+  fi
+
+  # 11j (AC7) — the const block: correct name/value pairs for both simple
+  # scalar values (a number and a quoted string).
+  if grep -qF '{"name": "MaxReadings", "value": "100", "file": "domain/ui/Types.pas"' <<<"$out" \
+     && grep -qF "{\"name\": \"DefaultUnit\", \"value\": \"'ppm'\", \"file\": \"domain/ui/Types.pas\"" <<<"$out"; then
+    pass "11j const_declarations: MaxReadings=100 and DefaultUnit='ppm' correctly captured"
+  else
+    fail "11j const_declarations: MaxReadings=100 and DefaultUnit='ppm' correctly captured"
+  fi
+
+  # 11k (AC8) — the ValidateReading candidate's captured body includes its
+  # guard clause text, correctly bounded: it must NOT bleed into the
+  # following ComputeAverage routine's code.
+  validate_entry="$(grep -o '{"name": "ValidateReading".*}' <<<"$out")"
+  if grep -qF 'if Value < 0 then' <<<"$validate_entry" && ! grep -q 'ComputeAverage' <<<"$validate_entry"; then
+    pass "11k validation_routine_candidates: ValidateReading body includes guard clause, bounded (no bleed into ComputeAverage)"
+  else
+    fail "11k validation_routine_candidates: ValidateReading body includes guard clause, bounded (got: $validate_entry)"
+  fi
+
+  # 11l (AC8 edge case) — CanRedo is NOT actually a validation routine, but
+  # still surfaced as a candidate (the name heuristic alone decides
+  # inclusion; the agent decides relevance later, not this bash layer).
+  if grep -q '"name": "CanRedo"' <<<"$out"; then
+    pass "11l validation_routine_candidates: CanRedo (false positive) still surfaced as a candidate"
+  else
+    fail "11l validation_routine_candidates: CanRedo (false positive) still surfaced as a candidate"
+  fi
+
+  # 11m (AC9) — MainApp.dpr's first Application.CreateForm call produces the
+  # correct main_form_hint when it is in scope.
+  if grep -qF '"main_form_hint": "TMainForm"' <<<"$out"; then
+    pass "11m main_form_hint: TMainForm detected from MainApp.dpr's Application.CreateForm call"
+  else
+    fail "11m main_form_hint: TMainForm detected from MainApp.dpr's Application.CreateForm call"
+  fi
+
+  # 11n (AC9) — scoping to domain/ui (excludes domain/MainApp.dpr, the only
+  # .dpr in the fixture) leaves main_form_hint null while forms[] still
+  # contains every detected form (both MainForm and Broken).
+  ui_out="$(bash "$DOMAIN_BIN" collect "$DOMFIX/.specclaw" domain/ui 2>/dev/null)"
+  if grep -qF '"main_form_hint": null' <<<"$ui_out" \
+     && grep -qF '{"file": "domain/ui/MainForm.dfm", "parseable": true, "root_name": "MainForm", "root_class": "TMainForm"' <<<"$ui_out" \
+     && grep -qF '{"file": "domain/ui/Broken.dfm", "parseable": false' <<<"$ui_out"; then
+    pass "11n main_form_hint absent when .dpr excluded from scope; forms[] still fully populated"
+  else
+    fail "11n main_form_hint absent when .dpr excluded from scope; forms[] still fully populated (got main_form_hint: $(grep -o '"main_form_hint": [^,]*' <<<"$ui_out"))"
+  fi
+
+  # 11o (AC10) — the .xaml file's direct-child-of-root element (one level of
+  # nesting, per FR5) with x:Name and a Content attribute is captured.
+  if grep -qF '{"name": "Button", "x_name": "SubmitButton", "content": "Submit"}' <<<"$out"; then
+    pass "11o xaml_forms: direct-child element x:Name + Content captured at the specified depth"
+  else
+    fail "11o xaml_forms: direct-child element x:Name + Content captured at the specified depth"
+  fi
+
+  # 11p (AC11) — the .cshtml file is marked detection-only, never silently
+  # absent, never deep-parsed.
+  if grep -qF '{"file": "domain/ui/Index.cshtml", "parseable": false, "reason": "not deep-parsed in v1 — detection only"}' <<<"$out"; then
+    pass "11p other_ui_files: Index.cshtml marked detection-only"
+  else
+    fail "11p other_ui_files: Index.cshtml marked detection-only"
+  fi
+
+  # 11q (AC12, NFR1) — a zero-eligible-file scope (the pre-existing sub/
+  # directory, which has no .dfm/.xaml/.pas/.cs/.dpr content) yields empty
+  # arrays for every new field, not a crash. Whitespace-stripped comparison
+  # sidesteps incidental pretty-printing differences across the nested
+  # array fields.
+  sub_out="$(bash "$DOMAIN_BIN" collect "$DOMFIX/.specclaw" sub 2>/dev/null)"
+  sub_compact="$(tr -d '[:space:]' <<<"$sub_out")"
+  if grep -qF '"forms":[]' <<<"$sub_compact" && grep -qF '"xaml_forms":[]' <<<"$sub_compact" \
+     && grep -qF '"other_ui_files":[]' <<<"$sub_compact" && grep -qF '"handler_implementations":[]' <<<"$sub_compact" \
+     && grep -qF '"type_declarations":[]' <<<"$sub_compact" && grep -qF '"const_declarations":[]' <<<"$sub_compact" \
+     && grep -qF '"validation_routine_candidates":[]' <<<"$sub_compact" && grep -qF '"main_form_hint":null' <<<"$sub_compact"; then
+    pass "11q sub/ scoping (zero eligible files): every new field is an empty array/null, no crash"
+  else
+    fail "11q sub/ scoping (zero eligible files): every new field is an empty array/null, no crash (got: $sub_compact)"
+  fi
+
+  # 11r (AC13) — subdirectory scoping excludes out-of-scope entities from
+  # every new field, same discipline manifests/dependency_graph already
+  # have: scoping to domain/ui excludes UnitA.pas's TUnitA class (fixture
+  # root, outside domain/ui) from type_declarations[], while domain/ui's own
+  # TWaterQuality and the OKButtonClick handler resolution remain present.
+  if grep -q '"name": "TUnitA"' <<<"$ui_out"; then
+    fail "11r domain/ui scoping excludes out-of-scope TUnitA (found it)"
+  else
+    pass "11r domain/ui scoping excludes out-of-scope TUnitA (fixture root, outside domain/ui)"
+  fi
+  if grep -qF '"name": "TWaterQuality"' <<<"$ui_out" \
+     && grep -qF '{"handler_name": "OKButtonClick", "file": "domain/ui/MainForm.pas"' <<<"$ui_out"; then
+    pass "11r domain/ui scoping still includes in-scope entities (TWaterQuality, OKButtonClick resolution)"
+  else
+    fail "11r domain/ui scoping still includes in-scope entities (TWaterQuality, OKButtonClick resolution)"
   fi
 fi
 echo
