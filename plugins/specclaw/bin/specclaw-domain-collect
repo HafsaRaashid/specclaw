@@ -368,6 +368,309 @@ detect_main_form() {
   printf '"%s"' "$(json_escape "$cls")"
 }
 
+# ─── Pascal `interface`-section type declarations — gather_type_declarations ─
+#
+# Bounded-block scan: a line that is exactly `interface` opens the section, a
+# line that is exactly `implementation` closes it — same in-section idiom
+# `extract_maven_deps` (in specclaw-analyze-codebase) uses for its
+# <dependency>...</dependency> block. An enum's identifier list may span
+# multiple lines before its closing `);` — accumulated into a buffer the same
+# way `extract_uses_clause_units` accumulates a multi-line `uses` clause,
+# then split on commas. `record`/`class` declarations are captured
+# name/kind/location only — field lists are never parsed here (the agent
+# reads the file itself for those).
+
+PAS_INTERFACE_RE='^interface[[:space:]]*$'
+PAS_IMPLEMENTATION_RE='^implementation[[:space:]]*$'
+PAS_TYPE_ENUM_START_RE='^[[:space:]]*([A-Za-z_][A-Za-z0-9_]*)[[:space:]]*=[[:space:]]*\((.*)$'
+PAS_TYPE_RECORD_CLASS_RE='^[[:space:]]*([A-Za-z_][A-Za-z0-9_]*)[[:space:]]*=[[:space:]]*(record|class)([^A-Za-z0-9_]|$)'
+
+# Parse one .pas file's interface-section enum/record/class type
+# declarations. Best-effort: never aborts the script on a malformed or
+# unreadable file. Emits zero or more JSON entries (each prefixed with its
+# own leading newline + indent, matching this script's other gather_*
+# accumulation style); prints nothing if the file has no interface section or
+# no matching declarations.
+parse_one_pas_types() {
+  local abs_file="$1" rel_file="$2"
+  [ -r "$abs_file" ] || return 0
+
+  local in_interface=false accumulating=false
+  local buf="" start_line=0 enum_name=""
+  local line line_num=0
+  local out="" first=true
+
+  while IFS= read -r line || [ -n "$line" ]; do
+    line_num=$((line_num + 1))
+    line="${line%$'\r'}"
+
+    if ! $in_interface; then
+      [[ "$line" =~ $PAS_INTERFACE_RE ]] && in_interface=true
+      continue
+    fi
+    if [[ "$line" =~ $PAS_IMPLEMENTATION_RE ]]; then
+      in_interface=false
+      accumulating=false
+      continue
+    fi
+
+    if $accumulating; then
+      buf="${buf} ${line}"
+    elif [[ "$line" =~ $PAS_TYPE_ENUM_START_RE ]]; then
+      enum_name="${BASH_REMATCH[1]}"
+      buf="${BASH_REMATCH[2]}"
+      start_line=$line_num
+      accumulating=true
+    elif [[ "$line" =~ $PAS_TYPE_RECORD_CLASS_RE ]]; then
+      local rname="${BASH_REMATCH[1]}" rkind="${BASH_REMATCH[2]}"
+      if $first; then first=false; else out="${out},"; fi
+      out="${out}
+    {\"name\": \"$(json_escape "$rname")\", \"kind\": \"$(json_escape "$rkind")\", \"file\": \"$(json_escape "$rel_file")\", \"line\": ${line_num}}"
+      continue
+    else
+      continue
+    fi
+
+    if $accumulating && [[ "$buf" == *\)\;* ]]; then
+      local list="${buf%%\)\;*}"
+      local IFS_OLD="$IFS"
+      IFS=','
+      local -a ids=($list)
+      IFS="$IFS_OLD"
+      local values_json="" first_val=true id
+      for id in "${ids[@]}"; do
+        id="${id#"${id%%[![:space:]]*}"}"
+        id="${id%"${id##*[![:space:]]}"}"
+        [ -z "$id" ] && continue
+        if $first_val; then first_val=false; else values_json="${values_json}, "; fi
+        values_json="${values_json}\"$(json_escape "$id")\""
+      done
+      if $first; then first=false; else out="${out},"; fi
+      out="${out}
+    {\"name\": \"$(json_escape "$enum_name")\", \"kind\": \"enum\", \"values\": [${values_json}], \"file\": \"$(json_escape "$rel_file")\", \"line\": ${start_line}}"
+      accumulating=false
+      buf=""
+    fi
+  done < "$abs_file"
+
+  printf '%s' "$out"
+}
+
+# Usage: gather_type_declarations <scoped_files_file> <project_root>
+gather_type_declarations() {
+  local files_file="$1" project_root="$2"
+  local out="" first=true
+  local rel entry
+  while IFS= read -r rel; do
+    [ -z "$rel" ] && continue
+    case "$rel" in *.pas) ;; *) continue ;; esac
+    entry="$(parse_one_pas_types "$project_root/$rel" "$rel")"
+    [ -z "$entry" ] && continue
+    if $first; then first=false; else out="${out},"; fi
+    out="${out}${entry}"
+  done < "$files_file"
+  printf '%s' "$out"
+}
+
+# ─── Pascal `interface`-section const declarations — gather_const_declarations
+#
+# Same `interface`/`implementation` bounded scan as gather_type_declarations,
+# plus a nested `const` sub-block: a line matching `^const\b` opens it, the
+# next `type`/`var`/`implementation`/`interface` keyword line closes it. Only
+# simple scalar values (a bare number or a single-quoted string — not a
+# computed expression or a reference to another identifier) are captured;
+# the raw text of the value is recorded as-is (quotes included for strings),
+# not unescaped/re-typed.
+
+PAS_CONST_START_RE='^const[[:space:]]*$'
+PAS_CONST_END_RE='^(type|var|implementation|interface)[[:space:]]*$'
+PAS_CONST_LINE_RE="^[[:space:]]*([A-Za-z_][A-Za-z0-9_]*)[[:space:]]*=[[:space:]]*('[^']*'|-?[0-9]+(\.[0-9]+)?)[[:space:]]*;"
+
+# Parse one .pas file's interface-section const declarations. Best-effort:
+# never aborts the script on a malformed or unreadable file.
+parse_one_pas_consts() {
+  local abs_file="$1" rel_file="$2"
+  [ -r "$abs_file" ] || return 0
+
+  local in_interface=false in_const=false
+  local line line_num=0
+  local out="" first=true
+
+  while IFS= read -r line || [ -n "$line" ]; do
+    line_num=$((line_num + 1))
+    line="${line%$'\r'}"
+
+    if ! $in_interface; then
+      [[ "$line" =~ $PAS_INTERFACE_RE ]] && in_interface=true
+      continue
+    fi
+    if [[ "$line" =~ $PAS_IMPLEMENTATION_RE ]]; then
+      in_interface=false
+      in_const=false
+      continue
+    fi
+
+    if $in_const; then
+      if [[ "$line" =~ $PAS_CONST_END_RE ]]; then
+        in_const=false
+        continue
+      fi
+      if [[ "$line" =~ $PAS_CONST_LINE_RE ]]; then
+        local cname="${BASH_REMATCH[1]}" cval="${BASH_REMATCH[2]}"
+        if $first; then first=false; else out="${out},"; fi
+        out="${out}
+    {\"name\": \"$(json_escape "$cname")\", \"value\": \"$(json_escape "$cval")\", \"file\": \"$(json_escape "$rel_file")\", \"line\": ${line_num}}"
+      fi
+      continue
+    fi
+
+    [[ "$line" =~ $PAS_CONST_START_RE ]] && in_const=true
+  done < "$abs_file"
+
+  printf '%s' "$out"
+}
+
+# Usage: gather_const_declarations <scoped_files_file> <project_root>
+gather_const_declarations() {
+  local files_file="$1" project_root="$2"
+  local out="" first=true
+  local rel entry
+  while IFS= read -r rel; do
+    [ -z "$rel" ] && continue
+    case "$rel" in *.pas) ;; *) continue ;; esac
+    entry="$(parse_one_pas_consts "$project_root/$rel" "$rel")"
+    [ -z "$entry" ] && continue
+    if $first; then first=false; else out="${out},"; fi
+    out="${out}${entry}"
+  done < "$files_file"
+  printf '%s' "$out"
+}
+
+# ─── Business-rule candidate extraction — gather_validation_candidates ──────
+#
+# Scans every scoped .pas and .cs file for routine signatures whose name
+# starts with, case-insensitively, "valid" (covers "validate" too), "check",
+# or "can" — false positives like `CanRedo` are expected and accepted (the
+# agent decides relevance later, not this bash layer). For each match, the
+# full routine body is captured via a depth-counted scan: the first `begin`
+# line after the signature (skipping any local var declarations in between)
+# opens the body, then `begin`/`end;` (case-insensitive) track depth until it
+# returns to 0 — the matching top-level `end;`. Capped at 100 lines,
+# truncation labeled the same way `specclaw-verify collect` labels its own
+# 200-line file cap ("... (truncated, N total lines)").
+#
+# Known, accepted limitation (spec FR10): this depth counter has no concept
+# of comments or string literals — a comment or string containing the
+# literal word "begin"/"end" can misalign it. Same best-effort, no-real-
+# parser tolerance every extractor in this script and its sibling
+# specclaw-analyze-codebase already accepts.
+
+VALIDATION_NAME_RE='^(valid|check|can)'
+PAS_ROUTINE_SIG_RE='^[[:space:]]*(procedure|function)[[:space:]]+([A-Za-z_][A-Za-z0-9_]*\.)?([A-Za-z_][A-Za-z0-9_]*)[[:space:]]*\('
+CS_ROUTINE_SIG_RE='^[[:space:]]*(public|private|protected|internal|static)[[:space:]]+.*[[:space:]]([A-Za-z_][A-Za-z0-9_]*)[[:space:]]*\('
+VALIDATION_BEGIN_RE='^[[:space:]]*[Bb][Ee][Gg][Ii][Nn]([^A-Za-z0-9_]|$)'
+VALIDATION_END_RE='^[[:space:]]*[Ee][Nn][Dd];[[:space:]]*$'
+
+# Parse one .pas or .cs file for validation-candidate routines. Best-effort:
+# never aborts on a malformed or unreadable file. Reads the whole file into
+# an array once so the body can be looked ahead for its opening `begin` and
+# matching `end;` without re-reading the file per match.
+parse_one_validation_file() {
+  local abs_file="$1" rel_file="$2" sig_re="$3" name_group="$4"
+  [ -r "$abs_file" ] || return 0
+
+  local -a lines=()
+  local line
+  while IFS= read -r line || [ -n "$line" ]; do
+    line="${line%$'\r'}"
+    lines+=("$line")
+  done < "$abs_file"
+
+  local total=${#lines[@]}
+  local out="" first=true
+  local i
+  for ((i = 0; i < total; i++)); do
+    line="${lines[$i]}"
+    [[ "$line" =~ $sig_re ]] || continue
+    local name="${BASH_REMATCH[$name_group]}"
+    local name_lower
+    name_lower="$(printf '%s' "$name" | tr '[:upper:]' '[:lower:]')"
+    [[ "$name_lower" =~ $VALIDATION_NAME_RE ]] || continue
+
+    local sig_line_num=$((i + 1))
+
+    # Find the first `begin` after the signature, skipping any local var
+    # declarations in between. A forward/interface declaration (no body of
+    # its own — its actual implementation, if any, appears later in the
+    # file and is matched independently when the outer loop reaches it) is
+    # recognized by hitting another routine signature or an
+    # interface/implementation keyword line before any `begin` — bail
+    # without emitting rather than misattributing a later routine's body.
+    local j=$((i + 1)) found_begin=false
+    while [ "$j" -lt "$total" ]; do
+      if [[ "${lines[$j]}" =~ $VALIDATION_BEGIN_RE ]]; then
+        found_begin=true
+        break
+      fi
+      if [[ "${lines[$j]}" =~ $sig_re ]] || [[ "${lines[$j]}" =~ $PAS_IMPLEMENTATION_RE ]] || [[ "${lines[$j]}" =~ $PAS_INTERFACE_RE ]]; then
+        break
+      fi
+      j=$((j + 1))
+    done
+    $found_begin || continue
+
+    local depth=1 k=$((j + 1))
+    local -a body_lines=()
+    while [ "$k" -lt "$total" ] && [ "$depth" -gt 0 ]; do
+      local bline="${lines[$k]}"
+      body_lines+=("$bline")
+      [[ "$bline" =~ $VALIDATION_BEGIN_RE ]] && depth=$((depth + 1))
+      [[ "$bline" =~ $VALIDATION_END_RE ]] && depth=$((depth - 1))
+      k=$((k + 1))
+    done
+
+    local total_body=${#body_lines[@]}
+    local -a capped=("${body_lines[@]}")
+    [ "$total_body" -gt 100 ] && capped=("${body_lines[@]:0:100}")
+
+    local body="" bl
+    for bl in "${capped[@]}"; do
+      if [ -z "$body" ]; then body="$bl"; else body="${body}
+${bl}"; fi
+    done
+    if [ "$total_body" -gt 100 ]; then
+      body="${body}
+... (truncated, ${total_body} total lines)"
+    fi
+
+    if $first; then first=false; else out="${out},"; fi
+    out="${out}
+    {\"name\": \"$(json_escape "$name")\", \"file\": \"$(json_escape "$rel_file")\", \"line\": ${sig_line_num}, \"body\": \"$(json_escape "$body")\"}"
+  done
+
+  printf '%s' "$out"
+}
+
+# Usage: gather_validation_candidates <scoped_files_file> <project_root>
+gather_validation_candidates() {
+  local files_file="$1" project_root="$2"
+  local out="" first=true
+  local rel entry sig_re name_group
+  while IFS= read -r rel; do
+    [ -z "$rel" ] && continue
+    case "$rel" in
+      *.pas) sig_re="$PAS_ROUTINE_SIG_RE"; name_group=3 ;;
+      *.cs)  sig_re="$CS_ROUTINE_SIG_RE";  name_group=2 ;;
+      *) continue ;;
+    esac
+    entry="$(parse_one_validation_file "$project_root/$rel" "$rel" "$sig_re" "$name_group")"
+    [ -z "$entry" ] && continue
+    if $first; then first=false; else out="${out},"; fi
+    out="${out}${entry}"
+  done < "$files_file"
+  printf '%s' "$out"
+}
+
 # ─── Subcommand: collect ──────────────────────────────────────────────────────
 
 cmd_collect() {
@@ -445,6 +748,7 @@ cmd_collect() {
   handler_names_sorted="$(mktemp)"
 
   local forms_json xaml_json other_ui_json handler_impls_json main_form_hint_json
+  local type_decls_json const_decls_json validation_cands_json
   forms_json="$(gather_dfm_forms "$tmp_scoped" "$project_root" "$handler_names_tmp")"
   xaml_json="$(gather_xaml_forms "$tmp_scoped" "$project_root")"
   other_ui_json="$(gather_other_ui_files "$tmp_scoped")"
@@ -452,6 +756,9 @@ cmd_collect() {
   sort -u "$handler_names_tmp" > "$handler_names_sorted" 2>/dev/null || true
   handler_impls_json="$(resolve_handler_implementations "$handler_names_sorted" "$tmp_scoped" "$project_root")"
   main_form_hint_json="$(detect_main_form "$tmp_scoped" "$project_root")"
+  type_decls_json="$(gather_type_declarations "$tmp_scoped" "$project_root")"
+  const_decls_json="$(gather_const_declarations "$tmp_scoped" "$project_root")"
+  validation_cands_json="$(gather_validation_candidates "$tmp_scoped" "$project_root")"
 
   rm -f "$tmp_all" "$tmp_scoped" "$handler_names_tmp" "$handler_names_sorted"
 
@@ -468,7 +775,13 @@ cmd_collect() {
   ],
   "handler_implementations": [${handler_impls_json}
   ],
-  "main_form_hint": ${main_form_hint_json}
+  "main_form_hint": ${main_form_hint_json},
+  "type_declarations": [${type_decls_json}
+  ],
+  "const_declarations": [${const_decls_json}
+  ],
+  "validation_routine_candidates": [${validation_cands_json}
+  ]
 }
 ENDJSON
 )
