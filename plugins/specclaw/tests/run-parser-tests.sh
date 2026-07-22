@@ -8,6 +8,12 @@
 #       with/without **bold**.
 #   B4: verify collect parses `Files:` lines that begin with a `  - ` bullet.
 # Plus NFR2: existing in-repo change docs still parse (no regression).
+# Plus FR3 (architecture-command, Case 10): analyze-codebase collect's
+#   dependency_graph extraction — Delphi `uses` resolution (and RTL-name
+#   non-resolution), Node/JS relative `require`/`import` resolution, .NET
+#   `<ProjectReference>` resolution kept distinct from `<PackageReference>`
+#   manifest deps, silence for uncovered ecosystems (go.mod), and
+#   path-scoping exclusion (AC1-AC7).
 #
 # Plain bash only — no bats/npm. Run from anywhere:
 #   bash plugins/specclaw/tests/run-parser-tests.sh
@@ -570,6 +576,100 @@ else
     pass "9l git ls-files enumeration path matches find-fallback facts (node manifest + LOC)"
   else
     fail "9l git ls-files enumeration path matches find-fallback facts (got node_line=$node_line_git qux_loc=$qux_loc_git)"
+  fi
+fi
+echo
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Case 10 — analyze-codebase collect: dependency_graph extraction (FR3/FR4,
+# AC1-AC7) — Delphi `uses` resolution (incl. RTL-name non-resolution),
+# Node/JS relative `require` resolution, .NET `<ProjectReference>` resolution
+# kept distinct from `<PackageReference>` manifest deps, silence for
+# uncovered ecosystems (go.mod with no .go source), and path-scoping
+# exclusion (same discipline as Case 9's manifest/LOC scoping).
+# ─────────────────────────────────────────────────────────────────────────────
+echo "--- Case 10: analyze-codebase collect — dependency_graph ---"
+if [[ ! -f "$ANALYZE_BIN" ]]; then
+  fail "specclaw-analyze-codebase missing"
+else
+  DFIX="$WORK/analyze-depgraph-proj"
+  mkdir -p "$DFIX/.specclaw"
+  cp -R "$FIXTURES_DIR/analyze/." "$DFIX/"
+  printf 'context:\n  discovery: true\n' > "$DFIX/.specclaw/config.yaml"
+
+  dout="$(bash "$ANALYZE_BIN" collect "$DFIX/.specclaw" 2>/dev/null)"
+  edge_lines="$(grep -E '"from": "[^"]*"' <<<"$dout")"
+
+  # 10a (AC1) — dependency_graph field present alongside every pre-existing
+  # field, on the extended fixture (additive, no regression).
+  if grep -q '"path":' <<<"$dout" && grep -q '"project_root":' <<<"$dout" \
+     && grep -q '"top_level_dirs":' <<<"$dout" && grep -q '"manifests":' <<<"$dout" \
+     && grep -q '"loc_by_extension":' <<<"$dout" && grep -q '"test_locations":' <<<"$dout" \
+     && grep -q '"dependency_graph":' <<<"$dout" && grep -q '"discovered_docs":' <<<"$dout"; then
+    pass "10a dependency_graph present alongside every pre-existing field"
+  else
+    fail "10a dependency_graph present alongside every pre-existing field"
+  fi
+
+  # 10b (AC2) — UnitA.pas's `uses` clause reference to UnitB.pas (in scope)
+  # resolves to a "uses" edge.
+  if grep -qF '{"from": "UnitA.pas", "to": "UnitB.pas", "kind": "uses"}' <<<"$dout"; then
+    pass "10b UnitA.pas -> UnitB.pas uses edge"
+  else
+    fail "10b UnitA.pas -> UnitB.pas uses edge (edges: $edge_lines)"
+  fi
+
+  # 10c (AC3) — the RTL-style `SysUtils` reference in the same `uses` clause
+  # has no corresponding file in the fixture, so it produces no edge.
+  if grep -q "SysUtils" <<<"$edge_lines"; then
+    fail "10c unresolved SysUtils reference produces no edge (found SysUtils in an edge)"
+  else
+    pass "10c unresolved SysUtils reference produces no edge"
+  fi
+
+  # 10d (AC4) — a.js's relative `require('./b')` resolves to b.js with kind
+  # "import".
+  if grep -qF '{"from": "a.js", "to": "b.js", "kind": "import"}' <<<"$dout"; then
+    pass "10d a.js -> b.js import edge"
+  else
+    fail "10d a.js -> b.js import edge (edges: $edge_lines)"
+  fi
+
+  # 10e (AC5) — App.csproj's <ProjectReference Include="Other/Other.csproj">
+  # produces a project_reference edge...
+  if grep -qF '{"from": "App.csproj", "to": "Other/Other.csproj", "kind": "project_reference"}' <<<"$dout"; then
+    pass "10e App.csproj -> Other/Other.csproj project_reference edge"
+  else
+    fail "10e App.csproj -> Other/Other.csproj project_reference edge (edges: $edge_lines)"
+  fi
+
+  # ...and that same path does NOT leak into App.csproj's own manifest
+  # `dependencies` list, which must contain only the <PackageReference>
+  # (Newtonsoft.Json) — <ProjectReference> stays a distinct field.
+  app_manifest_line="$(grep -o '{"path": "App.csproj".*}' <<<"$dout")"
+  app_deps="$(grep -o '"dependencies": \[[^]]*\]' <<<"$app_manifest_line")"
+  assert_eq "10f App.csproj manifest dependencies is [Newtonsoft.Json] only (no ProjectReference leak)" \
+    '"dependencies": ["Newtonsoft.Json"]' "$app_deps"
+
+  # 10g (AC6) — the go.mod fixture (no .go source file) contributes zero
+  # dependency_graph entries: no edge mentions go.mod or any .go path.
+  if grep -qE 'go\.mod|\.go"' <<<"$edge_lines"; then
+    fail "10g go.mod contributes zero dependency_graph entries (found a go reference in an edge)"
+  else
+    pass "10g go.mod contributes zero dependency_graph entries"
+  fi
+
+  # 10h (AC7) — scoping: collect .specclaw Other isolates a subdir containing
+  # only one of the new files (Other/Other.csproj); the App.csproj ->
+  # Other/Other.csproj edge must be excluded since its `from` endpoint
+  # (App.csproj) falls outside the scoped subdir — same discipline as Case
+  # 9's manifest/LOC scoping (9h-9j).
+  scoped_out="$(bash "$ANALYZE_BIN" collect "$DFIX/.specclaw" Other 2>/dev/null)"
+  if grep -q '"dependency_graph":' <<<"$scoped_out" \
+     && ! grep -qF '{"from": "App.csproj", "to": "Other/Other.csproj", "kind": "project_reference"}' <<<"$scoped_out"; then
+    pass "10h Other/ scoping excludes the project_reference edge whose 'from' endpoint is outside scope"
+  else
+    fail "10h Other/ scoping excludes the project_reference edge whose 'from' endpoint is outside scope (got: $(grep -E '\"from\":' <<<"$scoped_out"))"
   fi
 fi
 echo

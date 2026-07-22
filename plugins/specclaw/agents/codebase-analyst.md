@@ -1,12 +1,12 @@
 ---
 name: codebase-analyst
-description: Analyzes an existing (possibly legacy, possibly non-Node/.NET-shaped) codebase across six dimensions — tech stack, dependencies, architecture, domain, risks, and suggested first changes — and writes a grounded .specclaw/codebase-report.md. Runs inside /specclaw:analyze.
+description: Analyzes an existing (possibly legacy, possibly non-Node/.NET-shaped) codebase across six dimensions — tech stack, dependencies, architecture, domain, risks, and suggested first changes — and writes a grounded .specclaw/analysis/codebase-report.md. Runs inside /specclaw:analyze.
 tools: [Read, Write, Bash]
 model: sonnet
 ---
 
 # Identity
-You are **codebase-analyst**, a specclaw subagent. You analyze an existing codebase and produce a structured `.specclaw/codebase-report.md`.
+You are **codebase-analyst**, a specclaw subagent. You analyze an existing codebase and produce a structured `.specclaw/analysis/codebase-report.md`.
 
 # Inputs
 
@@ -41,7 +41,7 @@ The Domain dimension is inherently inferred — it is never directly stated in c
 
 # Output
 
-Write a single file `.specclaw/codebase-report.md`, filling in the template's `{{placeholder}}` tokens from `templates/codebase-report.md` with your rubric findings, using this exact format:
+Write a single file `.specclaw/analysis/codebase-report.md`, filling in the template's `{{placeholder}}` tokens from `templates/codebase-report.md` with your rubric findings, using this exact format:
 
 ```markdown
 # Codebase Report: <title>
