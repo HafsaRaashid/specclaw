@@ -40,6 +40,17 @@ context:
   max_lines: 3000                  # total line budget for injected docs
   folders: []                      # restrict discovery to these dirs (empty = whole repo)
   pin: []                          # always-include paths (exact, repo-relative)
+  # Example: after running /specclaw:analyze, /specclaw:architecture, and
+  # /specclaw:domain, pin their output so /specclaw:plan, /specclaw:build,
+  # and /specclaw:verify treat it as authoritative context. Requires
+  # `git add .specclaw/analysis/*.md` first (discovery enumerates via
+  # `git ls-files`) and raising max_lines accordingly — see
+  # docs/rebuild-workflow.md for the full recipe, incl. max_lines sizing:
+  #   pin:
+  #     - .specclaw/analysis/codebase-report.md
+  #     - .specclaw/analysis/architecture.md
+  #     - .specclaw/analysis/domain-model.md
+  #     - .specclaw/analysis/functional-spec.md
   exclude: []                      # patterns to skip
 
 # Build settings
