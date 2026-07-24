@@ -144,3 +144,12 @@ legacy system. True "same app" verification additionally requires:
 these gaps per item, not to imply they're already covered. Treat a backlog
 item's acceptance criteria as necessary, not sufficient, for a truly
 faithful rebuild.
+
+## Staleness limitation
+
+`rebuild-plan` does not check whether the analysis documents are stale
+relative to the current source — it trusts each document's own "Date
+analyzed" field and never diffs it against git history. If the codebase has
+changed meaningfully since that date, re-run `/specclaw:analyze`,
+`/specclaw:architecture`, and `/specclaw:domain` before `/specclaw:rebuild-
+plan` so the backlog reflects the current code, not a stale snapshot.
