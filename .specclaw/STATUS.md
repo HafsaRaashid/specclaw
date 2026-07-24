@@ -1,17 +1,19 @@
 # 🦞 SpecClaw Dashboard
 
 **Project:** specclaw
-**Last Updated:** 2026-07-21 10:34 UTC
+**Last Updated:** 2026-07-24 10:52 UTC
 
 ## Active Changes
 
 
 - ✅ **analyze-command** — 5/5 tasks (100%) | 0 failed
+- ✅ **architecture-command** — 6/6 tasks (100%) | 0 failed
 - ✅ **azure-boards-integration** — 10/10 tasks (100%) | 0 failed
 - ✅ **build-engine** — 6/6 tasks (100%) | 0 failed
 - ✅ **build-error-journal** — 3/3 tasks (100%) | 0 failed
 - ✅ **claude-plugin-packaging** — 11/11 tasks (100%) | 0 failed
 - 🔨 **code-reviewer-agent** — 5/6 tasks (83%) | 0 failed
+- ✅ **domain-command** — 6/6 tasks (100%) | 0 failed
 - ✅ **git-worktrees** — 3/3 tasks (100%) | 0 failed
 - ✅ **github-issues-sync** — 3/3 tasks (100%) | 0 failed
 - ✅ **grounded-context** — 6/6 tasks (100%) | 0 failed
@@ -24,6 +26,7 @@
 - ✅ **post-build-review** — 1/1 tasks (100%) | 0 failed
 - ✅ **pr-command** — 7/7 tasks (100%) | 0 failed
 - ✅ **prompt-hardening** — 6/6 tasks (100%) | 0 failed
+- 🔨 **rebuild-plan-bridge** — 0/9 tasks (0%) | 0 failed
 - ✅ **smart-base-branch** — 4/4 tasks (100%) | 0 failed
 - 🔨 **spec-author-agent** — 4/5 tasks (80%) | 0 failed
 - ✅ **update-check** — 4/4 tasks (100%) | 0 failed
@@ -39,6 +42,6 @@ _None._
 
 ## Stats
 
-- **Total changes:** 22
-- **Active:** 22
+- **Total changes:** 25
+- **Active:** 25
 - **Completed:** 0

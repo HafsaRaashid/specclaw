@@ -321,6 +321,136 @@ gather_manifests() {
   done
 }
 
+# ─── Dependency-graph extractors (file/project level, best-effort) ───────────
+# Populate the additive `dependency_graph` field on `collect`'s output. Same
+# tolerance as the manifest extractors above: every extractor ends in
+# `|| true` so a malformed file never aborts the script. Resolution always
+# probes the already-scoped file list — an edge is only emitted when both
+# endpoints resolve inside scope; an unresolved reference produces no edge,
+# never a guessed one.
+
+# Normalize a "/"-joined path with "." and ".." segments. No filesystem
+# access (the target may not exist under any given suffix variant yet). A
+# leading ".." with nothing left to pop is kept literally, so it can never
+# accidentally normalize into a real scoped path.
+normalize_path() {
+  local path="$1"
+  local -a parts stack
+  IFS='/' read -ra parts <<< "$path"
+  local seg top
+  for seg in "${parts[@]}"; do
+    case "$seg" in
+      ""|".") ;;
+      "..")
+        top=""
+        [ "${#stack[@]}" -gt 0 ] && top="${stack[$((${#stack[@]}-1))]}"
+        if [ -n "$top" ] && [ "$top" != ".." ]; then
+          stack=("${stack[@]:0:$((${#stack[@]}-1))}")
+        else
+          stack+=("..")
+        fi
+        ;;
+      *) stack+=("$seg") ;;
+    esac
+  done
+  local IFS='/'
+  printf '%s' "${stack[*]}"
+}
+
+# Delphi: extract unit names from every `uses` clause (interface and
+# implementation sections) in a .pas file. Bounded awk state machine from a
+# line-initial `uses` keyword to the next `;`, split on commas — the same
+# bounded-block technique extract_maven_deps uses for
+# <dependency>...</dependency>.
+extract_uses_clause_units() {
+  local file="$1"
+  awk '
+    !inuses && match($0, /^[[:space:]]*[Uu][Ss][Ee][Ss]([[:space:]]|$)/) {
+      inuses = 1
+      line = $0
+      sub(/^[[:space:]]*[Uu][Ss][Ee][Ss][[:space:]]*/, "", line)
+      buf = line
+    }
+    inuses && !match($0, /^[[:space:]]*[Uu][Ss][Ee][Ss]([[:space:]]|$)/) { buf = buf " " $0 }
+    inuses {
+      pos = index(buf, ";")
+      if (pos > 0) {
+        stmt = substr(buf, 1, pos - 1)
+        n = split(stmt, units, ",")
+        for (i = 1; i <= n; i++) {
+          u = units[i]
+          gsub(/^[[:space:]]+/, "", u)
+          gsub(/[[:space:]]+$/, "", u)
+          if (u != "") print u
+        }
+        inuses = 0
+        buf = ""
+      }
+    }
+  ' "$file" 2>/dev/null || true
+}
+
+# Resolve a Delphi unit name to a scoped file: case-insensitive match of
+# "<unit>.pas" against the scoped file list's basenames. Mirrors
+# match_files_by_name's basename approach, case-folded. Prints nothing (no
+# edge) if unresolved.
+resolve_unit_to_scoped_file() {
+  local unit="$1" files_file="$2"
+  awk -v unit="$unit" '
+    BEGIN { target = tolower(unit) ".pas" }
+    {
+      n = split($0, parts, "/")
+      base = tolower(parts[n])
+      if (base == target) { print $0; exit }
+    }
+  ' "$files_file" 2>/dev/null || true
+}
+
+# Node/JS/TS: extract relative require()/import specifiers (leading ./ or
+# ../ only — bare/package specifiers are the manifest's job, not this graph's).
+extract_node_relative_imports() {
+  local file="$1"
+  grep -oE "(require\(['\"]\.\.?/[^'\"]+['\"]\))|(from[[:space:]]+['\"]\.\.?/[^'\"]+['\"])" "$file" 2>/dev/null \
+    | grep -oE "\.\.?/[^'\"]+" 2>/dev/null || true
+}
+
+# Resolve a relative specifier against the importing file's directory, trying
+# the literal path plus each suffix variant against the scoped file list.
+resolve_node_import() {
+  local importer_dir="$1" specifier="$2" files_file="$3"
+  local base candidate suffix
+  base="$(normalize_path "$importer_dir/$specifier")"
+  for suffix in "" ".js" ".jsx" ".ts" ".tsx" "/index.js" "/index.ts"; do
+    candidate="${base}${suffix}"
+    if grep -Fxq -- "$candidate" "$files_file" 2>/dev/null; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+  return 0
+}
+
+# .NET: extract <ProjectReference Include="....csproj"> paths — a distinct
+# extractor from extract_dotnet_deps, which only sees <PackageReference>
+# (NuGet) entries. Both read the same file, for different purposes.
+extract_dotnet_project_refs() {
+  local file="$1"
+  grep -oE '<ProjectReference[[:space:]]+Include="[^"]+\.csproj"' "$file" 2>/dev/null \
+    | sed -E 's/.*Include="([^"]+)"/\1/' || true
+}
+
+# Resolve a <ProjectReference> path relative to the referencing project's
+# directory (normalizing Windows-style backslashes first).
+resolve_dotnet_project_ref() {
+  local referencer_dir="$1" include_path="$2" files_file="$3"
+  local candidate
+  include_path="${include_path//\\//}"
+  candidate="$(normalize_path "$referencer_dir/$include_path")"
+  if grep -Fxq -- "$candidate" "$files_file" 2>/dev/null; then
+    printf '%s\n' "$candidate"
+  fi
+}
+
 # ─── Subcommand: collect ──────────────────────────────────────────────────────
 
 cmd_collect() {
@@ -428,6 +558,65 @@ cmd_collect() {
     done < "$manifests_tmp"
   fi
 
+  # 3.5. Dependency-graph extraction (additive field, no existing field
+  # touched) — reuses the scoped file list built in step 1, no second
+  # enumeration pass. Delphi uses-clauses, Node/JS/TS relative imports, and
+  # .NET ProjectReference only (FR3); every other ecosystem contributes zero
+  # entries — no guessed edges. Each extractor is best-effort; a malformed
+  # file never aborts the script.
+  local graph_tmp
+  graph_tmp="$(mktemp)"
+
+  while IFS= read -r pas_file; do
+    [ -z "$pas_file" ] && continue
+    case "$pas_file" in *.pas) ;; *) continue ;; esac
+    local resolved
+    while IFS= read -r unit; do
+      [ -z "$unit" ] && continue
+      resolved="$(resolve_unit_to_scoped_file "$unit" "$tmp_scoped")"
+      [ -n "$resolved" ] && printf '{"from": "%s", "to": "%s", "kind": "uses"}\n' \
+        "$(json_escape "$pas_file")" "$(json_escape "$resolved")" >> "$graph_tmp"
+    done < <(extract_uses_clause_units "$project_root/$pas_file")
+  done < "$tmp_scoped"
+
+  while IFS= read -r js_file; do
+    [ -z "$js_file" ] && continue
+    case "$js_file" in *.js|*.jsx|*.ts|*.tsx) ;; *) continue ;; esac
+    local js_dir="${js_file%/*}"
+    [ "$js_dir" = "$js_file" ] && js_dir="."
+    local resolved
+    while IFS= read -r spec; do
+      [ -z "$spec" ] && continue
+      resolved="$(resolve_node_import "$js_dir" "$spec" "$tmp_scoped")"
+      [ -n "$resolved" ] && printf '{"from": "%s", "to": "%s", "kind": "import"}\n' \
+        "$(json_escape "$js_file")" "$(json_escape "$resolved")" >> "$graph_tmp"
+    done < <(extract_node_relative_imports "$project_root/$js_file")
+  done < "$tmp_scoped"
+
+  while IFS= read -r csproj_file; do
+    [ -z "$csproj_file" ] && continue
+    case "$csproj_file" in *.csproj) ;; *) continue ;; esac
+    local csproj_dir="${csproj_file%/*}"
+    [ "$csproj_dir" = "$csproj_file" ] && csproj_dir="."
+    local resolved
+    while IFS= read -r ref; do
+      [ -z "$ref" ] && continue
+      resolved="$(resolve_dotnet_project_ref "$csproj_dir" "$ref" "$tmp_scoped")"
+      [ -n "$resolved" ] && printf '{"from": "%s", "to": "%s", "kind": "project_reference"}\n' \
+        "$(json_escape "$csproj_file")" "$(json_escape "$resolved")" >> "$graph_tmp"
+    done < <(extract_dotnet_project_refs "$project_root/$csproj_file")
+  done < "$tmp_scoped"
+
+  local dependency_graph_json="" first_edge=true
+  if [ -s "$graph_tmp" ]; then
+    while IFS= read -r line; do
+      [ -z "$line" ] && continue
+      if $first_edge; then first_edge=false; else dependency_graph_json="${dependency_graph_json},"; fi
+      dependency_graph_json="${dependency_graph_json}
+    ${line}"
+    done < "$graph_tmp"
+  fi
+
   # 4. LOC per file extension — one wc -l pass over the scoped file list,
   # grouped by extension.
   local loc_raw="" loc_by_ext=""
@@ -518,7 +707,7 @@ cmd_collect() {
     discovered_docs="$(bash "$SCRIPT_DIR/specclaw-discover-context" "$specclaw_dir_abs" emit 2>/dev/null || true)"
   fi
 
-  rm -f "$tmp_all" "$tmp_scoped" "$manifests_tmp" "$test_locations_tmp"
+  rm -f "$tmp_all" "$tmp_scoped" "$manifests_tmp" "$test_locations_tmp" "$graph_tmp"
 
   # 7. Assemble and emit.
   local output
@@ -533,6 +722,8 @@ cmd_collect() {
   "loc_by_extension": {${loc_json}
   },
   "test_locations": [${test_locations_json}
+  ],
+  "dependency_graph": [${dependency_graph_json}
   ],
   "discovered_docs": "$(json_escape "$discovered_docs")"
 }
