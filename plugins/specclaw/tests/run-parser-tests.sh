@@ -20,6 +20,11 @@
 #   Pascal type/const/validation-candidate extraction, main_form_hint,
 #   .xaml element capture, .cshtml detection-only marking, zero-eligible-
 #   file scoping, and subdirectory scoping exclusion (AC1-AC13).
+# Plus rebuild-plan-bridge (Case 12): specclaw-rebuild-collect collect's
+#   existence-check + line-count JSON emission for the four
+#   .specclaw/analysis/*.md documents, and its missing-document error path
+#   naming exactly which doc(s) are missing plus the producing command
+#   (AC1-AC2).
 #
 # Plain bash only — no bats/npm. Run from anywhere:
 #   bash plugins/specclaw/tests/run-parser-tests.sh
@@ -886,6 +891,72 @@ else
     pass "11r domain/ui scoping still includes in-scope entities (TWaterQuality, OKButtonClick resolution)"
   else
     fail "11r domain/ui scoping still includes in-scope entities (TWaterQuality, OKButtonClick resolution)"
+  fi
+fi
+echo
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Case 12 — rebuild-collect: existence-check + line-count JSON emission for
+# the four .specclaw/analysis/*.md documents (rebuild-plan-bridge, AC1-AC2),
+# and the missing-document error path naming exactly which doc(s) are
+# missing and which command produces each.
+# ─────────────────────────────────────────────────────────────────────────────
+echo "--- Case 12: specclaw-rebuild-collect collect — existence, line counts, missing-doc errors ---"
+REBUILD_BIN="$BIN_DIR/specclaw-rebuild-collect"
+if [[ ! -f "$REBUILD_BIN" ]]; then
+  fail "specclaw-rebuild-collect missing"
+else
+  # 12a-12b — all four fixture docs present: JSON lists all four paths with
+  # line counts matching a hand-computed `wc -l` (same discipline as 9e).
+  RFIX="$WORK/rebuild-proj"
+  mkdir -p "$RFIX/.specclaw/analysis"
+  cp -R "$FIXTURES_DIR/rebuild-plan/analysis/." "$RFIX/.specclaw/analysis/"
+
+  rebuild_out="$(bash "$REBUILD_BIN" collect "$RFIX/.specclaw" 2>/dev/null)"
+  rebuild_exit=$?
+  assert_eq "12a all-present: exit 0" "0" "$rebuild_exit"
+
+  for doc in codebase-report.md architecture.md domain-model.md functional-spec.md; do
+    hand_count="$(wc -l < "$FIXTURES_DIR/rebuild-plan/analysis/$doc" | tr -d ' ')"
+    doc_line="$(grep -o "\"path\": \"\.specclaw/analysis/${doc}\", \"lines\": [0-9]*" <<<"$rebuild_out")"
+    if grep -q "\"lines\": ${hand_count}\$" <<<"$doc_line"; then
+      pass "12b ${doc} line count matches wc -l ($hand_count)"
+    else
+      fail "12b ${doc} line count matches wc -l (got: $doc_line, expected lines: $hand_count)"
+    fi
+  done
+
+  # 12c — project_root points at the fixture project, not the real repo.
+  if grep -q "\"project_root\": \"$RFIX\"" <<<"$rebuild_out"; then
+    pass "12c project_root reflects the collected project"
+  else
+    fail "12c project_root reflects the collected project (got: $(grep '"project_root":' <<<"$rebuild_out"))"
+  fi
+
+  # 12d-12f — partial docs (2 of 4 missing): non-zero exit, and stderr names
+  # exactly the missing files plus the command that produces each.
+  RFIX_PARTIAL="$WORK/rebuild-proj-partial"
+  mkdir -p "$RFIX_PARTIAL/.specclaw/analysis"
+  cp "$FIXTURES_DIR/rebuild-plan/analysis/codebase-report.md" "$RFIX_PARTIAL/.specclaw/analysis/"
+  cp "$FIXTURES_DIR/rebuild-plan/analysis/architecture.md" "$RFIX_PARTIAL/.specclaw/analysis/"
+
+  partial_err="$(bash "$REBUILD_BIN" collect "$RFIX_PARTIAL/.specclaw" 2>&1 1>/dev/null)"
+  partial_exit=$?
+  if [[ "$partial_exit" -ne 0 ]]; then
+    pass "12d partial docs (2 of 4 missing): non-zero exit"
+  else
+    fail "12d partial docs (2 of 4 missing): non-zero exit (got exit 0)"
+  fi
+  if grep -q 'domain-model.md (run /specclaw:domain)' <<<"$partial_err" \
+     && grep -q 'functional-spec.md (run /specclaw:domain)' <<<"$partial_err"; then
+    pass "12e partial docs: stderr names both missing files + producing command"
+  else
+    fail "12e partial docs: stderr names both missing files + producing command (got: $partial_err)"
+  fi
+  if grep -q 'codebase-report.md' <<<"$partial_err" || grep -q 'architecture.md' <<<"$partial_err"; then
+    fail "12f partial docs: stderr does not name present files as missing (found one)"
+  else
+    pass "12f partial docs: stderr does not name present files as missing"
   fi
 fi
 echo
