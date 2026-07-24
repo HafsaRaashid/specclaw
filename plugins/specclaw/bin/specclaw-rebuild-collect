@@ -1,0 +1,142 @@
+#!/usr/bin/env bash
+# specclaw-rebuild-collect — deterministic fact-collection for /specclaw:rebuild-plan
+#
+# Checks for the four .specclaw/analysis/*.md documents produced by
+# /specclaw:analyze, /specclaw:architecture, and /specclaw:domain, and emits
+# a small JSON existence/line-count map. Fact-only: this script never parses
+# capabilities/rules/entities out of the markdown — that's the
+# rebuild-planner agent's job, reading the four files directly via its own
+# Read tool (same "bash collects, agent interprets" split as every other
+# analysis command in this plugin).
+#
+# Bash + coreutils only (jq optional, used for output validation with a
+# best-effort fallback — same tolerant pattern as specclaw-analyze-codebase).
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# ─── Helpers ──────────────────────────────────────────────────────────────────
+
+usage() {
+  cat <<'EOF'
+Usage: specclaw-rebuild-collect <subcommand> [options]
+
+Subcommands:
+  collect       <specclaw_dir>
+                Checks that .specclaw/analysis/{codebase-report,architecture,
+                domain-model,functional-spec}.md all exist (relative to
+                <specclaw_dir>'s parent, the project root). If any are
+                missing, prints exactly which file(s) are missing and which
+                command produces each to stderr, then exits non-zero. If all
+                four are present, emits one JSON object to stdout: each doc's
+                repo-relative path and line count, plus the project root.
+
+Options:
+  -h, --help    Show this help message
+EOF
+}
+
+die() { echo "ERROR: $*" >&2; exit 1; }
+warn() { echo "WARN: $*" >&2; }
+
+# JSON-escape a string (copied verbatim from specclaw-analyze-codebase — no
+# shared lib, per repo convention).
+json_escape() {
+  local s="$1"
+  s="${s//\\/\\\\}"
+  s="${s//\"/\\\"}"
+  s="${s//$'\n'/\\n}"
+  s="${s//$'\r'/\\r}"
+  s="${s//$'\t'/\\t}"
+  printf '%s' "$s"
+}
+
+# ─── Collect ──────────────────────────────────────────────────────────────────
+
+cmd_collect() {
+  local specclaw_dir="$1"
+
+  [ -d "$specclaw_dir" ] || die "specclaw directory not found: $specclaw_dir"
+
+  local specclaw_dir_abs project_root
+  specclaw_dir_abs="$(cd "$specclaw_dir" && pwd)"
+  project_root="$(cd "$specclaw_dir_abs/.." && pwd)"
+
+  local analysis_dir="$project_root/.specclaw/analysis"
+
+  # Each entry: "<filename>|<command that produces it>"
+  local -a doc_specs=(
+    "codebase-report.md|analyze"
+    "architecture.md|architecture"
+    "domain-model.md|domain"
+    "functional-spec.md|domain"
+  )
+
+  local spec doc_name producing_cmd missing=""
+  for spec in "${doc_specs[@]}"; do
+    doc_name="${spec%%|*}"
+    producing_cmd="${spec##*|}"
+    if [ ! -f "$analysis_dir/$doc_name" ]; then
+      missing="${missing}  - .specclaw/analysis/${doc_name} (run /specclaw:${producing_cmd})
+"
+    fi
+  done
+
+  if [ -n "$missing" ]; then
+    echo "ERROR: missing analysis document(s) — run the producing command first:" >&2
+    printf '%s' "$missing" >&2
+    exit 1
+  fi
+
+  # All four present — emit path + line count for each.
+  local docs_json="" first=true rel_path lines
+  for spec in "${doc_specs[@]}"; do
+    doc_name="${spec%%|*}"
+    rel_path=".specclaw/analysis/${doc_name}"
+    lines="$(wc -l < "$analysis_dir/$doc_name" | tr -d '[:space:]')"
+    if $first; then first=false; else docs_json="${docs_json},"; fi
+    docs_json="${docs_json}
+    {\"path\": \"$(json_escape "$rel_path")\", \"lines\": ${lines}}"
+  done
+
+  local output
+  output=$(cat <<ENDJSON
+{
+  "project_root": "$(json_escape "$project_root")",
+  "docs": [${docs_json}
+  ]
+}
+ENDJSON
+)
+
+  if command -v jq &>/dev/null; then
+    if printf '%s' "$output" | jq . >/dev/null 2>&1; then
+      printf '%s\n' "$output"
+    else
+      warn "JSON validation failed, outputting best-effort"
+      printf '%s\n' "$output"
+    fi
+  else
+    printf '%s\n' "$output"
+  fi
+}
+
+# ─── Main ─────────────────────────────────────────────────────────────────────
+
+case "${1:-}" in
+  -h|--help)
+    usage
+    exit 0
+    ;;
+  collect)
+    [ $# -ge 2 ] || die "Usage: specclaw-rebuild-collect collect <specclaw_dir>"
+    cmd_collect "$2"
+    ;;
+  "")
+    usage
+    exit 1
+    ;;
+  *)
+    die "Unknown subcommand: $1. Run specclaw-rebuild-collect --help for usage."
+    ;;
+esac
