@@ -1,7 +1,7 @@
 # 🦞 SpecClaw Dashboard
 
 **Project:** specclaw
-**Last Updated:** 2026-07-24 10:52 UTC
+**Last Updated:** 2026-07-24 11:17 UTC
 
 ## Active Changes
 
@@ -26,7 +26,7 @@
 - ✅ **post-build-review** — 1/1 tasks (100%) | 0 failed
 - ✅ **pr-command** — 7/7 tasks (100%) | 0 failed
 - ✅ **prompt-hardening** — 6/6 tasks (100%) | 0 failed
-- 🔨 **rebuild-plan-bridge** — 0/9 tasks (0%) | 0 failed
+- 🔨 **rebuild-plan-bridge** — 8/9 tasks (88%) | 0 failed
 - ✅ **smart-base-branch** — 4/4 tasks (100%) | 0 failed
 - 🔨 **spec-author-agent** — 4/5 tasks (80%) | 0 failed
 - ✅ **update-check** — 4/4 tasks (100%) | 0 failed
