@@ -5,6 +5,26 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# Resolve specclaw-run-long (long-running command executor: heartbeats to stderr,
+# full log to disk). Empty when unresolvable — run_capped then executes inline
+# exactly as before, so a missing helper never blocks a verify run (NFR2).
+RUN_LONG=""
+if [ -x "${SCRIPT_DIR}/specclaw-run-long" ]; then
+  RUN_LONG="${SCRIPT_DIR}/specclaw-run-long"
+elif command -v specclaw-run-long >/dev/null 2>&1; then
+  RUN_LONG="$(command -v specclaw-run-long)"
+fi
+
+# Resolve specclaw-browser-lock (browser-slot semaphore + memory-cap command
+# wrapper). Empty when unresolvable — the e2e command then runs unwrapped,
+# uncapped and without a slot, exactly as before the e2e tier existed (NFR2).
+BROWSER_LOCK=""
+if [ -x "${SCRIPT_DIR}/specclaw-browser-lock" ]; then
+  BROWSER_LOCK="${SCRIPT_DIR}/specclaw-browser-lock"
+elif command -v specclaw-browser-lock >/dev/null 2>&1; then
+  BROWSER_LOCK="$(command -v specclaw-browser-lock)"
+fi
+
 # ─── Helpers ──────────────────────────────────────────────────────────────────
 
 usage() {
@@ -59,18 +79,69 @@ yaml_val() {
   printf '%s' "$val"
 }
 
+# True when a simple scalar key is literally present in config.yaml.
+# yaml_val cannot tell "key absent" from "key present but empty", and that
+# distinction is what keeps the payload byte-identical to v0.5.9 when none of
+# the new e2e keys exist (NFR1).
+yaml_has_key() {
+  local file="$1" field="$2"
+  grep -qE "^[[:space:]]*${field}:" "$file" 2>/dev/null
+}
+
+# Heartbeat interval (seconds) handed to specclaw-run-long as --heartbeat.
+# Empty = do not pass the flag, so run-long applies its own default.
+HEARTBEAT_SECONDS=""
+
 # Run a command, capture output (capped at 100 lines), return exit code
-# Usage: run_capped <varname_output> <command_string>
+# Usage: run_capped <varname_output> <command_string> [phase] [log_dir]
 # Sets: <varname_output> to captured output, returns command exit code
+#
+# Execution goes through specclaw-run-long when available, so a multi-minute
+# suite emits heartbeats to stderr and keeps its full log on disk. The captured
+# payload is still re-capped here from the log file with the same head -100 +
+# truncation marker as the inline path, so callers see byte-identical output.
 run_capped() {
   local -n _out_ref="$1"
   local cmd="$2"
+  local phase="${3:-run}"
+  local log_dir="${4:-}"
+  local rc=0
+  local total
+
+  if [ -n "$RUN_LONG" ]; then
+    local rl_args=(--phase "$phase")
+    [ -n "$log_dir" ] && rl_args+=(--log-dir "$log_dir")
+    [ -n "$HEARTBEAT_SECONDS" ] && rl_args+=(--heartbeat "$HEARTBEAT_SECONDS")
+    local rl_out=""
+    rl_out=$("$RUN_LONG" "${rl_args[@]}" -- "$cmd") || rc=$?
+    # run-long's last stdout line is "log: <path>"; the full log lives there.
+    local log_path
+    log_path=$(printf '%s\n' "$rl_out" | tail -1 | sed -n 's/^log: //p')
+    if [ -n "$log_path" ] && [ -f "$log_path" ]; then
+      _out_ref=$(head -100 "$log_path")
+      total=$(wc -l < "$log_path")
+      if [ "$total" -gt 100 ]; then
+        _out_ref="${_out_ref}
+... (truncated, ${total} total lines)"
+      fi
+    else
+      # run-long could not create a log (its own inline fallback) — its stdout
+      # is the raw, uncapped command output, so apply the cap here.
+      _out_ref=$(printf '%s\n' "$rl_out" | head -100)
+      total=$(printf '%s\n' "$rl_out" | wc -l)
+      if [ "$total" -gt 100 ]; then
+        _out_ref="${_out_ref}
+... (truncated, ${total} total lines)"
+      fi
+    fi
+    return "$rc"
+  fi
+
+  # specclaw-run-long unavailable — execute inline as before (NFR2 fail-open).
   local tmpfile
   tmpfile=$(mktemp)
-  local rc=0
   eval "$cmd" >"$tmpfile" 2>&1 || rc=$?
   _out_ref=$(head -100 "$tmpfile")
-  local total
   total=$(wc -l < "$tmpfile")
   if [ "$total" -gt 100 ]; then
     _out_ref="${_out_ref}
@@ -78,6 +149,105 @@ run_capped() {
   fi
   rm -f "$tmpfile"
   return "$rc"
+}
+
+# Browser slot currently held by the e2e tier. Tracked in globals so the slot is
+# released from a trap too: a leaked slot would starve the pool for every later
+# run, so release must happen on failure and on interruption, not just on the
+# happy path.
+E2E_SLOT=""
+E2E_SLOT_DIR=""
+
+# Claim a browser slot for the e2e command. Fail-open: acquire prints `none` and
+# exits 0 when the pool is unusable or times out, and we then proceed slotless
+# rather than blocking the run (NFR2).
+e2e_acquire_slot() {
+  local specclaw_dir="$1" slot=""
+  slot=$("$BROWSER_LOCK" "$specclaw_dir" acquire) || slot=""
+  case "$slot" in
+    ""|none) return 0 ;;
+  esac
+  E2E_SLOT="$slot"
+  E2E_SLOT_DIR="$specclaw_dir"
+  # Chain rather than clobber: a caller may already hold an EXIT trap (temp-file
+  # cleanup is the obvious one), and silently dropping it would leak whatever it
+  # was there to clean. `trap -p` prints a re-runnable `trap -- '<body>' EXIT`,
+  # so appending it keeps the prior handler intact.
+  local prior_exit=""
+  prior_exit="$(trap -p EXIT)"
+  if [ -n "$prior_exit" ]; then
+    # SC2064 (expand-now) is the point: `$prior_exit` must be baked into the new
+    # handler at install time, since the variable is local and will be gone by
+    # the time EXIT fires.
+    # shellcheck disable=SC2064
+    trap "e2e_release_slot; ${prior_exit}" EXIT
+  else
+    trap 'e2e_release_slot' EXIT
+  fi
+  trap 'e2e_release_slot; exit 130' INT
+  trap 'e2e_release_slot; exit 143' TERM
+}
+
+# Release the held slot. Idempotent, so the trap and the normal path can both
+# call it, and never fatal — a failed release must not mask the e2e result.
+e2e_release_slot() {
+  [ -n "$E2E_SLOT" ] || return 0
+  local slot="$E2E_SLOT"
+  E2E_SLOT=""
+  "$BROWSER_LOCK" "$E2E_SLOT_DIR" release "$slot" || true
+}
+
+# Run the e2e command and classify the outcome: take a browser slot, let
+# browser-lock constrain the command (--workers=1, sequential --project fan-out,
+# MemoryMax scope), execute the string it prints, release the slot, then decide
+# whether a non-zero exit was a memory-limit breach or an ordinary failure.
+#
+# Each script keeps one job — browser-lock constrains, run-long (via run_capped)
+# executes and observes, this classifies.
+#
+# Usage: e2e_run <out_var> <state_var> <memlimited_var> <specclaw_dir> <cmd> <log_dir>
+e2e_run() {
+  local -n _run_out="$1" _run_state="$2" _run_mem="$3"
+  local specclaw_dir="$4" e2e_cmd="$5" log_dir="$6"
+
+  # Bounded invocation (FR10, FR12).
+  local e2e_run_cmd="$e2e_cmd" e2e_cap=""
+  if [ -n "$BROWSER_LOCK" ]; then
+    e2e_acquire_slot "$specclaw_dir"
+    local wrapped="" wrap_rc=0
+    wrapped=$("$BROWSER_LOCK" "$specclaw_dir" wrap "$e2e_cmd") || wrap_rc=$?
+    if [ -n "$wrapped" ] && { [ "$wrap_rc" -eq 0 ] || [ "$wrap_rc" -eq 10 ]; }; then
+      e2e_run_cmd="$wrapped"
+      # wrap exit 0 = a memory cap was applied, 10 = emitted uncapped. Only the
+      # capped case may attribute an exit 137 to the cap (FR13), and the cap it
+      # actually carries is the one named in the report.
+      if [ "$wrap_rc" -eq 0 ] && [[ "$wrapped" =~ MemoryMax=([0-9]+M) ]]; then
+        e2e_cap="cap ${BASH_REMATCH[1]}"
+      fi
+    else
+      warn "browser-lock wrap failed (exit ${wrap_rc}) — running the e2e command unwrapped and uncapped"
+    fi
+  fi
+
+  local out="" rc=0
+  run_capped out "$e2e_run_cmd" e2e "$log_dir" || rc=$?
+  e2e_release_slot
+
+  if [ "$rc" -eq 0 ]; then
+    _run_state="passed"
+  else
+    _run_state="failed"
+    # Exit 137 = SIGKILL. Only a run that actually carried a memory cap can be
+    # reported as a memory-limit breach, and then it never reads as a generic or
+    # flaky test failure (FR13). The same code with no cap applied stays a plain
+    # failure (AC13).
+    if [ "$rc" -eq 137 ] && [ -n "$e2e_cap" ]; then
+      _run_mem=true
+      out="MEMORY LIMIT EXCEEDED — e2e command exceeded its memory limit (${e2e_cap}) and was killed with SIGKILL (exit 137), not a test assertion failure.
+${out}"
+    fi
+  fi
+  _run_out="$out"
 }
 
 # ─── Subcommand: collect ──────────────────────────────────────────────────────
@@ -182,34 +352,90 @@ cmd_collect() {
   done
 
   # 4. Read config for commands
-  local test_cmd="" lint_cmd="" build_cmd=""
+  local test_cmd="" lint_cmd="" build_cmd="" e2e_cmd="" e2e_policy=""
+  # e2e_configured: any of the new e2e keys is literally present. When none are,
+  # the e2e payload fields are omitted entirely so output matches v0.5.9 (NFR1/AC6).
+  local e2e_configured=false
   if [ -f "$config_file" ]; then
     test_cmd=$(yaml_val "$config_file" "build.test_command")
     lint_cmd=$(yaml_val "$config_file" "build.lint_command")
     build_cmd=$(yaml_val "$config_file" "build.build_command")
+    e2e_cmd=$(yaml_val "$config_file" "build.e2e_command")
+    e2e_policy=$(yaml_val "$config_file" "verify.e2e")
+    HEARTBEAT_SECONDS=$(yaml_val "$config_file" "verify.heartbeat_seconds")
+    # Exactly two keys switch the e2e payload fields on: `build.e2e_command` and
+    # `verify.e2e`. The `e2e` pattern is anchored to a following space so a
+    # future `e2e_timeout:` cannot enable the block by accident — a bare `e2e:`
+    # with no value would also not match, which is the fail-closed direction.
+    if yaml_has_key "$config_file" "e2e_command" ||
+       grep -qE "^[[:space:]]*e2e:[[:space:]]" "$config_file" 2>/dev/null; then
+      e2e_configured=true
+    fi
   else
     warn "config.yaml not found at ${config_file}, skipping commands"
   fi
 
-  # 5. Run commands
+  # Resolve the e2e policy (FR8). Absent → "last" (edge case 8);
+  # unrecognised → warn and fall back to "last", never a silent skip (edge case 9).
+  case "$e2e_policy" in
+    skip|last|always) ;;
+    "") e2e_policy="last" ;;
+    *)  warn "verify.e2e: unrecognised value '${e2e_policy}' — falling back to 'last'"
+        e2e_policy="last" ;;
+  esac
+
+  # 5. Run commands — fast gates in lint → build → test order, then e2e per policy (FR8).
   local test_output="" lint_output="" build_output=""
   local tests_passed=true lint_passed=true build_passed=true
 
-  if [ -n "$test_cmd" ]; then
-    if ! run_capped test_output "$test_cmd"; then
-      tests_passed=false
-    fi
-  fi
+  local log_dir="${change_dir}/logs"
 
   if [ -n "$lint_cmd" ]; then
-    if ! run_capped lint_output "$lint_cmd"; then
+    if ! run_capped lint_output "$lint_cmd" lint "$log_dir"; then
       lint_passed=false
     fi
   fi
 
   if [ -n "$build_cmd" ]; then
-    if ! run_capped build_output "$build_cmd"; then
+    if ! run_capped build_output "$build_cmd" build "$log_dir"; then
       build_passed=false
+    fi
+  fi
+
+  if [ -n "$test_cmd" ]; then
+    if ! run_capped test_output "$test_cmd" test "$log_dir"; then
+      tests_passed=false
+    fi
+  fi
+
+  # 5b. E2E tier (FR8, FR9, FR13).
+  # e2e_state is an enumerated string, never an empty-output sentinel: a skip is
+  # structurally un-mistakable for a pass, and every non-passed state carries a
+  # human-readable reason in e2e_output.
+  local e2e_output="" e2e_state="not_configured" e2e_memory_limited=false
+  if [ "$e2e_configured" = true ]; then
+    if [ -z "$e2e_cmd" ]; then
+      e2e_state="not_configured"
+      e2e_output="NOT CONFIGURED — build.e2e_command is empty; there is no e2e tier to run. This is NOT a pass."
+    elif [ "$e2e_policy" = "skip" ]; then
+      e2e_state="skipped_policy"
+      e2e_output="SKIPPED BY POLICY — verify.e2e=skip; e2e command was never executed. This is NOT a pass."
+    else
+      # Under "last", an unset fast-tier command is vacuously passing (edge case 10):
+      # *_passed stay true when their command is empty, so e2e still runs.
+      local failed_gates=""
+      if [ "$e2e_policy" = "last" ]; then
+        [ "$lint_passed" = true ]  || failed_gates="${failed_gates}${failed_gates:+, }lint"
+        [ "$build_passed" = true ] || failed_gates="${failed_gates}${failed_gates:+, }build"
+        [ "$tests_passed" = true ] || failed_gates="${failed_gates}${failed_gates:+, }test"
+      fi
+      if [ -n "$failed_gates" ]; then
+        e2e_state="skipped_gate_failure"
+        e2e_output="SKIPPED — verify.e2e=last and an earlier gate failed (${failed_gates}); e2e command was never executed. This is NOT a pass."
+      else
+        e2e_run e2e_output e2e_state e2e_memory_limited \
+          "$specclaw_dir" "$e2e_cmd" "$log_dir"
+      fi
     fi
   fi
 
@@ -222,6 +448,16 @@ cmd_collect() {
   done
 
   # 7. Output JSON
+  # The e2e block is appended only when the new keys are configured, so a config
+  # without them reproduces the v0.5.9 payload byte-for-byte (NFR1, AC6).
+  local e2e_json=""
+  if [ "$e2e_configured" = true ]; then
+    e2e_json=",
+  \"e2e_output\": \"$(json_escape "$e2e_output")\",
+  \"e2e_state\": \"${e2e_state}\",
+  \"e2e_memory_limited\": ${e2e_memory_limited}"
+  fi
+
   local output
   output=$(cat <<ENDJSON
 {
@@ -235,7 +471,7 @@ cmd_collect() {
   "build_output": "$(json_escape "$build_output")",
   "tests_passed": ${tests_passed},
   "lint_passed": ${lint_passed},
-  "build_passed": ${build_passed}
+  "build_passed": ${build_passed}${e2e_json}
 }
 ENDJSON
 )
