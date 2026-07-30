@@ -114,6 +114,8 @@ All commands are namespaced under `/specclaw:`. Most are model-invokable — Cla
 | `/specclaw:architecture [path]` | Write a C4-model architecture view (L1→L4, Mermaid) of an existing/legacy codebase to `.specclaw/analysis/architecture.md` (read-only) |
 | `/specclaw:domain [path]` | Write domain/functional documentation (entities, rules, capabilities, workflows, UI inventory) of an existing/legacy codebase to `.specclaw/analysis/domain-model.md` + `.specclaw/analysis/functional-spec.md` (read-only) |
 | `/specclaw:rebuild-plan` | Read the four `.specclaw/analysis/*.md` documents and write an ordered, dependency-sequenced `.specclaw/analysis/rebuild-backlog.md` of individually-proposable features (read-only, calls no lifecycle command) |
+| `/specclaw:clarify [--resolve]` | Turn the inferences/hedges/gaps/conflicts scattered through `.specclaw/analysis/*.md` into a numbered, classified question set (`clarifications.md`); `--resolve` promotes answered questions into a pinnable decision record (`decisions.md`) (read-only) |
+| `/specclaw:baseline [--harness\|--record]` | Design the golden-master harness that proves a rebuild matches the legacy app: seam ranking + determinism audit + scenarios (default), generate the runnable capture project (`--harness`), or validate a human-run capture into a manifest (`--record`) (read-only, never runs the legacy app or captures a fixture itself) |
 | `/specclaw:archive <change>` | Archive a completed change |
 | `/specclaw:auto` | Advance the queue of active changes autonomously |
 

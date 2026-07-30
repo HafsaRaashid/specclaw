@@ -1,0 +1,694 @@
+#!/usr/bin/env bash
+# specclaw-clarify — deterministic engine for /specclaw:clarify
+#
+# Turns the extraction signals scattered through .specclaw/analysis/*.md
+# into a numbered, human-answerable question set (clarifications.md), then
+# promotes answered questions into a clean, pinnable decision record
+# (decisions.md).
+#
+# Unlike the plugin's other analysis bin scripts (which only gather facts
+# for an agent to interpret and write), this script also owns rendering and
+# archiving both output files. That's deliberate: the one hard invariant
+# this command must never violate — stable, permanent CQ-NNN IDs, never
+# renumbered; existing Answer/Decided-by/Date fields never touched by a
+# re-run — is safer enforced deterministically in bash than trusted to an
+# LLM's judgment across repeated runs. The agent's job is narrower here: it
+# only ever drafts NEW question content (extract mode) or judges
+# ADR-worthiness of already-answered questions (resolve mode) — it never
+# edits, reorders, or retouches anything this script has already committed
+# to disk.
+#
+# Bash + coreutils only (jq optional, used for output validation with a
+# best-effort fallback — same tolerant pattern as every sibling script).
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# ─── Help ─────────────────────────────────────────────────────────────────────
+
+usage() {
+  cat <<'EOF'
+Usage: specclaw-clarify <subcommand> [options]
+
+Subcommands:
+  collect          <specclaw_dir>
+                   Extract-mode pre-agent step. Reports which of the five
+                   known .specclaw/analysis/*.md documents are present
+                   (exits non-zero if none are). If clarifications.md
+                   already exists, parses it for existing question IDs (so
+                   new ones never collide or renumber) and emits a de-dup
+                   hint list. Outputs one JSON object to stdout.
+
+  render           <specclaw_dir> <draft_file>
+                   Extract-mode post-agent step. <draft_file> is a markdown
+                   file containing ONLY newly-drafted question blocks (the
+                   standard `### CQ-NNN` format), IDs starting at collect's
+                   reported next_id. Archives the prior clarifications.md
+                   (if any), merges its still-preserved blocks with the new
+                   ones, re-sorts (blocking first, then by type),
+                   recomputes the summary header, and writes
+                   .specclaw/analysis/clarifications.md. Deletes
+                   <draft_file> on success.
+
+  resolve-collect  <specclaw_dir>
+                   Resolve-mode pre-agent step. Requires clarifications.md
+                   to exist. Splits its questions into answered/unanswered
+                   by whether **Answer:** is filled in. Outputs one JSON
+                   object to stdout (IDs only — the agent reads
+                   clarifications.md itself for content).
+
+  resolve-render   <specclaw_dir> <adr_file>
+                   Resolve-mode post-agent step. <adr_file> is a
+                   pipe-delimited file (one line per answered question:
+                   id|promote(yes/no)|suggested_adr_title|one_line_rationale)
+                   produced by the agent's ADR-worthiness judgment.
+                   Archives the prior decisions.md (if any), mechanically
+                   transcribes every answered question into a decision
+                   entry, splices in the ADR-candidate annotations, lists
+                   unanswered questions, and writes
+                   .specclaw/analysis/decisions.md. Deletes <adr_file> on
+                   success.
+
+Options:
+  -h, --help    Show this help message
+EOF
+}
+
+[[ "${1:-}" == "-h" || "${1:-}" == "--help" ]] && { usage; exit 0; }
+
+die() { echo "ERROR: $*" >&2; exit 1; }
+warn() { echo "WARN: $*" >&2; }
+
+# ─── Generic JSON helpers (copied verbatim from specclaw-analyze-codebase —
+# no shared lib, per repo convention) ─────────────────────────────────────────
+
+json_escape() {
+  local s="$1"
+  s="${s//\\/\\\\}"
+  s="${s//\"/\\\"}"
+  s="${s//$'\n'/\\n}"
+  s="${s//$'\r'/\\r}"
+  s="${s//$'\t'/\\t}"
+  printf '%s' "$s"
+}
+
+json_array_from_lines() {
+  local item first=true out=""
+  while IFS= read -r item; do
+    [ -z "$item" ] && continue
+    if $first; then first=false; else out="${out}, "; fi
+    out="${out}\"$(json_escape "$item")\""
+  done
+  printf '%s' "$out"
+}
+
+# Validate (best-effort) and emit a JSON object to stdout — same tolerant
+# pattern every collect-style script in this plugin already uses.
+emit_json() {
+  local output="$1"
+  if command -v jq &>/dev/null; then
+    if printf '%s' "$output" | jq . >/dev/null 2>&1; then
+      printf '%s\n' "$output"
+    else
+      warn "JSON validation failed, outputting best-effort"
+      printf '%s\n' "$output"
+    fi
+  else
+    printf '%s\n' "$output"
+  fi
+}
+
+# ─── Config reading (copied verbatim from specclaw-validate-change — no
+# shared lib, per repo convention) ────────────────────────────────────────────
+
+# Read a simple yaml value: yaml_val <file> <dotted.key>
+# Handles top-level and one-level nested keys.
+yaml_val() {
+  local file="$1" key="$2"
+  local section field
+  if [[ "$key" == *.* ]]; then
+    section="${key%%.*}"
+    field="${key#*.}"
+  else
+    section=""
+    field="$key"
+  fi
+
+  local in_section=false value=""
+  while IFS= read -r line; do
+    [[ "$line" =~ ^[[:space:]]*# ]] && continue
+    [[ -z "${line// /}" ]] && continue
+
+    if [[ -z "$section" ]]; then
+      if [[ "$line" =~ ^${field}:[[:space:]]*(.*) ]]; then
+        value="${BASH_REMATCH[1]}"
+        break
+      fi
+    else
+      if [[ "$line" =~ ^[a-zA-Z_] ]]; then
+        if [[ "$line" =~ ^${section}: ]]; then
+          in_section=true
+        else
+          in_section=false
+        fi
+        continue
+      fi
+      if $in_section; then
+        if [[ "$line" =~ ^[[:space:]]+${field}:[[:space:]]*(.*) ]]; then
+          value="${BASH_REMATCH[1]}"
+          break
+        fi
+      fi
+    fi
+  done < "$file"
+
+  # Strip inline `#` comments (must come BEFORE quote-stripping because
+  # values like `name: "foo"   # comment` would otherwise carry the comment
+  # into the result), then strip surrounding quotes.
+  if [[ "$value" =~ ([[:space:]]+#) ]]; then
+    value="${value%%"${BASH_REMATCH[1]}"*}"
+  fi
+  if [[ "$value" =~ [[:space:]]+$ ]]; then
+    value="${value%${BASH_REMATCH[0]}}"
+  fi
+  value="${value#\"}"
+  value="${value%\"}"
+  value="${value#\'}"
+  value="${value%\'}"
+  echo "$value"
+}
+
+# Project title for doc headers: config.yaml's project.name, falling back
+# to the project directory's basename (mirrors specclaw-ensure-init's own
+# fallback) if config.yaml or the key is absent/empty.
+project_title() {
+  local project_root="$1"
+  local config_file="$project_root/.specclaw/config.yaml"
+  local name=""
+  if [ -f "$config_file" ]; then
+    name="$(yaml_val "$config_file" "project.name")"
+  fi
+  if [ -z "$name" ]; then
+    name="$(basename "$project_root")"
+  fi
+  printf '%s' "$name"
+}
+
+# ─── Template substitution ────────────────────────────────────────────────────
+
+# Literal (non-glob) token replacement — quoting $token forces bash to treat
+# it as a plain string in the `${var//pattern/replacement}` pattern position
+# instead of a glob, so replacement values may safely contain any character.
+substitute() {
+  local content="$1" token="$2" value="$3"
+  printf '%s' "${content//"$token"/$value}"
+}
+
+# ─── Question-block parsing ───────────────────────────────────────────────────
+# A "block" is one `### CQ-NNN ...` section of clarifications.md, split into
+# its own file named "<outdir>/CQ-NNN.md" (full header line included) so
+# every reader keys by filename/ID — never by position, since display order
+# and ID are deliberately decoupled (see render's re-sort step).
+
+split_question_blocks() {
+  local file="$1" outdir="$2"
+  [ -f "$file" ] || return 0
+  awk -v dir="$outdir" '
+    /^### CQ-[0-9]+/ {
+      match($0, /CQ-[0-9]+/)
+      id = substr($0, RSTART, RLENGTH)
+      outfile = dir "/" id ".md"
+    }
+    id != "" { print $0 >> outfile }
+  ' "$file"
+}
+
+block_id() {
+  basename "$1" .md
+}
+
+block_title() {
+  head -1 "$1" | sed -E 's/^### CQ-[0-9]+[[:space:]]*[—-][[:space:]]*//'
+}
+
+# Extract a single-line "- **<Label>:** value" field. Used for Type, Source,
+# Blocking (raw text), Decided by, Date — every field except Answer, which
+# may span multiple lines.
+block_single_field() {
+  local file="$1" label="$2"
+  grep -m1 -- "^- \*\*${label}:\*\*" "$file" 2>/dev/null \
+    | sed -E "s/^- \*\*${label}:\*\* *//" | sed -E 's/[[:space:]]+$//'
+}
+
+block_field_blocking_bool() {
+  local line
+  line="$(block_single_field "$1" "Blocking")"
+  case "$line" in
+    [Yy][Ee][Ss]*) echo "yes" ;;
+    *) echo "no" ;;
+  esac
+}
+
+# Answer text may span multiple lines, from right after "**Answer:**" up to
+# (not including) the "**Decided by:**" line. Avoids a spurious leading
+# blank line when the answer starts on the line after the tag rather than
+# inline.
+block_answer_text() {
+  awk '
+    /^- \*\*Answer:\*\*/ {
+      sub(/^- \*\*Answer:\*\* */, "")
+      if (length($0) > 0) { buf = $0; started = 1 } else { started = 0 }
+      capturing = 1
+      next
+    }
+    /^- \*\*Decided by:\*\*/ { capturing = 0 }
+    capturing {
+      if (started) { buf = buf "\n" $0 } else { buf = $0; started = 1 }
+      next
+    }
+    END { print buf }
+  ' "$1"
+}
+
+block_is_answered() {
+  local txt
+  txt="$(block_answer_text "$1" | tr -d '[:space:]')"
+  [ -n "$txt" ]
+}
+
+# Taxonomy display order (Output ordering rule). Unknown/mistyped types
+# sort last rather than being silently dropped or guessed into a bucket.
+type_rank() {
+  case "$1" in
+    DECISION) echo 1 ;;
+    DATA) echo 2 ;;
+    SCOPE) echo 3 ;;
+    DEFECT) echo 4 ;;
+    MECHANICAL) echo 5 ;;
+    TARGET-GAP) echo 6 ;;
+    CONFLICT) echo 7 ;;
+    *) echo 99 ;;
+  esac
+}
+
+# ─── Known analysis documents clarify sweeps ─────────────────────────────────
+
+DOC_NAMES=(codebase-report.md architecture.md domain-model.md functional-spec.md rebuild-backlog.md)
+
+# ─── Subcommand: collect (extract mode, pre-agent) ───────────────────────────
+
+cmd_collect() {
+  local specclaw_dir="$1"
+  [ -d "$specclaw_dir" ] || die "specclaw directory not found: $specclaw_dir"
+
+  local specclaw_dir_abs project_root analysis_dir
+  specclaw_dir_abs="$(cd "$specclaw_dir" && pwd)"
+  project_root="$(cd "$specclaw_dir_abs/.." && pwd)"
+  analysis_dir="$specclaw_dir_abs/analysis"
+
+  local -a docs_present=() docs_missing=()
+  local d
+  for d in "${DOC_NAMES[@]}"; do
+    if [ -f "$analysis_dir/$d" ]; then
+      docs_present+=("$d")
+    else
+      docs_missing+=("$d")
+    fi
+  done
+
+  if [ "${#docs_present[@]}" -eq 0 ]; then
+    die "No analysis documents found in .specclaw/analysis/ — run /specclaw:analyze, /specclaw:architecture, and/or /specclaw:domain first (rebuild-backlog.md from /specclaw:rebuild-plan is swept too, if present)."
+  fi
+
+  local docs_present_json docs_missing_json
+  docs_present_json="$(printf '%s\n' "${docs_present[@]}" | json_array_from_lines)"
+  docs_missing_json="$(printf '%s\n' "${docs_missing[@]}" | json_array_from_lines)"
+
+  local clar_file="$analysis_dir/clarifications.md"
+  local clar_exists=false
+  local next_num=1
+  local existing_json="" first=true
+
+  if [ -f "$clar_file" ]; then
+    clar_exists=true
+    local workdir; workdir="$(mktemp -d)"
+    split_question_blocks "$clar_file" "$workdir"
+    local f id title source num
+    for f in "$workdir"/CQ-*.md; do
+      [ -f "$f" ] || continue
+      id="$(block_id "$f")"
+      num="${id#CQ-}"
+      num=$((10#$num))
+      [ "$num" -ge "$next_num" ] && next_num=$((num + 1))
+      title="$(block_title "$f")"
+      source="$(block_single_field "$f" "Source")"
+      if $first; then first=false; else existing_json="${existing_json},"; fi
+      existing_json="${existing_json}
+    {\"id\": \"$(json_escape "$id")\", \"title\": \"$(json_escape "$title")\", \"source\": \"$(json_escape "$source")\"}"
+    done
+    rm -rf "$workdir"
+  fi
+
+  local next_id
+  next_id="$(printf 'CQ-%03d' "$next_num")"
+
+  local output
+  output=$(cat <<ENDJSON
+{
+  "project_root": "$(json_escape "$project_root")",
+  "analysis_dir": ".specclaw/analysis",
+  "docs_present": [${docs_present_json}
+  ],
+  "docs_missing": [${docs_missing_json}
+  ],
+  "clarifications_exists": ${clar_exists},
+  "next_id": "$(json_escape "$next_id")",
+  "existing_questions": [${existing_json}
+  ]
+}
+ENDJSON
+)
+  emit_json "$output"
+}
+
+# ─── Subcommand: render (extract mode, post-agent) ───────────────────────────
+
+cmd_render() {
+  local specclaw_dir="$1" draft_file="$2"
+  [ -d "$specclaw_dir" ] || die "specclaw directory not found: $specclaw_dir"
+  [ -f "$draft_file" ] || die "draft file not found: $draft_file"
+
+  local specclaw_dir_abs project_root analysis_dir archive_dir
+  specclaw_dir_abs="$(cd "$specclaw_dir" && pwd)"
+  project_root="$(cd "$specclaw_dir_abs/.." && pwd)"
+  analysis_dir="$specclaw_dir_abs/analysis"
+  archive_dir="$analysis_dir/archive"
+
+  local clar_file="$analysis_dir/clarifications.md"
+
+  local workdir; workdir="$(mktemp -d)"
+  mkdir -p "$workdir/existing" "$workdir/new" "$workdir/merged"
+
+  [ -f "$clar_file" ] && split_question_blocks "$clar_file" "$workdir/existing"
+  split_question_blocks "$draft_file" "$workdir/new"
+
+  local f id
+  for f in "$workdir/existing"/CQ-*.md; do
+    [ -f "$f" ] || continue
+    cp "$f" "$workdir/merged/"
+  done
+  for f in "$workdir/new"/CQ-*.md; do
+    [ -f "$f" ] || continue
+    local fname
+    fname="$(basename "$f")"
+    if [ -f "$workdir/existing/$fname" ]; then
+      warn "draft question $(block_id "$f") collides with an existing ID — keeping the existing block, discarding the draft's duplicate (IDs must never be reused)."
+      continue
+    fi
+    cp "$f" "$workdir/merged/$fname"
+  done
+
+  shopt -s nullglob
+  local -a merged_files=("$workdir/merged"/CQ-*.md)
+  shopt -u nullglob
+
+  if [ "${#merged_files[@]}" -eq 0 ]; then
+    rm -rf "$workdir"
+    die "no question blocks to render (the draft produced nothing and no prior clarifications.md exists)."
+  fi
+
+  # Archive prior file now that its content is safely preserved in
+  # $workdir/existing / $workdir/merged.
+  if [ -f "$clar_file" ]; then
+    mkdir -p "$archive_dir"
+    mv "$clar_file" "$archive_dir/$(date +%Y-%m-%d-%H%M%S)-clarifications.md"
+  fi
+
+  # Compute sort keys + running counts. Sort key = blocking-rank, then
+  # type-rank, then ID (tiebreaker for deterministic, stable ordering) —
+  # display order only; IDs themselves are never touched.
+  local sortlist; sortlist="$(mktemp)"
+  local total=0 blocking_count=0 unanswered_count=0
+  declare -A type_counts=(
+    [DECISION]=0 [DATA]=0 [SCOPE]=0 [DEFECT]=0 [MECHANICAL]=0 [TARGET-GAP]=0 [CONFLICT]=0
+  )
+
+  for f in "${merged_files[@]}"; do
+    id="$(block_id "$f")"
+    local qtype blocking sortkey trank brank
+    qtype="$(block_single_field "$f" "Type")"
+    blocking="$(block_field_blocking_bool "$f")"
+
+    if [[ -v type_counts[$qtype] ]]; then
+      type_counts[$qtype]=$((type_counts[$qtype] + 1))
+    else
+      warn "unknown Type '$qtype' in question $id — expected one of: DECISION, DATA, SCOPE, DEFECT, MECHANICAL, TARGET-GAP, CONFLICT"
+    fi
+    trank="$(type_rank "$qtype")"
+
+    total=$((total + 1))
+    if [ "$blocking" = "yes" ]; then
+      blocking_count=$((blocking_count + 1))
+      brank=0
+    else
+      brank=1
+    fi
+    block_is_answered "$f" || unanswered_count=$((unanswered_count + 1))
+
+    sortkey="$(printf '%d-%02d-%s' "$brank" "$trank" "$id")"
+    printf '%s\t%s\n' "$sortkey" "$f" >> "$sortlist"
+  done
+
+  local questions_body="" qfirst=true blockfile sortkey
+  while IFS=$'\t' read -r sortkey blockfile; do
+    [ -z "$blockfile" ] && continue
+    if $qfirst; then qfirst=false; else questions_body="${questions_body}
+
+"; fi
+    questions_body="${questions_body}$(cat "$blockfile")"
+  done < <(sort "$sortlist")
+  rm -f "$sortlist"
+
+  local summary
+  summary="$(cat <<EOF
+**Total questions:** ${total}
+**Blocking:** ${blocking_count}
+**Unanswered:** ${unanswered_count}
+**By type:** DECISION: ${type_counts[DECISION]}, DATA: ${type_counts[DATA]}, SCOPE: ${type_counts[SCOPE]}, DEFECT: ${type_counts[DEFECT]}, MECHANICAL: ${type_counts[MECHANICAL]}, TARGET-GAP: ${type_counts[TARGET-GAP]}, CONFLICT: ${type_counts[CONFLICT]}
+EOF
+)"
+
+  # Recompute which of the five known docs are present, for the header —
+  # cheap, self-contained, avoids threading collect's output through argv.
+  local -a docs_present=()
+  for d in "${DOC_NAMES[@]}"; do
+    [ -f "$analysis_dir/$d" ] && docs_present+=("$d")
+  done
+  local docs_swept
+  docs_swept="$(IFS=', '; echo "${docs_present[*]}")"
+
+  local title date_str template_file doc
+  title="$(project_title "$project_root")"
+  date_str="$(date +%Y-%m-%d)"
+  template_file="$SCRIPT_DIR/../templates/clarifications.md"
+
+  doc="$(cat "$template_file")"
+  doc="$(substitute "$doc" '{{title}}' "$title")"
+  doc="$(substitute "$doc" '{{date}}' "$date_str")"
+  doc="$(substitute "$doc" '{{docs_swept}}' "$docs_swept")"
+  doc="$(substitute "$doc" '{{summary}}' "$summary")"
+  doc="$(substitute "$doc" '{{questions}}' "$questions_body")"
+
+  printf '%s\n' "$doc" > "$clar_file"
+
+  rm -f "$draft_file"
+  rm -rf "$workdir"
+
+  echo "Wrote $clar_file (${total} question(s), ${unanswered_count} unanswered, ${blocking_count} blocking)" >&2
+}
+
+# ─── Subcommand: resolve-collect (resolve mode, pre-agent) ───────────────────
+
+cmd_resolve_collect() {
+  local specclaw_dir="$1"
+  [ -d "$specclaw_dir" ] || die "specclaw directory not found: $specclaw_dir"
+
+  local specclaw_dir_abs project_root analysis_dir
+  specclaw_dir_abs="$(cd "$specclaw_dir" && pwd)"
+  project_root="$(cd "$specclaw_dir_abs/.." && pwd)"
+  analysis_dir="$specclaw_dir_abs/analysis"
+  local clar_file="$analysis_dir/clarifications.md"
+
+  [ -f "$clar_file" ] || die "no .specclaw/analysis/clarifications.md found — run /specclaw:clarify first."
+
+  local workdir; workdir="$(mktemp -d)"
+  split_question_blocks "$clar_file" "$workdir"
+
+  local -a answered=() unanswered=()
+  local f id
+  for f in "$workdir"/CQ-*.md; do
+    [ -f "$f" ] || continue
+    id="$(block_id "$f")"
+    if block_is_answered "$f"; then
+      answered+=("$id")
+    else
+      unanswered+=("$id")
+    fi
+  done
+  rm -rf "$workdir"
+
+  if [ "${#answered[@]}" -eq 0 ]; then
+    die "no answered questions found in .specclaw/analysis/clarifications.md — fill in at least one **Answer:** field before running --resolve."
+  fi
+
+  local answered_json unanswered_json
+  answered_json="$(printf '%s\n' "${answered[@]}" | json_array_from_lines)"
+  unanswered_json="$(printf '%s\n' "${unanswered[@]}" | json_array_from_lines)"
+
+  local output
+  output=$(cat <<ENDJSON
+{
+  "project_root": "$(json_escape "$project_root")",
+  "clarifications_path": ".specclaw/analysis/clarifications.md",
+  "total_questions": $(( ${#answered[@]} + ${#unanswered[@]} )),
+  "answered_ids": [${answered_json}
+  ],
+  "unanswered_ids": [${unanswered_json}
+  ]
+}
+ENDJSON
+)
+  emit_json "$output"
+}
+
+# ─── Subcommand: resolve-render (resolve mode, post-agent) ──────────────────
+
+cmd_resolve_render() {
+  local specclaw_dir="$1" adr_file="$2"
+  [ -d "$specclaw_dir" ] || die "specclaw directory not found: $specclaw_dir"
+  [ -f "$adr_file" ] || die "ADR-judgment file not found: $adr_file"
+
+  local specclaw_dir_abs project_root analysis_dir archive_dir
+  specclaw_dir_abs="$(cd "$specclaw_dir" && pwd)"
+  project_root="$(cd "$specclaw_dir_abs/.." && pwd)"
+  analysis_dir="$specclaw_dir_abs/analysis"
+  archive_dir="$analysis_dir/archive"
+
+  local clar_file="$analysis_dir/clarifications.md"
+  [ -f "$clar_file" ] || die "no .specclaw/analysis/clarifications.md found — run /specclaw:clarify first."
+
+  local workdir; workdir="$(mktemp -d)"
+  split_question_blocks "$clar_file" "$workdir"
+
+  shopt -s nullglob
+  local -a block_files=("$workdir"/CQ-*.md)
+  shopt -u nullglob
+
+  local decisions_body="" unanswered_body="" dfirst=true
+  local f id title qtype source answer decided_by decided_date blocking_txt entry
+
+  for f in "${block_files[@]}"; do
+    id="$(block_id "$f")"
+    title="$(block_title "$f")"
+    qtype="$(block_single_field "$f" "Type")"
+
+    if block_is_answered "$f"; then
+      source="$(block_single_field "$f" "Source")"
+      answer="$(block_answer_text "$f")"
+      decided_by="$(block_single_field "$f" "Decided by")"
+      decided_date="$(block_single_field "$f" "Date")"
+
+      entry="$(cat <<ENTRY
+### ${id} — ${title}
+
+- **Type:** ${qtype}
+- **Decision:** ${answer}
+- **Decided by:** ${decided_by:-⚠ not recorded}
+- **Date:** ${decided_date:-⚠ not recorded}
+- **Source:** ${source}
+ENTRY
+)"
+      if $dfirst; then dfirst=false; else decisions_body="${decisions_body}
+
+"; fi
+      decisions_body="${decisions_body}${entry}"
+    else
+      blocking_txt="$(block_single_field "$f" "Blocking")"
+      unanswered_body="${unanswered_body}- **${id}** — ${title} (Type: ${qtype}, Blocking: ${blocking_txt})
+"
+    fi
+  done
+  rm -rf "$workdir"
+
+  [ -n "$decisions_body" ] || decisions_body="No decisions recorded yet — no answered questions found in clarifications.md."
+  [ -n "$unanswered_body" ] || unanswered_body="All questions in clarifications.md have been answered."
+
+  # Splice in the agent's ADR-worthiness judgments.
+  local adr_body="" any_promoted=false
+  local aid apromote atitle arationale
+  while IFS='|' read -r aid apromote atitle arationale; do
+    [ -z "$aid" ] && continue
+    case "$apromote" in
+      [Yy]es|[Yy])
+        any_promoted=true
+        adr_body="${adr_body}- **${aid}** — ${atitle} — ${arationale}
+"
+        ;;
+    esac
+  done < "$adr_file"
+  $any_promoted || adr_body="No decisions in this run were judged significant enough to warrant a standalone ADR."
+
+  # Archive prior decisions.md, now that everything it would have held is
+  # already re-derived fresh from clarifications.md above.
+  local decisions_file="$analysis_dir/decisions.md"
+  if [ -f "$decisions_file" ]; then
+    mkdir -p "$archive_dir"
+    mv "$decisions_file" "$archive_dir/$(date +%Y-%m-%d-%H%M%S)-decisions.md"
+  fi
+
+  local title_val date_str template_file doc
+  title_val="$(project_title "$project_root")"
+  date_str="$(date +%Y-%m-%d)"
+  template_file="$SCRIPT_DIR/../templates/decisions.md"
+
+  doc="$(cat "$template_file")"
+  doc="$(substitute "$doc" '{{title}}' "$title_val")"
+  doc="$(substitute "$doc" '{{date}}' "$date_str")"
+  doc="$(substitute "$doc" '{{decisions}}' "$decisions_body")"
+  doc="$(substitute "$doc" '{{adr_candidates}}' "$adr_body")"
+  doc="$(substitute "$doc" '{{unanswered}}' "$unanswered_body")"
+
+  printf '%s\n' "$doc" > "$decisions_file"
+
+  rm -f "$adr_file"
+
+  echo "Wrote $decisions_file" >&2
+}
+
+# ─── Main ─────────────────────────────────────────────────────────────────────
+
+case "${1:-}" in
+  collect)
+    [ $# -ge 2 ] || die "Usage: specclaw-clarify collect <specclaw_dir>"
+    cmd_collect "$2"
+    ;;
+  render)
+    [ $# -ge 3 ] || die "Usage: specclaw-clarify render <specclaw_dir> <draft_file>"
+    cmd_render "$2" "$3"
+    ;;
+  resolve-collect)
+    [ $# -ge 2 ] || die "Usage: specclaw-clarify resolve-collect <specclaw_dir>"
+    cmd_resolve_collect "$2"
+    ;;
+  resolve-render)
+    [ $# -ge 3 ] || die "Usage: specclaw-clarify resolve-render <specclaw_dir> <adr_file>"
+    cmd_resolve_render "$2" "$3"
+    ;;
+  "")
+    usage
+    exit 1
+    ;;
+  *)
+    die "Unknown subcommand: $1. Run specclaw-clarify --help for usage."
+    ;;
+esac
