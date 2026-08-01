@@ -1,19 +1,19 @@
 # 🦞 SpecClaw Dashboard
 
 **Project:** specclaw
-**Last Updated:** 2026-08-01 05:38 UTC
+**Last Updated:** 2026-08-01 13:38 UTC
 
 ## Active Changes
 
 
 - 🔨 **memory-aware-parallelism** — 5/6 tasks (83%) | 0 failed | PR #46 merged
+- 🔀 **tracker-state-integrity** — pr raised | 7/7 tasks (100%) | 0 failed | PR #57 open
 
 ## Pending Proposals
 
 
 - 📋 **phase-time-accounting** — proposal ready, awaiting planning
 - 📋 **staged-files-auditor** — proposal ready, awaiting planning
-- 📋 **tracker-state-integrity** — proposal ready, awaiting planning
 
 ## Recently Completed
 
@@ -47,6 +47,6 @@
 
 ## Stats
 
-- **Total changes:** 27
-- **Active:** 1
+- **Total changes:** 28
+- **Active:** 2
 - **Completed:** 26
