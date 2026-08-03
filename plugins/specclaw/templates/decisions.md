@@ -5,9 +5,14 @@
 
 <!--
   This is the clean, pinnable decision record /specclaw:clarify --resolve
-  produces from clarifications.md's answered questions. Every entry below
-  is a mechanical transcription of an already-answered question — the
-  Answer/Decided by/Date fields are transcribed, never reinterpreted.
+  produces from clarifications.md's answered questions, swept across all
+  three question families (CQ-NNN/SQ-NNN/UQ-NNN). Every entry below is a
+  mechanical transcription of an already-answered question — the
+  Answer/Decided by/Date fields are transcribed, never reinterpreted. Each
+  entry carries a **Family:** line (Extracted | Standard bank | Custom
+  (per-repo)) derived mechanically from the question's ID prefix, so a
+  reader can tell at a glance whether a decision came from this repo's own
+  code, the plugin's standard bank, or a per-repo custom question.
   Re-running --resolve is idempotent: it always reflects the current state
   of clarifications.md's answered blocks, replacing this file's prior
   content wholesale (the prior version is archived, never lost).

@@ -101,12 +101,35 @@ If any of the four analysis documents is missing, `rebuild-plan` stops and
 names exactly which one(s) plus the command that produces each — it never
 attempts a partial backlog.
 
+**Optional but recommended: run `/specclaw:clarify` and `/specclaw:baseline`
+first.** Neither is required — `rebuild-plan` degrades gracefully without
+them, naming what's missing in its status header — but when
+`.specclaw/analysis/clarifications.md`/`decisions.md` and
+`.specclaw/baseline/manifest.json`/`scenarios.md` are present, every backlog
+item also gets a computed **Gate** (blocked by an unanswered clarify
+question, at risk from a non-blocking one, or clear) and **Verification**
+state (a captured golden-master fixture exists, one is designed but not yet
+captured, the behavior is provably unreachable in the legacy app, or no
+baseline work has touched these rules at all) — turning the backlog from a
+static acceptance-basis list into a live readiness signal.
+
 `rebuild-plan` creates **nothing** under `.specclaw/changes/` and calls
 **no** lifecycle command. Stage its output too:
 
 ```bash
 git add .specclaw/analysis/rebuild-backlog.md
 ```
+
+**The backlog is living state after the first run.** A second bare
+`/specclaw:rebuild-plan` refuses to regenerate it (to avoid destroying
+in-flight Gate/Verification status, struck/deferred items, or a status note
+a human typed into an item). Run `/specclaw:rebuild-plan --refresh` instead
+— it recomputes Gate/Verification for every item, applies any newly
+recorded decisions (striking, deferring, or reshaping items; appending
+genuinely new ones), and ends with a change report naming what became
+unblocked or verifiable, what was struck/deferred/revised/added, and the
+single recommended next item to propose. `BL-###` item ids are permanent
+across every refresh, never renumbered.
 
 ## Step 5 — Propose each backlog item yourself
 
