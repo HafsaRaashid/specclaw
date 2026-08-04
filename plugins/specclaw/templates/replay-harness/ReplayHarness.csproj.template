@@ -1,0 +1,32 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>{{target_framework}}</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+
+    <IsPackable>false</IsPackable>
+    <IsTestProject>true</IsTestProject>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.8.0" />
+    <PackageReference Include="xunit" Version="2.5.3" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="2.5.3" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Using Include="Xunit" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Reference the NEW repo's own Core/domain project directly — this is
+         the seam under replay, not the legacy app. Whatever EF Core provider
+         package that project itself references (SQLite today per ADR-0003;
+         may change if/when the Postgres decision in decisions.md SQ-002 is
+         actually implemented) flows in transitively; do not add a second,
+         possibly mismatched provider package reference here. -->
+    <ProjectReference Include="{{core_project_reference}}" />
+  </ItemGroup>
+
+</Project>
