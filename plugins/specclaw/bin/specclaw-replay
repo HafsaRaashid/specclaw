@@ -1,0 +1,775 @@
+#!/usr/bin/env bash
+# specclaw-replay — golden-master comparison: replays captured legacy fixtures
+# against the new app's own behaviour. Bash + coreutils + jq (required — this
+# script parses nested JSON in manifest.json/fixtures/compare results, unlike
+# sibling bins that only hand-build flat JSON).
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PLUGIN_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+# ─── Helpers ──────────────────────────────────────────────────────────────────
+
+usage() {
+  cat <<'EOF'
+Usage: specclaw-replay <subcommand> [options]
+
+Subcommands:
+  resolve       <specclaw_dir> <change_name|--all> <out_selection_json>
+                Change -> BL -> DR -> GM join (or --all for the full manifest).
+                Verifies manifest/fixtures are present and every selected
+                fixture's sha256 matches manifest.json's recorded hash — fails
+                loudly on any mismatch, missing manifest, or unresolved BL
+                item. Writes the selection JSON and prints a one-line summary.
+
+  init-rundir   <specclaw_dir> <run_dir>
+                Scaffolds the throwaway test project: copies the fixed
+                Capture.cs/ResultWriter.cs harness files, resolves the new
+                repo's own Core/domain project (or config.yaml's
+                replay.core_project override), and writes ReplayHarness.csproj.
+
+  run-tests     <run_dir>
+                Runs `dotnet build` then `dotnet test` inside the run
+                directory (respecting config.yaml's replay.dotnet_command
+                override, persisted by init-rundir). Does not itself decide
+                MATCH/DIVERGES — only reports build/test pass-fail and how
+                many actual-<GM-ID>.json files were written.
+
+  compare       <specclaw_dir> <run_dir>
+                Deterministic field-by-field diff of every REPLAYABLE
+                fixture's expected vs. actual output (per mapping.json),
+                skipping the fixture's own normalized_fields and comparing
+                Exception*Type fields by short name only. Writes compare.json.
+                Never asserted by an agent.
+
+  sanction-check <specclaw_dir> <run_dir>
+                Mechanically re-verifies every CQ the replay-auditor agent
+                cited in sanction.json actually exists as a decided
+                `### CQ-0NN —` heading in decisions.md (never an Outstanding
+                Question). Writes sanction-verified.json.
+
+  render        <specclaw_dir> <change_name|--all> <run_dir>
+                Renders replay-report.md (or report-<run_id>.md for --all)
+                from selection/mapping/compare/sanction-verified JSON.
+                Archives any prior per-change report first. Exits 0/1/2 for
+                PASS/FAIL/INCOMPLETE.
+
+  cleanup       <run_dir> [--keep]
+                Deletes the run directory unless --keep is passed.
+
+Options:
+  -h, --help    Show this help message
+EOF
+}
+
+die() { echo "ERROR: $*" >&2; exit 1; }
+warn() { echo "WARN: $*" >&2; }
+
+require_jq() {
+  command -v jq >/dev/null 2>&1 \
+    || die "jq is required by specclaw-replay (nested manifest/fixture JSON parsing) but was not found on PATH."
+}
+
+# MSYS2/Git-Bash paths (/c/...) are not understood by MSBuild when baked into
+# a .csproj's XML content (unlike command-line arguments to a native exe,
+# file contents are never auto-translated) — convert via cygpath when
+# available; pass through unchanged on non-Windows toolchains.
+to_native_path() {
+  local p="$1"
+  if command -v cygpath >/dev/null 2>&1; then
+    cygpath -w "$p" 2>/dev/null || printf '%s' "$p"
+  else
+    printf '%s' "$p"
+  fi
+}
+
+# JSON-escape a string (used only for hand-built markdown-derived text, never
+# for anything already flowing through jq).
+json_escape() {
+  local s="$1"
+  s="${s//\\/\\\\}"
+  s="${s//\"/\\\"}"
+  s="${s//$'\n'/\\n}"
+  s="${s//$'\r'/\\r}"
+  s="${s//$'\t'/\\t}"
+  printf '%s' "$s"
+}
+
+# Read a YAML value (simple single-line scalar) from config.yaml.
+# Usage: yaml_val <file> <dotted.key> — matches on the *last* segment's field
+# name only (same tolerant convention as this plugin's other bins).
+yaml_val() {
+  local file="$1" key="$2"
+  local field="${key##*.}"
+  local val
+  val=$(grep -E "^[[:space:]]*${field}:" "$file" 2>/dev/null | head -1 \
+        | sed -E 's/^[^:]*:[[:space:]]*//' \
+        | sed -E 's/[[:space:]]+#.*$//' \
+        | sed -E 's/[[:space:]]+$//' \
+        | sed 's/^"//' | sed 's/"$//' | sed "s/^'//" | sed "s/'\$//") || true
+  printf '%s' "$val"
+}
+
+# Safe placeholder substitution — never bash's ${var/pat/rep} or sed's s///,
+# both of which treat a literal '&' in the replacement as "insert whole
+# match" on this toolchain. Split on the literal token and concatenate,
+# looping so EVERY occurrence is replaced (a token used more than once in a
+# template — e.g. {{overall_verdict}} — must not leave later copies untouched).
+fill_placeholder() {
+  local content="$1" token="$2" value="$3"
+  local result="" remaining="$content"
+  while [[ "$remaining" == *"$token"* ]]; do
+    result="${result}${remaining%%"$token"*}${value}"
+    remaining="${remaining#*"$token"}"
+  done
+  printf '%s' "${result}${remaining}"
+}
+
+# Extract the markdown block under a "### <heading_id> —" heading, up to (not
+# including) the next "### " heading. Used for both decisions.md (CQ-###) and
+# rebuild-backlog.md (BL-###) — same heading shape in both real documents.
+extract_heading_block() {
+  local file="$1" heading_id="$2"
+  awk -v id="$heading_id" '
+    $0 ~ "^### " id " " {found=1; print; next}
+    found && /^### / {exit}
+    found {print}
+  ' "$file" 2>/dev/null || true
+}
+
+# ─── Subcommand: resolve ─────────────────────────────────────────────────────
+# Resolve a change (or --all) to its selected GM-### fixtures via change -> BL
+# -> DR -> GM, verify manifest/fixture integrity, and write selection.json.
+
+resolve_bl_id() {
+  local change_dir="$1" backlog_file="$2"
+  local proposal="$change_dir/proposal.md" spec="$change_dir/spec.md"
+  local f
+
+  # Pass 1: a literal BL-### citation, if any change ever writes one directly.
+  local direct=""
+  for f in "$proposal" "$spec"; do
+    [ -f "$f" ] || continue
+    direct="${direct}$(grep -oE 'BL-[0-9]{3}' "$f" 2>/dev/null || true) "
+  done
+  direct="$(printf '%s' "$direct" | tr -s ' ' '\n' | grep -v '^$' | sort -u || true)"
+  if [ -n "$direct" ]; then
+    local n
+    n=$(printf '%s\n' "$direct" | grep -c . || true)
+    [ "$n" -gt 1 ] && warn "Change cites multiple BL items directly (${direct//$'\n'/, }) — using the first."
+    printf '%s\n' "$direct" | head -1
+    return 0
+  fi
+
+  # Pass 2: bare "item N"/"backlog item N", excluding relational citations
+  # ("Depends on: ... item 3", "Blocks: item 8") which name OTHER items, not
+  # this change's own. Real convention confirmed in task-status-transitions:
+  # proposal.md says "Rebuild-backlog item 4 merges..." (self-citation);
+  # spec.md's "Depends on"/"Blocks" lines cite unrelated items.
+  local item_num=""
+  for f in "$proposal" "$spec"; do
+    [ -f "$f" ] || continue
+    item_num="$(grep -iE 'rebuild-backlog item|backlog item' "$f" 2>/dev/null \
+                | grep -viE 'depends on|blocks' \
+                | grep -oiE 'item[[:space:]]+[0-9]+' \
+                | grep -oE '[0-9]+' \
+                | head -1 || true)"
+    [ -n "$item_num" ] && break
+  done
+  [ -z "$item_num" ] && { printf ''; return 0; }
+
+  local bl_id
+  bl_id="$(printf 'BL-%03d' "$item_num")"
+  if [ -f "$backlog_file" ] && ! grep -qE "^### ${bl_id} " "$backlog_file"; then
+    warn "Derived ${bl_id} from an 'item ${item_num}' citation but rebuild-backlog.md has no matching '### ${bl_id} —' heading — treating as unresolved."
+    printf ''
+    return 0
+  fi
+
+  # Soft sanity check: does the resolved item's own title share any keyword
+  # with the change folder name? A miss is a WARN, not a die — this fallback
+  # is best-effort text matching, not proof.
+  if [ -f "$backlog_file" ]; then
+    local title matched=false word
+    title="$(extract_heading_block "$backlog_file" "$bl_id" | head -1 | sed -E "s/^### ${bl_id}[[:space:]]+.—.[[:space:]]*//")"
+    local change_base
+    change_base="$(basename "$change_dir")"
+    IFS='-' read -ra words <<< "$change_base"
+    for word in "${words[@]:-}"; do
+      [ "${#word}" -lt 4 ] && continue
+      if printf '%s' "$title" | grep -qi -- "$word"; then matched=true; break; fi
+    done
+    $matched || warn "Resolved ${bl_id} ('${title}') shares no obvious keyword with change name '${change_base}' — double-check this is the right backlog item."
+  fi
+
+  printf '%s\n' "$bl_id"
+}
+
+cmd_resolve() {
+  require_jq
+  local specclaw_dir="$1" target="$2" out_path="$3"
+  local specclaw_dir_abs project_root
+  specclaw_dir_abs="$(cd "$specclaw_dir" && pwd)"
+  project_root="$(cd "$specclaw_dir_abs/.." && pwd)"
+
+  local manifest="$specclaw_dir_abs/baseline/manifest.json"
+  local fixtures_dir="$specclaw_dir_abs/baseline/fixtures"
+  local backlog_file="$specclaw_dir_abs/analysis/rebuild-backlog.md"
+
+  [ -f "$manifest" ] || die "manifest.json not found at ${manifest} — run /specclaw:baseline --record first."
+  [ -d "$fixtures_dir" ] || die "Fixtures directory not found at ${fixtures_dir}."
+  jq -e . "$manifest" >/dev/null 2>&1 || die "manifest.json at ${manifest} is not valid JSON."
+
+  local bl_id=""
+  if [ "$target" != "--all" ]; then
+    local change_dir="$specclaw_dir_abs/changes/${target}"
+    [ -d "$change_dir" ] || die "Change '${target}' not found under ${specclaw_dir_abs}/changes/."
+    bl_id="$(resolve_bl_id "$change_dir" "$backlog_file")"
+    [ -n "$bl_id" ] || die "Change '${target}' cites no backlog (BL-###) item in proposal.md/spec.md — replay only makes sense for backlog-driven changes."
+  fi
+
+  local selected_fixtures
+  if [ -n "$bl_id" ]; then
+    selected_fixtures="$(jq --arg bl "$bl_id" '[ .fixtures[] | select(.verifies_backlog_item | startswith($bl)) ]' "$manifest")"
+  else
+    selected_fixtures="$(jq '.fixtures' "$manifest")"
+  fi
+
+  local count
+  count="$(jq 'length' <<< "$selected_fixtures")"
+  [ "$count" -gt 0 ] || die "No fixtures matched selection for '${target}'${bl_id:+ (${bl_id})} in ${manifest}."
+
+  # Hash-verify every selected fixture against the manifest's recorded hash.
+  # Collect ALL problems before failing — never stop at the first.
+  local problems=()
+  while IFS= read -r fx; do
+    local sid fpath chash
+    sid="$(jq -r '.scenario_id' <<< "$fx")"
+    fpath="$(jq -r '.fixture_path' <<< "$fx")"
+    chash="$(jq -r '.content_hash' <<< "$fx")"
+    local full="${project_root}/${fpath}"
+    if [ ! -f "$full" ]; then
+      problems+=("${sid}: fixture file missing at ${fpath}")
+      continue
+    fi
+    local actual_hash
+    actual_hash="sha256:$(sha256sum "$full" 2>/dev/null | awk '{print $1}')"
+    if [ "$actual_hash" != "$chash" ]; then
+      problems+=("${sid}: hash mismatch — manifest=${chash} actual=${actual_hash}")
+    fi
+  done < <(jq -c '.[]' <<< "$selected_fixtures")
+
+  if [ "${#problems[@]}" -gt 0 ]; then
+    local joined
+    joined="$(printf '  - %s\n' "${problems[@]}")"
+    die "Fixture integrity check failed — refusing to compare against a tampered baseline:
+${joined}"
+  fi
+
+  local dr_rules_json legacy_shas_json
+  dr_rules_json="$(jq '[ .[].business_rules_pinned ] | join(" ") | [scan("DR-[0-9]{3}")] | unique' <<< "$selected_fixtures")"
+  legacy_shas_json="$(jq '[ .[].legacy_commit_sha ] | unique' <<< "$selected_fixtures")"
+  local sha_count
+  sha_count="$(jq 'length' <<< "$legacy_shas_json")"
+  [ "$sha_count" -gt 1 ] && warn "Selected fixtures were captured across multiple legacy commit SHAs: $(jq -r 'join(", ")' <<< "$legacy_shas_json")."
+
+  mkdir -p "$(dirname "$out_path")"
+  jq -n \
+    --arg target "$target" \
+    --arg bl "$bl_id" \
+    --argjson fixtures "$selected_fixtures" \
+    --argjson dr_rules "$dr_rules_json" \
+    --argjson legacy_shas "$legacy_shas_json" \
+    --argjson count "$count" \
+    '{
+      target: $target,
+      bl_item: (if $bl == "" then null else $bl end),
+      selected_count: $count,
+      dr_rules_covered: $dr_rules,
+      legacy_commit_shas: $legacy_shas,
+      legacy_commit_sha: $legacy_shas[0],
+      fixtures: $fixtures
+    }' > "$out_path"
+
+  echo "Selected ${count} fixture(s) for ${target}${bl_id:+ (${bl_id})}. DR rules covered: $(jq -r 'join(", ")' <<< "$dr_rules_json"). Legacy commit: $(jq -r '.[0]' <<< "$legacy_shas_json")."
+}
+
+# ─── Subcommand: init-rundir ─────────────────────────────────────────────────
+
+cmd_init_rundir() {
+  local specclaw_dir="$1" run_dir="$2"
+  local specclaw_dir_abs project_root
+  specclaw_dir_abs="$(cd "$specclaw_dir" && pwd)"
+  project_root="$(cd "$specclaw_dir_abs/.." && pwd)"
+
+  local harness_tpl="$PLUGIN_ROOT/templates/replay-harness"
+  [ -d "$harness_tpl" ] || die "Template directory missing: ${harness_tpl}"
+
+  mkdir -p "$run_dir/actual"
+  cp "$harness_tpl/Capture.cs" "$run_dir/Capture.cs"
+  cp "$harness_tpl/ResultWriter.cs" "$run_dir/ResultWriter.cs"
+  cp "$harness_tpl/Paths.cs" "$run_dir/Paths.cs"
+  cp "$harness_tpl/TestDbContextFactory.cs" "$run_dir/TestDbContextFactory.cs"
+
+  local config_file="$specclaw_dir_abs/config.yaml"
+  local core_override="" dotnet_override=""
+  if [ -f "$config_file" ]; then
+    core_override="$(yaml_val "$config_file" "replay.core_project")"
+    dotnet_override="$(yaml_val "$config_file" "replay.dotnet_command")"
+  fi
+  printf '%s' "${dotnet_override:-dotnet}" > "$run_dir/.dotnet-cmd"
+
+  local core_csproj=""
+  if [ -n "$core_override" ]; then
+    core_csproj="${project_root}/${core_override}"
+    [ -f "$core_csproj" ] || die "config.yaml's replay.core_project ('${core_override}') does not resolve to an existing file at ${core_csproj}."
+  else
+    local candidates=()
+    while IFS= read -r f; do
+      candidates+=("$f")
+    done < <(find "$project_root/src" -iname "*core*.csproj" 2>/dev/null)
+
+    case "${#candidates[@]}" in
+      0) die "No *.csproj matching '*Core*' found under ${project_root}/src — cannot resolve the new repo's own domain project. Set 'replay.core_project' in config.yaml to disambiguate." ;;
+      1) core_csproj="${candidates[0]}" ;;
+      *) die "Multiple candidate Core projects found — refusing to guess: ${candidates[*]}. Set 'replay.core_project' in config.yaml to disambiguate." ;;
+    esac
+  fi
+
+  local target_framework
+  target_framework="$(grep -oE '<TargetFramework>[^<]+' "$core_csproj" 2>/dev/null | head -1 | sed 's/<TargetFramework>//')"
+  [ -n "$target_framework" ] || die "Could not read <TargetFramework> from ${core_csproj}."
+
+  local core_csproj_native
+  core_csproj_native="$(to_native_path "$core_csproj")"
+
+  local tpl_content
+  tpl_content="$(cat "$harness_tpl/ReplayHarness.csproj.template")"
+  tpl_content="$(fill_placeholder "$tpl_content" "{{target_framework}}" "$target_framework")"
+  tpl_content="$(fill_placeholder "$tpl_content" "{{core_project_reference}}" "$core_csproj_native")"
+  printf '%s\n' "$tpl_content" > "$run_dir/ReplayHarness.csproj"
+
+  echo "Initialized run directory: ${run_dir}"
+  echo "Core project reference: ${core_csproj_native} (TargetFramework: ${target_framework})"
+}
+
+# ─── Subcommand: run-tests ───────────────────────────────────────────────────
+
+cmd_run_tests() {
+  local run_dir="$1"
+  [ -d "$run_dir" ] || die "Run directory not found: ${run_dir}"
+
+  local dotnet_cmd="dotnet"
+  [ -f "$run_dir/.dotnet-cmd" ] && dotnet_cmd="$(cat "$run_dir/.dotnet-cmd")"
+
+  local build_log="$run_dir/dotnet-build.log"
+  local test_log="$run_dir/dotnet-test.log"
+
+  echo "Building ${run_dir} ..."
+  if ! ( cd "$run_dir" && "$dotnet_cmd" build ) > "$build_log" 2>&1; then
+    tail -100 "$build_log" >&2
+    die "dotnet build failed in ${run_dir} — see ${build_log}. No fixtures can be replayed until this is fixed."
+  fi
+
+  echo "Running tests in ${run_dir} ..."
+  local test_rc=0
+  ( cd "$run_dir" && "$dotnet_cmd" test --logger "console;verbosity=normal" ) > "$test_log" 2>&1 || test_rc=$?
+
+  local total_lines
+  total_lines=$(wc -l < "$test_log")
+  if [ "$total_lines" -gt 200 ]; then
+    tail -200 "$test_log"
+    echo "... (truncated, ${total_lines} total lines; full log at ${test_log})"
+  else
+    cat "$test_log"
+  fi
+
+  local actual_count
+  actual_count=$(find "$run_dir/actual" -name "*.json" 2>/dev/null | wc -l)
+  echo "dotnet test exit code: ${test_rc}. Actual-result files written: ${actual_count}."
+}
+
+# ─── Subcommand: compare ─────────────────────────────────────────────────────
+# Deterministic field-by-field diff. Never asserted by an agent.
+
+compute_diffs() {
+  local expected_json="$1" actual_json="$2" normalized_json="$3"
+  jq -n --argjson expected "$expected_json" --argjson actual "$actual_json" --argjson normalized "$normalized_json" '
+    def scalars: select(type != "array" and type != "object");
+    def pathstr: map(if type == "number" then "[\(.)]" else . end) | join(".");
+    def shortname:
+      if type == "string" then (split(".") | last) else . end;
+
+    (($normalized // []) | map(sub("^output\\."; ""))) as $norm
+    | {value: ($expected // null)} as $ewrap
+    | {value: ($actual // null)} as $awrap
+    | (([$ewrap | paths(scalars)] + [$awrap | paths(scalars)]) | unique) as $allpaths
+    | [
+        $allpaths[] as $p
+        | ($p[1:] | pathstr) as $raw
+        | (if $raw == "" then "(root)" else $raw end) as $pstr
+        | select(($norm | index($pstr)) == null)
+        | ($ewrap | getpath($p)) as $ev
+        | ($awrap | getpath($p)) as $av
+        | (if ($pstr | test("ExceptionType$")) then ($ev | shortname) else $ev end) as $evc
+        | (if ($pstr | test("ExceptionType$")) then ($av | shortname) else $av end) as $avc
+        | select($evc != $avc)
+        | {field_path: $pstr, expected: $ev, actual: $av}
+      ]
+  '
+}
+
+cmd_compare() {
+  require_jq
+  local specclaw_dir="$1" run_dir="$2"
+  local project_root
+  project_root="$(cd "$specclaw_dir/.." && pwd)"
+
+  local selection="$run_dir/selection.json" mapping="$run_dir/mapping.json"
+  [ -f "$selection" ] || die "selection.json not found in ${run_dir} — run 'resolve' first."
+  [ -f "$mapping" ] || die "mapping.json not found in ${run_dir} — the replay-mapper agent must run first."
+  jq -e . "$mapping" >/dev/null 2>&1 || die "mapping.json in ${run_dir} is not valid JSON."
+
+  local results="[]"
+  while IFS= read -r entry; do
+    local sid verdict
+    sid="$(jq -r '.scenario_id' <<< "$entry")"
+    verdict="$(jq -r '.verdict' <<< "$entry")"
+
+    if [ "$verdict" != "REPLAYABLE" ]; then
+      results="$(jq --argjson e "$entry" '. + [{
+        scenario_id: $e.scenario_id, verdict: "NOT REPLAYABLE",
+        reason: ($e.reason // "no reason recorded"),
+        category: ($e.category // "other"),
+        remediation: ($e.remediation // null)
+      }]' <<< "$results")"
+      continue
+    fi
+
+    local fixture_path normalized_fields
+    fixture_path="$(jq -r --arg sid "$sid" '.fixtures[] | select(.scenario_id==$sid) | .fixture_path' "$selection")"
+    normalized_fields="$(jq -c --arg sid "$sid" '.fixtures[] | select(.scenario_id==$sid) | .normalized_fields' "$selection")"
+
+    local full_fixture="${project_root}/${fixture_path}"
+    local actual_file="${run_dir}/actual/${sid}.json"
+
+    if [ ! -f "$actual_file" ]; then
+      results="$(jq --arg sid "$sid" '. + [{scenario_id: $sid, verdict: "ERROR", detail: "No actual-result file written — the generated test crashed or did not run to completion."}]' <<< "$results")"
+      continue
+    fi
+    if ! jq -e . "$actual_file" >/dev/null 2>&1; then
+      results="$(jq --arg sid "$sid" '. + [{scenario_id: $sid, verdict: "ERROR", detail: "actual-result file is not valid JSON."}]' <<< "$results")"
+      continue
+    fi
+
+    local expected_output actual_output diffs
+    expected_output="$(jq -c '.output' "$full_fixture")"
+    actual_output="$(jq -c '.output' "$actual_file")"
+    diffs="$(compute_diffs "$expected_output" "$actual_output" "$normalized_fields")"
+
+    if [ "$(jq 'length' <<< "$diffs")" = "0" ]; then
+      results="$(jq --arg sid "$sid" '. + [{scenario_id: $sid, verdict: "MATCH"}]' <<< "$results")"
+    else
+      results="$(jq --arg sid "$sid" --argjson d "$diffs" '. + [{scenario_id: $sid, verdict: "DIVERGES", diffs: $d}]' <<< "$results")"
+    fi
+  done < <(jq -c '.[]' "$mapping")
+
+  jq -n --argjson results "$results" '{results: $results}' > "$run_dir/compare.json"
+
+  local match_n diverge_n error_n nr_n
+  match_n=$(jq '[.results[] | select(.verdict=="MATCH")] | length' "$run_dir/compare.json")
+  diverge_n=$(jq '[.results[] | select(.verdict=="DIVERGES")] | length' "$run_dir/compare.json")
+  error_n=$(jq '[.results[] | select(.verdict=="ERROR")] | length' "$run_dir/compare.json")
+  nr_n=$(jq '[.results[] | select(.verdict=="NOT REPLAYABLE")] | length' "$run_dir/compare.json")
+  echo "Compare complete: MATCH=${match_n} DIVERGES=${diverge_n} ERROR=${error_n} NOT_REPLAYABLE=${nr_n}"
+}
+
+# ─── Subcommand: sanction-check ──────────────────────────────────────────────
+
+cmd_sanction_check() {
+  require_jq
+  local specclaw_dir="$1" run_dir="$2"
+  local decisions="$specclaw_dir/analysis/decisions.md"
+  local compare_file="$run_dir/compare.json"
+  local sanction_file="$run_dir/sanction.json"
+  [ -f "$compare_file" ] || die "compare.json not found in ${run_dir} — run 'compare' first."
+
+  local diverges_n
+  diverges_n=$(jq '[.results[] | select(.verdict=="DIVERGES")] | length' "$compare_file")
+  if [ "$diverges_n" = "0" ]; then
+    echo '{"sanctions": []}' > "$run_dir/sanction-verified.json"
+    echo "No DIVERGES fixtures — nothing to sanction-check."
+    return 0
+  fi
+
+  [ -f "$sanction_file" ] || die "sanction.json not found in ${run_dir} — the replay-auditor agent must run first (${diverges_n} DIVERGES fixture(s) to review)."
+  jq -e . "$sanction_file" >/dev/null 2>&1 || die "sanction.json in ${run_dir} is not valid JSON."
+
+  local decisions_present=true
+  [ -f "$decisions" ] || { decisions_present=false; warn "decisions.md not found at ${decisions} — every DIVERGES is therefore UNSANCTIONED."; }
+
+  local verified="[]"
+  while IFS= read -r entry; do
+    local sid cq
+    sid="$(jq -r '.scenario_id' <<< "$entry")"
+    cq="$(jq -r '.cq_id // ""' <<< "$entry")"
+
+    local cq_exists=false note=""
+    if $decisions_present && [ -n "$cq" ] && [ "$cq" != "null" ]; then
+      if grep -qE "^### ${cq} " "$decisions"; then
+        cq_exists=true
+      else
+        note="Cited ${cq} has no '### ${cq} —' heading under decisions.md — not a decided item; treating as unsanctioned."
+      fi
+    fi
+
+    local rule_match=false
+    if $cq_exists; then
+      local dr_rule dr_token block
+      dr_rule="$(jq -r --arg sid "$sid" '[.fixtures[]? | select(.scenario_id==$sid) | .business_rules_pinned] | first // ""' "$run_dir/selection.json" 2>/dev/null || true)"
+      dr_token="$(printf '%s' "$dr_rule" | grep -oE 'DR-[0-9]{3}' | head -1 || true)"
+      if [ -n "$dr_token" ]; then
+        block="$(extract_heading_block "$decisions" "$cq")"
+        if printf '%s' "$block" | grep -qF "$dr_token"; then
+          rule_match=true
+        else
+          note="${note} ${cq}'s decision block does not mention ${dr_token} — citation accepted but unverified against the specific rule; human review recommended."
+        fi
+      fi
+    fi
+
+    local final_sanctioned=false
+    if $cq_exists; then
+      final_sanctioned=true
+    else
+      [ -z "$note" ] && note="Agent did not cite a decided CQ for this divergence — unsanctioned."
+    fi
+
+    verified="$(jq \
+      --arg sid "$sid" \
+      --argjson sanctioned "$final_sanctioned" \
+      --arg cq "$cq" \
+      --argjson cq_verified "$cq_exists" \
+      --argjson rule_match "$rule_match" \
+      --arg note "$note" \
+      '. + [{
+        scenario_id: $sid,
+        sanctioned: $sanctioned,
+        cq_id: (if $cq == "" then null else $cq end),
+        cq_verified: $cq_verified,
+        rule_citation_matched: $rule_match,
+        note: (if $note == "" then null else $note end)
+      }]' <<< "$verified")"
+  done < <(jq -c '.[]' "$sanction_file")
+
+  jq -n --argjson sanctions "$verified" '{sanctions: $sanctions}' > "$run_dir/sanction-verified.json"
+
+  local sanctioned_n unsanctioned_n
+  sanctioned_n=$(jq '[.sanctions[] | select(.sanctioned==true)] | length' "$run_dir/sanction-verified.json")
+  unsanctioned_n=$(jq '[.sanctions[] | select(.sanctioned==false)] | length' "$run_dir/sanction-verified.json")
+  echo "Sanction check complete: ${sanctioned_n} sanctioned, ${unsanctioned_n} unsanctioned (of ${diverges_n} DIVERGES)."
+}
+
+# ─── Subcommand: render ──────────────────────────────────────────────────────
+
+cmd_render() {
+  require_jq
+  local specclaw_dir="$1" target="$2" run_dir="$3"
+  local specclaw_dir_abs
+  specclaw_dir_abs="$(cd "$specclaw_dir" && pwd)"
+
+  local template="$PLUGIN_ROOT/templates/replay-report.md"
+  [ -f "$template" ] || die "Report template missing: ${template}"
+
+  local selection="$run_dir/selection.json" compare="$run_dir/compare.json"
+  local sanction="$run_dir/sanction-verified.json"
+  [ -f "$selection" ] || die "selection.json missing in ${run_dir}."
+  [ -f "$compare" ] || die "compare.json missing in ${run_dir}."
+
+  local legacy_sha bl_item selected_count
+  legacy_sha=$(jq -r '.legacy_commit_sha' "$selection")
+  bl_item=$(jq -r '.bl_item // "—"' "$selection")
+  selected_count=$(jq '.selected_count' "$selection")
+
+  local match_n diverge_n error_n nr_n
+  match_n=$(jq '[.results[] | select(.verdict=="MATCH")] | length' "$compare")
+  diverge_n=$(jq '[.results[] | select(.verdict=="DIVERGES")] | length' "$compare")
+  error_n=$(jq '[.results[] | select(.verdict=="ERROR")] | length' "$compare")
+  nr_n=$(jq '[.results[] | select(.verdict=="NOT REPLAYABLE")] | length' "$compare")
+
+  local merged
+  if [ -f "$sanction" ]; then
+    merged=$(jq --slurpfile s "$sanction" '
+      (.results) as $r
+      | ($s[0].sanctions // []) as $sc
+      | [ $r[] | . as $row
+          | if $row.verdict == "DIVERGES" then
+              ( ($sc[] | select(.scenario_id == $row.scenario_id)) // {sanctioned:false,cq_id:null,note:"not reviewed"} ) as $m
+              | $row + {sanctioned: $m.sanctioned, cq_id: $m.cq_id, sanction_note: $m.note}
+            else $row end
+        ]
+    ' "$compare")
+  else
+    merged=$(jq '.results' "$compare")
+  fi
+
+  local unsanctioned_diverges
+  unsanctioned_diverges=$(jq '[.[] | select(.verdict=="DIVERGES" and (.sanctioned != true))] | length' <<< "$merged")
+
+  local overall exit_code
+  if [ "$selected_count" -gt 0 ] && [ "$nr_n" -eq "$selected_count" ]; then
+    overall="INCOMPLETE"; exit_code=2
+  elif [ "$error_n" -gt 0 ] || [ "$unsanctioned_diverges" -gt 0 ]; then
+    overall="FAIL"; exit_code=1
+  else
+    overall="PASS"; exit_code=0
+  fi
+
+  local table_rows
+  table_rows=$(jq -r '
+    .[] |
+    (if .verdict == "DIVERGES" then
+       "| " + .scenario_id + " | DIVERGES | " +
+       (if .sanctioned == true then "SANCTIONED (" + (.cq_id // "?") + ")"
+        else "UNSANCTIONED" end) + " | " +
+       ((.diffs // []) | map(.field_path) | join("; ")) + " |"
+     elif .verdict == "ERROR" then
+       "| " + .scenario_id + " | ERROR | — | " + (.detail // "") + " |"
+     elif .verdict == "NOT REPLAYABLE" then
+       "| " + .scenario_id + " | NOT REPLAYABLE | — | " + (.reason // "") + " |"
+     else
+       "| " + .scenario_id + " | MATCH | — | — |"
+     end)
+  ' <<< "$merged")
+
+  local not_replayable_list
+  not_replayable_list=$(jq -r '
+    [.[] | select(.verdict=="NOT REPLAYABLE")] |
+    if length == 0 then "_None — every selected fixture was replayable this run._"
+    else map("- **" + .scenario_id + "** (" + (.category // "other") + "): " +
+             (.reason // "no reason recorded") + " — Remediation: " +
+             (.remediation // "none recorded")) | join("\n")
+    end
+  ' <<< "$merged")
+
+  local replayable_sids dr_covered
+  replayable_sids=$(jq '[.[] | select(.verdict=="MATCH" or .verdict=="DIVERGES" or .verdict=="ERROR") | .scenario_id]' <<< "$merged")
+  dr_covered=$(jq --argjson sids "$replayable_sids" '
+    [ .fixtures[] | select(.scenario_id as $s | $sids | index($s)) | .business_rules_pinned ]
+    | join(" ") | [scan("DR-[0-9]{3}")] | unique
+  ' "$selection")
+
+  local domain_model="${specclaw_dir_abs}/analysis/domain-model.md"
+  local dr_uncovered_list
+  if [ -f "$domain_model" ]; then
+    local all_dr dr_uncovered_lines=()
+    all_dr=$(grep -oE 'DR-[0-9]{3}' "$domain_model" | sort -u)
+    while IFS= read -r dr; do
+      [ -z "$dr" ] && continue
+      if ! jq -e --arg dr "$dr" 'index($dr) != null' <<< "$dr_covered" >/dev/null 2>&1; then
+        dr_uncovered_lines+=("- ${dr}")
+      fi
+    done <<< "$all_dr"
+    if [ "${#dr_uncovered_lines[@]}" -eq 0 ]; then
+      dr_uncovered_list="_None — every documented business rule is covered by at least one replayable fixture in this run._"
+    else
+      dr_uncovered_list=$(printf '%s\n' "${dr_uncovered_lines[@]}")
+    fi
+  else
+    dr_uncovered_list="_domain-model.md not found — cannot compute uncovered DR rules._"
+  fi
+
+  local today
+  today=$(date +%Y-%m-%d)
+
+  local content
+  content="$(cat "$template")"
+  content="$(fill_placeholder "$content" "{{target}}" "$target")"
+  content="$(fill_placeholder "$content" "{{date}}" "$today")"
+  content="$(fill_placeholder "$content" "{{legacy_commit_sha}}" "$legacy_sha")"
+  content="$(fill_placeholder "$content" "{{bl_item}}" "$bl_item")"
+  content="$(fill_placeholder "$content" "{{selected_count}}" "$selected_count")"
+  content="$(fill_placeholder "$content" "{{match_count}}" "$match_n")"
+  content="$(fill_placeholder "$content" "{{diverges_count}}" "$diverge_n")"
+  content="$(fill_placeholder "$content" "{{error_count}}" "$error_n")"
+  content="$(fill_placeholder "$content" "{{not_replayable_count}}" "$nr_n")"
+  content="$(fill_placeholder "$content" "{{overall_verdict}}" "$overall")"
+  content="$(fill_placeholder "$content" "{{fixture_table_rows}}" "$table_rows")"
+  content="$(fill_placeholder "$content" "{{not_replayable_list}}" "$not_replayable_list")"
+  content="$(fill_placeholder "$content" "{{dr_uncovered_list}}" "$dr_uncovered_list")"
+
+  local out_path
+  if [ "$target" = "--all" ]; then
+    local run_id
+    run_id="$(basename "$run_dir")"
+    run_id="${run_id#run-}"
+    mkdir -p "${specclaw_dir_abs}/replay"
+    out_path="${specclaw_dir_abs}/replay/report-${run_id}.md"
+  else
+    out_path="${specclaw_dir_abs}/changes/${target}/replay-report.md"
+  fi
+  printf '%s\n' "$content" > "$out_path"
+
+  echo "Replay report written to ${out_path}. Overall verdict: ${overall} (MATCH=${match_n} DIVERGES=${diverge_n} ERROR=${error_n} NOT_REPLAYABLE=${nr_n})."
+  exit "$exit_code"
+}
+
+# ─── Subcommand: cleanup ─────────────────────────────────────────────────────
+
+cmd_cleanup() {
+  local run_dir="$1" keep="${2:-}"
+  if [ "$keep" = "--keep" ]; then
+    echo "Keeping run directory: ${run_dir}"
+    return 0
+  fi
+  if [ ! -d "$run_dir" ]; then
+    warn "Run directory already gone: ${run_dir}"
+    return 0
+  fi
+  rm -rf "$run_dir"
+  echo "Removed run directory: ${run_dir}"
+}
+
+# ─── Main ─────────────────────────────────────────────────────────────────────
+
+case "${1:-}" in
+  -h|--help)
+    usage
+    exit 0
+    ;;
+  resolve)
+    [ $# -ge 4 ] || die "Usage: specclaw-replay resolve <specclaw_dir> <change_name|--all> <out_selection_json>"
+    cmd_resolve "$2" "$3" "$4"
+    ;;
+  init-rundir)
+    [ $# -ge 3 ] || die "Usage: specclaw-replay init-rundir <specclaw_dir> <run_dir>"
+    cmd_init_rundir "$2" "$3"
+    ;;
+  run-tests)
+    [ $# -ge 2 ] || die "Usage: specclaw-replay run-tests <run_dir>"
+    cmd_run_tests "$2"
+    ;;
+  compare)
+    [ $# -ge 3 ] || die "Usage: specclaw-replay compare <specclaw_dir> <run_dir>"
+    cmd_compare "$2" "$3"
+    ;;
+  sanction-check)
+    [ $# -ge 3 ] || die "Usage: specclaw-replay sanction-check <specclaw_dir> <run_dir>"
+    cmd_sanction_check "$2" "$3"
+    ;;
+  render)
+    [ $# -ge 4 ] || die "Usage: specclaw-replay render <specclaw_dir> <change_name|--all> <run_dir>"
+    cmd_render "$2" "$3" "$4"
+    ;;
+  cleanup)
+    [ $# -ge 2 ] || die "Usage: specclaw-replay cleanup <run_dir> [--keep]"
+    cmd_cleanup "$2" "${3:-}"
+    ;;
+  "")
+    usage
+    exit 1
+    ;;
+  *)
+    die "Unknown subcommand: $1. Run specclaw-replay --help for usage."
+    ;;
+esac
