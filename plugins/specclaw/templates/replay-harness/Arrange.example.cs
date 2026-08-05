@@ -82,7 +82,7 @@ public class GM019Tests
 
         // A basic sanity assertion is fine (the legacy behavior is already known from
         // scenarios.md) — but MATCH/DIVERGES itself is never decided here or by this assertion;
-        // `specclaw-replay compare` does that mechanically against the fixture afterward.
+        // `specclaw-bf-replay compare` does that mechanically against the fixture afterward.
         // ChangeStatusAsync returns plain Task (no value), so Capture.RunAsync resolves to the
         // non-generic overload here — `capture` is a CaptureResult directly, not a tuple.
         Assert.False(capture.Threw);

@@ -18,9 +18,9 @@
 | NOT REPLAYABLE | {{not_replayable_count}} |
 
 <!--
-  MATCH/DIVERGES/ERROR are computed mechanically by `specclaw-replay compare`
+  MATCH/DIVERGES/ERROR are computed mechanically by `specclaw-bf-replay compare`
   — never asserted by an agent. Every DIVERGES row's sanction citation below
-  was independently re-verified by `specclaw-replay sanction-check` against
+  was independently re-verified by `specclaw-bf-replay sanction-check` against
   decisions.md's own `### CQ-0NN —` headings; an agent's claim alone never
   promotes a row to SANCTIONED.
 -->

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# specclaw-domain-collect — deterministic UI/domain fact-collection for /specclaw:domain
+# specclaw-bf-domain-collect — deterministic UI/domain fact-collection for /specclaw:bf-domain
 #
-# Delegates to specclaw-analyze-codebase collect for everything that script
+# Delegates to specclaw-bf-analyze-codebase collect for everything that script
 # already gathers (path validation, manifests, dependency_graph,
 # discovered_docs), merges that JSON's fields (flat, not nested) with new
 # domain-specific facts this command needs: .dfm form parsing (first-class),
@@ -21,12 +21,12 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 usage() {
   cat <<'EOF'
-Usage: specclaw-domain-collect <subcommand> [options]
+Usage: specclaw-bf-domain-collect <subcommand> [options]
 
 Subcommands:
   collect       <specclaw_dir> [path]
-                Deterministic fact-collection for /specclaw:domain. Delegates
-                to `specclaw-analyze-codebase collect` for path validation,
+                Deterministic fact-collection for /specclaw:bf-domain. Delegates
+                to `specclaw-bf-analyze-codebase collect` for path validation,
                 manifests, dependency_graph, and discovered_docs (merged flat
                 into this script's own output), then adds: .dfm form parsing
                 (controls, event handlers, at any depth), .xaml element
@@ -45,7 +45,7 @@ die() { echo "ERROR: $*" >&2; exit 1; }
 warn() { echo "WARN: $*" >&2; }
 
 # JSON-escape a string: backslashes, quotes, newlines, tabs, carriage returns
-# (copied verbatim from specclaw-analyze-codebase — no shared lib, per repo
+# (copied verbatim from specclaw-bf-analyze-codebase — no shared lib, per repo
 # convention).
 json_escape() {
   local s="$1"
@@ -193,7 +193,7 @@ gather_dfm_forms() {
 # ─── .xaml extraction (shallower) — gather_xaml_forms ────────────────────────
 #
 # Plain XML tag/attribute extraction — the same cheap-and-reliable technique
-# extract_dotnet_project_refs (in specclaw-analyze-codebase) already uses for
+# extract_dotnet_project_refs (in specclaw-bf-analyze-codebase) already uses for
 # <ProjectReference> — element name, x:Name, and a Content/Header/Text
 # attribute, one level of nesting (direct children of the XAML root element
 # only). No binding/trigger/style/layout interpretation. The whole file is
@@ -372,7 +372,7 @@ detect_main_form() {
 #
 # Bounded-block scan: a line that is exactly `interface` opens the section, a
 # line that is exactly `implementation` closes it — same in-section idiom
-# `extract_maven_deps` (in specclaw-analyze-codebase) uses for its
+# `extract_maven_deps` (in specclaw-bf-analyze-codebase) uses for its
 # <dependency>...</dependency> block. An enum's identifier list may span
 # multiple lines before its closing `);` — accumulated into a buffer the same
 # way `extract_uses_clause_units` accumulates a multi-line `uses` clause,
@@ -563,7 +563,7 @@ gather_const_declarations() {
 # of comments or string literals — a comment or string containing the
 # literal word "begin"/"end" can misalign it. Same best-effort, no-real-
 # parser tolerance every extractor in this script and its sibling
-# specclaw-analyze-codebase already accepts.
+# specclaw-bf-analyze-codebase already accepts.
 
 VALIDATION_NAME_RE='^(valid|check|can)'
 PAS_ROUTINE_SIG_RE='^[[:space:]]*(procedure|function)[[:space:]]+([A-Za-z_][A-Za-z0-9_]*\.)?([A-Za-z_][A-Za-z0-9_]*)[[:space:]]*\('
@@ -677,7 +677,7 @@ cmd_collect() {
   local specclaw_dir="$1"
   local target_path="${2:-.}"
 
-  local analyze_bin="$SCRIPT_DIR/specclaw-analyze-codebase"
+  local analyze_bin="$SCRIPT_DIR/specclaw-bf-analyze-codebase"
   [ -f "$analyze_bin" ] || die "required sibling script not found: $analyze_bin"
 
   # Step 1: delegate — reuses path validation, manifests, dependency_graph,
@@ -710,7 +710,7 @@ cmd_collect() {
   tmp_all="$(mktemp)"
   tmp_scoped="$(mktemp)"
 
-  # Same git/find fallback specclaw-analyze-codebase's own collect uses.
+  # Same git/find fallback specclaw-bf-analyze-codebase's own collect uses.
   if git -C "$project_root" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
     git -C "$project_root" ls-files -z 2>/dev/null | tr '\0' '\n' > "$tmp_all"
   else
@@ -723,7 +723,7 @@ cmd_collect() {
 
   # Scope to [path] by prefix, and always exclude .specclaw's own state plus
   # vendored/generated directories — applied uniformly regardless of
-  # enumeration method, same as specclaw-analyze-codebase's own post-filter.
+  # enumeration method, same as specclaw-bf-analyze-codebase's own post-filter.
   while IFS= read -r f; do
     [ -z "$f" ] && continue
     case "$f" in
@@ -806,7 +806,7 @@ case "${1:-}" in
     exit 0
     ;;
   collect)
-    [ $# -ge 2 ] || die "Usage: specclaw-domain-collect collect <specclaw_dir> [path]"
+    [ $# -ge 2 ] || die "Usage: specclaw-bf-domain-collect collect <specclaw_dir> [path]"
     cmd_collect "$2" "${3:-.}"
     ;;
   "")
@@ -814,6 +814,6 @@ case "${1:-}" in
     exit 1
     ;;
   *)
-    die "Unknown subcommand: $1. Run specclaw-domain-collect --help for usage."
+    die "Unknown subcommand: $1. Run specclaw-bf-domain-collect --help for usage."
     ;;
 esac

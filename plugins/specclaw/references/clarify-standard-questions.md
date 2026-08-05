@@ -3,14 +3,14 @@
 **Bank version:** 1
 
 <!--
-  This is reference data for /specclaw:clarify's bank layer, read directly
-  by specclaw-clarify (bash owns Type/Blocking/Options/Proposed default —
-  see below) and by the clarify-extractor agent's Mode: bank (applicability
+  This is reference data for /specclaw:bf-clarify's bank layer, read directly
+  by specclaw-bf-clarify (bash owns Type/Blocking/Options/Proposed default —
+  see below) and by the bf-clarify-extractor agent's Mode: bank (applicability
   + pre-answered detection + contextualized wording).
 
   Every entry carries a permanent SQ-NNN ID, assigned once, in this file,
   at plugin-authoring time — NOT per-project. SQ-001 means "target
-  platform" in every repo that ever runs /specclaw:clarify; that
+  platform" in every repo that ever runs /specclaw:bf-clarify; that
   consistency is the entire point of a separate ID space from CQ-NNN
   (which is allocated per-repo, in extraction order, and would drift the
   moment this bank grows). New entries take the next free SQ number.
@@ -42,7 +42,7 @@
     and what "not applicable" looks like>
 
   Type/Blocking/Options/Proposed default are bash-owned and identical
-  across every project — specclaw-clarify splices them into the rendered
+  across every project — specclaw-bf-clarify splices them into the rendered
   clarifications.md block directly from this file; the agent never
   authors or overrides them. The agent's job per new SQ is narrower:
   judge Applicability, draft a contextualized Finding/Why-it-matters, and

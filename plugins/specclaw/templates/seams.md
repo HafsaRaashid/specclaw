@@ -20,7 +20,7 @@
   not a finding. Determinism findings belong in "Capture Blockers" below,
   not folded into a seam's description.
 
-  /specclaw:baseline does not run the legacy app and does not capture
+  /specclaw:bf-baseline does not run the legacy app and does not capture
   fixtures itself — this document designs the harness; a human runs the
   capture (`--harness` then `--record`). That boundary is deliberate, not a
   gap to paper over.

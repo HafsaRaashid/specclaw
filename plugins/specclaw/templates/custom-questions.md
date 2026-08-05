@@ -1,7 +1,7 @@
 # Custom Questions
 
 <!--
-  Per-repo custom questions for /specclaw:clarify. /specclaw:clarify
+  Per-repo custom questions for /specclaw:bf-clarify. /specclaw:bf-clarify
   scaffolds this exact file to .specclaw/analysis/custom-questions.md the
   first time a Mode A run (or --bank-only) finds nothing at that path —
   edit it in place there afterward. Once anything exists at that path —

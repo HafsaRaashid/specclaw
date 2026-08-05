@@ -2,7 +2,7 @@
 
 <!--
   The one mutable file in this evidence tree — regenerated in full on
-  every /specclaw:replay run for this change (and by --prune-evidence).
+  every /specclaw:bf-replay run for this change (and by --prune-evidence).
   Everything else under replay-evidence/run-<id>/ is written once and
   never touched again. Written in plain language on purpose: this page is
   for the client, not just the dev team.

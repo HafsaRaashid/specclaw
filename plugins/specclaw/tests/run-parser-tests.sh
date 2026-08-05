@@ -14,13 +14,13 @@
 #   `<ProjectReference>` resolution kept distinct from `<PackageReference>`
 #   manifest deps, silence for uncovered ecosystems (go.mod), and
 #   path-scoping exclusion (AC1-AC7).
-# Plus FR16 (domain-command, Case 11): specclaw-domain-collect collect's
+# Plus FR16 (domain-command, Case 11): specclaw-bf-domain-collect collect's
 #   merged output (delegated fields + new fields), .dfm form parsing
 #   (well-formed + malformed), handler-to-implementation resolution,
 #   Pascal type/const/validation-candidate extraction, main_form_hint,
 #   .xaml element capture, .cshtml detection-only marking, zero-eligible-
 #   file scoping, and subdirectory scoping exclusion (AC1-AC13).
-# Plus rebuild-plan-bridge (Case 12): specclaw-rebuild-collect collect's
+# Plus rebuild-plan-bridge (Case 12): specclaw-bf-rebuild-collect collect's
 #   existence-check + line-count JSON emission for the four
 #   .specclaw/analysis/*.md documents, and its missing-document error path
 #   naming exactly which doc(s) are missing plus the producing command
@@ -431,10 +431,10 @@ echo
 # exercises the `git ls-files` path).
 # ─────────────────────────────────────────────────────────────────────────────
 echo "--- Case 9: analyze-codebase collect — manifests, LOC, test-locations, docs, scoping ---"
-ANALYZE_BIN="$BIN_DIR/specclaw-analyze-codebase"
+ANALYZE_BIN="$BIN_DIR/specclaw-bf-analyze-codebase"
 DISCOVER="$BIN_DIR/specclaw-discover-context"
 if [[ ! -f "$ANALYZE_BIN" ]]; then
-  fail "specclaw-analyze-codebase missing"
+  fail "specclaw-bf-analyze-codebase missing"
 else
   # Plain copy of the fixture tree, no .git anywhere above it -> exercises the
   # `find` fallback enumeration path.
@@ -601,7 +601,7 @@ echo
 # ─────────────────────────────────────────────────────────────────────────────
 echo "--- Case 10: analyze-codebase collect — dependency_graph ---"
 if [[ ! -f "$ANALYZE_BIN" ]]; then
-  fail "specclaw-analyze-codebase missing"
+  fail "specclaw-bf-analyze-codebase missing"
 else
   DFIX="$WORK/analyze-depgraph-proj"
   mkdir -p "$DFIX/.specclaw"
@@ -686,7 +686,7 @@ fi
 echo
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Case 11 — specclaw-domain-collect collect: merged output (delegated fields
+# Case 11 — specclaw-bf-domain-collect collect: merged output (delegated fields
 # plus new domain fields), .dfm form parsing (well-formed + malformed),
 # handler-to-implementation resolution, Pascal type/const/validation-
 # candidate extraction, main_form_hint, .xaml element capture, .cshtml
@@ -695,10 +695,10 @@ echo
 # tests/fixtures/analyze/domain/ — extending the existing analyze/ fixture
 # tree, not a parallel one (domain/MainApp.dpr, domain/ui/*).
 # ─────────────────────────────────────────────────────────────────────────────
-echo "--- Case 11: specclaw-domain-collect collect — forms, handlers, types, consts, validation candidates, main_form_hint, xaml, cshtml, scoping ---"
-DOMAIN_BIN="$BIN_DIR/specclaw-domain-collect"
+echo "--- Case 11: specclaw-bf-domain-collect collect — forms, handlers, types, consts, validation candidates, main_form_hint, xaml, cshtml, scoping ---"
+DOMAIN_BIN="$BIN_DIR/specclaw-bf-domain-collect"
 if [[ ! -f "$DOMAIN_BIN" ]]; then
-  fail "specclaw-domain-collect missing"
+  fail "specclaw-bf-domain-collect missing"
 else
   DOMFIX="$WORK/domain-proj"
   mkdir -p "$DOMFIX/.specclaw"
@@ -708,7 +708,7 @@ else
   out="$(bash "$DOMAIN_BIN" collect "$DOMFIX/.specclaw" 2>/dev/null)"
 
   # 11a (AC1) — merged output includes every delegated field
-  # (specclaw-analyze-codebase's own fields) plus every new domain field,
+  # (specclaw-bf-analyze-codebase's own fields) plus every new domain field,
   # flat (not nested under a sub-key).
   missing=""
   for field in '"path":' '"project_root":' '"top_level_dirs":' '"manifests":' \
@@ -901,10 +901,10 @@ echo
 # and the missing-document error path naming exactly which doc(s) are
 # missing and which command produces each.
 # ─────────────────────────────────────────────────────────────────────────────
-echo "--- Case 12: specclaw-rebuild-collect collect — existence, line counts, missing-doc errors ---"
-REBUILD_BIN="$BIN_DIR/specclaw-rebuild-collect"
+echo "--- Case 12: specclaw-bf-rebuild-collect collect — existence, line counts, missing-doc errors ---"
+REBUILD_BIN="$BIN_DIR/specclaw-bf-rebuild-collect"
 if [[ ! -f "$REBUILD_BIN" ]]; then
-  fail "specclaw-rebuild-collect missing"
+  fail "specclaw-bf-rebuild-collect missing"
 else
   # 12a-12b — all four fixture docs present: JSON lists all four paths with
   # line counts matching a hand-computed `wc -l` (same discipline as 9e).
@@ -947,8 +947,8 @@ else
   else
     fail "12d partial docs (2 of 4 missing): non-zero exit (got exit 0)"
   fi
-  if grep -q 'domain-model.md (run /specclaw:domain)' <<<"$partial_err" \
-     && grep -q 'functional-spec.md (run /specclaw:domain)' <<<"$partial_err"; then
+  if grep -q 'domain-model.md (run /specclaw:bf-domain)' <<<"$partial_err" \
+     && grep -q 'functional-spec.md (run /specclaw:bf-domain)' <<<"$partial_err"; then
     pass "12e partial docs: stderr names both missing files + producing command"
   else
     fail "12e partial docs: stderr names both missing files + producing command (got: $partial_err)"

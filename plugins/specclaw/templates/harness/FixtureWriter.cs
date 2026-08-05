@@ -4,12 +4,12 @@ namespace {{harness_namespace}};
 
 /// <summary>
 /// Writes one golden-master fixture JSON file per scenario, in the exact
-/// shape `specclaw-baseline record` expects: flat top-level scalar metadata
+/// shape `specclaw-bf-baseline record` expects: flat top-level scalar metadata
 /// fields (captured_at, anchor_date, legacy_commit_sha, runtime_version)
 /// plus a flat `normalized_fields` string array, so they can be extracted
 /// with a simple grep/sed pass on the bash side — no JSON parser needed
 /// there. Do not rename these fields or nest them differently; doing so
-/// breaks `specclaw-baseline record`'s field extraction and the resulting
+/// breaks `specclaw-bf-baseline record`'s field extraction and the resulting
 /// manifest.json will silently show them as empty/unknown, not error.
 /// </summary>
 public static class FixtureWriter

@@ -1,8 +1,8 @@
 ---
-description: Read the four .specclaw/analysis/*.md documents (codebase-report, architecture, domain-model, functional-spec) — plus, when present, decisions.md, clarifications.md, and .specclaw/baseline/manifest.json/scenarios.md — and write or refresh an ordered .specclaw/analysis/rebuild-backlog.md: the application decomposed into individually-proposable features, sequenced by dependency and readiness, each carrying its acceptance basis, a computed Gate (blocked/open-questions/clear against unanswered clarify questions) and Verification state (verifiable/pending-capture/unverifiable/no-baseline-data against baseline fixtures), and a "what a human still needs to supply" callout. First-ever run generates from scratch; every subsequent run requires `--refresh`, which recomputes Gate/Verification for every item, applies new decisions, and never renumbers, deletes, or disturbs a human-added status note. Read-only: no TTY or credential prompts, no lifecycle gate, creates nothing in changes/, calls no lifecycle command. Use after running /specclaw:analyze, /specclaw:architecture, and /specclaw:domain — and, ideally, /specclaw:clarify and /specclaw:baseline — when you want an ordered, decision-aware list of what to /specclaw:propose to rebuild an existing (possibly legacy) app in a new stack.
+description: Read the four .specclaw/analysis/*.md documents (codebase-report, architecture, domain-model, functional-spec) — plus, when present, decisions.md, clarifications.md, and .specclaw/baseline/manifest.json/scenarios.md — and write or refresh an ordered .specclaw/analysis/rebuild-backlog.md: the application decomposed into individually-proposable features, sequenced by dependency and readiness, each carrying its acceptance basis, a computed Gate (blocked/open-questions/clear against unanswered clarify questions) and Verification state (verifiable/pending-capture/unverifiable/no-baseline-data against baseline fixtures), and a "what a human still needs to supply" callout. First-ever run generates from scratch; every subsequent run requires `--refresh`, which recomputes Gate/Verification for every item, applies new decisions, and never renumbers, deletes, or disturbs a human-added status note. Read-only: no TTY or credential prompts, no lifecycle gate, creates nothing in changes/, calls no lifecycle command. Use after running /specclaw:bf-analyze, /specclaw:bf-architecture, and /specclaw:bf-domain — and, ideally, /specclaw:bf-clarify and /specclaw:bf-baseline — when you want an ordered, decision-aware list of what to /specclaw:propose to rebuild an existing (possibly legacy) app in a new stack.
 ---
 
-# specclaw rebuild-plan
+# specclaw bf-rebuild-plan
 
 **First, run** `specclaw-ensure-init .specclaw` — idempotently creates `.specclaw/` if it doesn't exist (silent if already initialized; auto-inits using the current directory's basename as the project name).
 
@@ -13,7 +13,7 @@ Determine the invocation mode from the user's message: **refresh mode** if it co
 ## Step 1 — Collect
 
 ```bash
-specclaw-rebuild-collect collect .specclaw [--refresh]
+specclaw-bf-rebuild-collect collect .specclaw [--refresh]
 ```
 
 Pass `--refresh` only in refresh mode. This single step:
@@ -24,19 +24,19 @@ Pass `--refresh` only in refresh mode. This single step:
 
 ## Step 2 — Spawn the planning agent
 
-`Agent` tool, `subagent_type: "rebuild-planner"`, on the model from `config.yaml` `models.review` (default: `anthropic/claude-sonnet-4-5`) — same model family as its sibling analysis agents, since this is still read-only analysis of already-written documents, not spec/design authoring for a change. Pass as context:
+`Agent` tool, `subagent_type: "bf-rebuild-planner"`, on the model from `config.yaml` `models.review` (default: `anthropic/claude-sonnet-4-5`) — same model family as its sibling analysis agents, since this is still read-only analysis of already-written documents, not spec/design authoring for a change. Pass as context:
 
 - The collected JSON from Step 1.
 - The resolved paths of the four analysis documents, plus whichever optional inputs are present (from `optional_inputs` in the JSON), for the agent to `Read` directly.
 - **Tell the agent explicitly which mode it is running**: `first-run` (the JSON's `mode` field will read `"first-run"`) or `refresh` (`"refresh"`).
 - In refresh mode, also pass the resolved path of the *existing* `.specclaw/analysis/rebuild-backlog.md`, so the agent can read what's already there and avoid re-drafting anything it doesn't need to touch.
 
-The agent writes **a draft file**, `.specclaw/analysis/.rebuild-plan-draft.md` — never the final `rebuild-backlog.md` itself. See `agents/rebuild-planner.md` for exactly what belongs in it.
+The agent writes **a draft file**, `.specclaw/analysis/.rebuild-plan-draft.md` — never the final `rebuild-backlog.md` itself. See `agents/bf-rebuild-planner.md` for exactly what belongs in it.
 
 ## Step 3 — Render
 
 ```bash
-specclaw-rebuild-collect render .specclaw .specclaw/analysis/.rebuild-plan-draft.md
+specclaw-bf-rebuild-collect render .specclaw .specclaw/analysis/.rebuild-plan-draft.md
 ```
 
 Archives the prior `rebuild-backlog.md` (if any — same `.specclaw/analysis/archive/` directory `analyze`/`architecture`/`domain`/`clarify` already use), merges the draft with every preserved existing item, computes Gate and Verification for every active item from scratch (never trusting a stale value), computes dependency-rank-then-readiness ordering, renders struck items as one-line tombstones and deferred items into their own section, computes the refresh change report by diffing against the prior file's own stored Gate/Verification lines, and writes `.specclaw/analysis/rebuild-backlog.md`. Deletes the draft file on success. **If it exits non-zero, surface its stderr message to the user verbatim and stop.**
@@ -50,8 +50,8 @@ Archives the prior `rebuild-backlog.md` (if any — same `.specclaw/analysis/arc
 
 ## What this command does not do
 
-`/specclaw:rebuild-plan` creates **nothing** under `.specclaw/changes/` and calls **no** lifecycle skill or script — it only reads its input documents and writes one file. The operator still runs `/specclaw:propose "<item>"` themselves for each backlog entry, exactly as they would for any other feature idea. This command does not, and should not, ever be extended to auto-invoke `/specclaw:propose` — that would silently reintroduce the lifecycle coupling this command is deliberately designed to avoid.
+`/specclaw:bf-rebuild-plan` creates **nothing** under `.specclaw/changes/` and calls **no** lifecycle skill or script — it only reads its input documents and writes one file. The operator still runs `/specclaw:propose "<item>"` themselves for each backlog entry, exactly as they would for any other feature idea. This command does not, and should not, ever be extended to auto-invoke `/specclaw:propose` — that would silently reintroduce the lifecycle coupling this command is deliberately designed to avoid.
 
 The backlog is an acceptance basis plus a computed Gate/Verification state — it does not, and cannot, replace golden-master outputs or human-supplied external-format/DLL/COM semantics for verifying a truly faithful rebuild. A `VERIFIABLE` item has a matching captured fixture; it does not mean the fixture's assertions were exhaustive. See each item's "Verification inputs needed" field, its computed `**Verification:**` line, and `docs/rebuild-workflow.md`'s Fidelity limitation section.
 
-`/specclaw:rebuild-plan` never regenerates an existing backlog from scratch on a bare re-run, never renumbers a `BL-###` id, never deletes a struck or deferred item, and never touches a `**Status notes (human-added):**` block a human wrote into an item — those are the one hard invariant this command protects across every `--refresh`.
+`/specclaw:bf-rebuild-plan` never regenerates an existing backlog from scratch on a bare re-run, never renumbers a `BL-###` id, never deletes a struck or deferred item, and never touches a `**Status notes (human-added):**` block a human wrote into an item — those are the one hard invariant this command protects across every `--refresh`.

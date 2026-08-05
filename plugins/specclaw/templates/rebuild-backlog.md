@@ -35,7 +35,7 @@
   - <entity/business-rule/enumeration reference, quoted — cite a business
     rule's DR-NNN ID (from domain-model.md) directly wherever the
     acceptance basis rests on a numbered rule, e.g. "DR-007: ..."; this is
-    the join key /specclaw:clarify and /specclaw:baseline key their own
+    the join key /specclaw:bf-clarify and /specclaw:bf-baseline key their own
     CQ-NNN/GM-NNN citations against, so the ID itself must be textually
     present, not just implied by the quoted prose>
 
@@ -59,7 +59,7 @@
 
   **Status notes (human-added):** <optional — anything a human types under
     this exact heading (e.g. "built and merged, PR #12") survives every
-    future /specclaw:rebuild-plan --refresh verbatim, byte for byte. Nothing
+    future /specclaw:bf-rebuild-plan --refresh verbatim, byte for byte. Nothing
     else in this document offers that guarantee — this is the one place a
     human note is safe to leave.>
 
@@ -72,7 +72,7 @@
 
   BL-NNN IDs are permanent identifiers, not position — assigned once in
   dependency order on the first-ever run and never renumbered afterward.
-  A later /specclaw:rebuild-plan --refresh may append a genuinely new item
+  A later /specclaw:bf-rebuild-plan --refresh may append a genuinely new item
   (next free BL-NNN, dependency-placed correctly) or strike/defer an
   existing one, but an already-assigned ID is never reused, renumbered, or
   silently deleted — a struck item stays in the Backlog section as a
@@ -103,7 +103,7 @@
 ## Change Report
 
 <!--
-  Populated only by /specclaw:rebuild-plan --refresh — bash-computed by
+  Populated only by /specclaw:bf-rebuild-plan --refresh — bash-computed by
   diffing this run's fresh Gate/Verification against the prior file's own
   stored Gate:/Verification: lines, never agent-narrated. On a first-ever
   run this section reads "Not applicable."

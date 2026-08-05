@@ -2,11 +2,11 @@
 
 A recipe for rebuilding an existing (possibly legacy) application as a
 faithful re-implementation in a new stack, using SpecClaw's analysis
-commands (`analyze`, `architecture`, `domain`) together with the ordinary
+commands (`bf-analyze`, `bf-architecture`, `bf-domain`) together with the ordinary
 `propose → plan → build → verify → pr` lifecycle. Nothing in this recipe
 modifies `propose`, `plan`, `build`, `verify`, `pr`, or their bin
 scripts/agents — it is entirely configuration plus one new read-only
-command, `/specclaw:rebuild-plan`.
+command, `/specclaw:bf-rebuild-plan`.
 
 ## The gotcha, up front
 
@@ -14,7 +14,7 @@ command, `/specclaw:rebuild-plan`.
 works.** `specclaw-discover-context` — the mechanism `plan`/`build`/`verify`
 use to pull grounding documents into an agent's context — enumerates
 candidate files via `git ls-files`, not a plain filesystem walk. A file
-`analyze`/`architecture`/`domain` wrote to `.specclaw/analysis/` but that was
+`bf-analyze`/`bf-architecture`/`bf-domain` wrote to `.specclaw/analysis/` but that was
 never staged is invisible to discovery, **even if you've pinned it** (see
 Step 3). Staging is enough — you don't need to commit:
 
@@ -22,15 +22,15 @@ Step 3). Staging is enough — you don't need to commit:
 git add .specclaw/analysis/*.md
 ```
 
-Re-run this after every `analyze`/`architecture`/`domain`/`rebuild-plan`
+Re-run this after every `bf-analyze`/`bf-architecture`/`bf-domain`/`bf-rebuild-plan`
 run that produces a new or updated document.
 
 ## Step 1 — Produce the analysis documents
 
 ```
-/specclaw:analyze
-/specclaw:architecture
-/specclaw:domain
+/specclaw:bf-analyze
+/specclaw:bf-architecture
+/specclaw:bf-domain
 ```
 
 These write `.specclaw/analysis/codebase-report.md`, `architecture.md`,
@@ -86,7 +86,7 @@ docs missing after this, that footer tells you exactly which and why.
 ## Step 4 — Generate the rebuild backlog
 
 ```
-/specclaw:rebuild-plan
+/specclaw:bf-rebuild-plan
 ```
 
 Reads the four analysis documents and writes
@@ -97,12 +97,12 @@ basis, its dependency on earlier items, and a "Verification inputs needed"
 field (see Fidelity limitation, below). It also includes a coverage check
 confirming every functional-spec capability is accounted for.
 
-If any of the four analysis documents is missing, `rebuild-plan` stops and
+If any of the four analysis documents is missing, `bf-rebuild-plan` stops and
 names exactly which one(s) plus the command that produces each — it never
 attempts a partial backlog.
 
-**Optional but recommended: run `/specclaw:clarify` and `/specclaw:baseline`
-first.** Neither is required — `rebuild-plan` degrades gracefully without
+**Optional but recommended: run `/specclaw:bf-clarify` and `/specclaw:bf-baseline`
+first.** Neither is required — `bf-rebuild-plan` degrades gracefully without
 them, naming what's missing in its status header — but when
 `.specclaw/analysis/clarifications.md`/`decisions.md` and
 `.specclaw/baseline/manifest.json`/`scenarios.md` are present, every backlog
@@ -113,7 +113,7 @@ captured, the behavior is provably unreachable in the legacy app, or no
 baseline work has touched these rules at all) — turning the backlog from a
 static acceptance-basis list into a live readiness signal.
 
-`rebuild-plan` creates **nothing** under `.specclaw/changes/` and calls
+`bf-rebuild-plan` creates **nothing** under `.specclaw/changes/` and calls
 **no** lifecycle command. Stage its output too:
 
 ```bash
@@ -121,9 +121,9 @@ git add .specclaw/analysis/rebuild-backlog.md
 ```
 
 **The backlog is living state after the first run.** A second bare
-`/specclaw:rebuild-plan` refuses to regenerate it (to avoid destroying
+`/specclaw:bf-rebuild-plan` refuses to regenerate it (to avoid destroying
 in-flight Gate/Verification status, struck/deferred items, or a status note
-a human typed into an item). Run `/specclaw:rebuild-plan --refresh` instead
+a human typed into an item). Run `/specclaw:bf-rebuild-plan --refresh` instead
 — it recomputes Gate/Verification for every item, applies any newly
 recorded decisions (striking, deferring, or reshaping items; appending
 genuinely new ones), and ends with a change report naming what became
@@ -133,7 +133,7 @@ across every refresh, never renumbered.
 
 ## Step 5 — Propose each backlog item yourself
 
-`/specclaw:rebuild-plan` does not, and will not, auto-invoke
+`/specclaw:bf-rebuild-plan` does not, and will not, auto-invoke
 `/specclaw:propose` — that would reintroduce the exact lifecycle coupling
 this recipe deliberately avoids. Work through `rebuild-backlog.md` in the
 order it gives you:
@@ -170,9 +170,9 @@ faithful rebuild.
 
 ## Staleness limitation
 
-`rebuild-plan` does not check whether the analysis documents are stale
+`bf-rebuild-plan` does not check whether the analysis documents are stale
 relative to the current source — it trusts each document's own "Date
 analyzed" field and never diffs it against git history. If the codebase has
-changed meaningfully since that date, re-run `/specclaw:analyze`,
-`/specclaw:architecture`, and `/specclaw:domain` before `/specclaw:rebuild-
+changed meaningfully since that date, re-run `/specclaw:bf-analyze`,
+`/specclaw:bf-architecture`, and `/specclaw:bf-domain` before `/specclaw:bf-rebuild-
 plan` so the backlog reflects the current code, not a stale snapshot.

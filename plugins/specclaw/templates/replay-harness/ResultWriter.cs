@@ -4,13 +4,13 @@ namespace Replay.Harness;
 
 /// <summary>
 /// Writes one actual-result JSON file per replayed scenario, under
-/// &lt;run_dir&gt;/actual/&lt;scenario_id&gt;.json. `specclaw-replay compare`
+/// &lt;run_dir&gt;/actual/&lt;scenario_id&gt;.json. `specclaw-bf-replay compare`
 /// reads only this file's `output` field against the fixture's own `output`
 /// — do not add capture-timestamp/anchor-date metadata here the way
 /// FixtureWriter does for the legacy capture; that metadata belongs to the
 /// golden master being replayed against, not to a throwaway replay result.
 /// A missing or invalid-JSON file at this path after `dotnet test` runs is
-/// itself the ERROR signal `specclaw-replay compare` looks for — if a Fact
+/// itself the ERROR signal `specclaw-bf-replay compare` looks for — if a Fact
 /// crashes before calling Write, say nothing and let that absence speak.
 /// </summary>
 public static class ResultWriter
