@@ -146,26 +146,34 @@ resolve_bl_id() {
   local proposal="$change_dir/proposal.md" spec="$change_dir/spec.md"
   local f
 
-  # Pass 1: a literal BL-### citation, if any change ever writes one directly.
-  local direct=""
-  for f in "$proposal" "$spec"; do
-    [ -f "$f" ] || continue
-    direct="${direct}$(grep -oE 'BL-[0-9]{3}' "$f" 2>/dev/null || true) "
-  done
-  direct="$(printf '%s' "$direct" | tr -s ' ' '\n' | grep -v '^$' | sort -u || true)"
-  if [ -n "$direct" ]; then
-    local n
-    n=$(printf '%s\n' "$direct" | grep -c . || true)
-    [ "$n" -gt 1 ] && warn "Change cites multiple BL items directly (${direct//$'\n'/, }) — using the first."
-    printf '%s\n' "$direct" | head -1
-    return 0
-  fi
+  # Strips whole "Depends on:"/"Blocks:" bullets — including their wrapped
+  # continuation lines — from a file before it's scanned for BL-### tokens.
+  # A change's own "## Dependencies" section legitimately cites OTHER items'
+  # BL-### numbers (e.g. "Depends on: BL-002 ... transitively BL-004/BL-005"
+  # wrapping onto a second line with no "Depends on" text of its own), so a
+  # same-line-only filter isn't enough — this drops the entire bullet block.
+  strip_dependency_bullets() {
+    awk '
+      BEGIN { ex = 0 }
+      /^[[:space:]]*-[[:space:]]/ {
+        if ($0 ~ /\*\*(Depends on|Blocks)/) { ex = 1; next }
+        else { ex = 0 }
+      }
+      /^[[:space:]]*$/ { ex = 0 }
+      ex == 1 { next }
+      { print }
+    ' "$1" 2>/dev/null
+  }
 
-  # Pass 2: bare "item N"/"backlog item N", excluding relational citations
-  # ("Depends on: ... item 3", "Blocks: item 8") which name OTHER items, not
-  # this change's own. Real convention confirmed in task-status-transitions:
-  # proposal.md says "Rebuild-backlog item 4 merges..." (self-citation);
-  # spec.md's "Depends on"/"Blocks" lines cite unrelated items.
+  # Pass 1 (tried first): explicit "item N"/"backlog item N" self-citation
+  # phrasing, excluding relational lines ("Depends on: ... item 3", "Blocks:
+  # item 8") which name OTHER items, not this change's own. Real convention
+  # confirmed in task-status-transitions: proposal.md says "Rebuild-backlog
+  # item 4 merges..." (self-citation); spec.md's "Depends on"/"Blocks" lines
+  # cite unrelated items. This phrasing is a more reliable self-citation
+  # signal than a bare literal BL-### match (Pass 2 below), which can't tell
+  # a change's own identifier apart from another change's mentioned in
+  # passing — so it takes priority whenever both are present.
   local item_num=""
   for f in "$proposal" "$spec"; do
     [ -f "$f" ] || continue
@@ -176,12 +184,35 @@ resolve_bl_id() {
                 | head -1 || true)"
     [ -n "$item_num" ] && break
   done
-  [ -z "$item_num" ] && { printf ''; return 0; }
 
-  local bl_id
-  bl_id="$(printf 'BL-%03d' "$item_num")"
+  local bl_id=""
+  if [ -n "$item_num" ]; then
+    bl_id="$(printf 'BL-%03d' "$item_num")"
+  else
+    # Pass 2 (fallback): a literal BL-### citation, if any change ever writes
+    # one directly with no "item N" phrasing anywhere. Dependency bullets are
+    # stripped first so citations of OTHER items' numbers in "Depends on"/
+    # "Blocks" don't get mistaken for this change's own.
+    local direct=""
+    for f in "$proposal" "$spec"; do
+      [ -f "$f" ] || continue
+      direct="${direct}$(strip_dependency_bullets "$f" | grep -oE 'BL-[0-9]{3}' || true) "
+    done
+    direct="$(printf '%s' "$direct" | tr -s ' ' '\n' | grep -v '^$' | sort -u || true)"
+    if [ -n "$direct" ]; then
+      local n
+      n=$(printf '%s\n' "$direct" | grep -c . || true)
+      [ "$n" -gt 1 ] && warn "Change cites multiple BL items directly (${direct//$'\n'/, }) — using the first."
+      bl_id="$(printf '%s\n' "$direct" | head -1)"
+    fi
+  fi
+
+  [ -z "$bl_id" ] && { printf ''; return 0; }
+
   if [ -f "$backlog_file" ] && ! grep -qE "^### ${bl_id} " "$backlog_file"; then
-    warn "Derived ${bl_id} from an 'item ${item_num}' citation but rebuild-backlog.md has no matching '### ${bl_id} —' heading — treating as unresolved."
+    local via
+    via=$([ -n "$item_num" ] && printf "an 'item %s' citation" "$item_num" || printf 'a direct citation')
+    warn "Derived ${bl_id} from ${via} but rebuild-backlog.md has no matching '### ${bl_id} —' heading — treating as unresolved."
     printf ''
     return 0
   fi

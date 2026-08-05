@@ -373,6 +373,7 @@ type_rank() {
 # are never confused even though both mention SQ-NNN.
 
 BANK_FILE="$SCRIPT_DIR/../references/clarify-standard-questions.md"
+CUSTOM_QUESTIONS_TEMPLATE="$SCRIPT_DIR/../templates/custom-questions.md"
 
 split_bank_entries() {
   local file="$1" outdir="$2"
@@ -849,6 +850,19 @@ cmd_render() {
     assemble_sq_block "$bf" "$agent_block" > "$workdir/merged/${bid}.md"
   done
 
+  # ── Scaffold custom-questions.md on first run only ───────────────────────
+  # Verbatim copy of the template, and ONLY if nothing exists at that path
+  # yet. Once anything exists there — even empty, even malformed — it is
+  # user-authored from that point on: never overwritten, re-rendered, or
+  # otherwise touched again, no matter how it got there. Scaffolding and
+  # ingestion (below) are independent steps — a freshly-scaffolded file's
+  # own example questions are ingested the same as any other content.
+  local custom_scaffolded=false
+  if [ ! -f "$custom_file" ] && [ -f "$CUSTOM_QUESTIONS_TEMPLATE" ]; then
+    cp "$CUSTOM_QUESTIONS_TEMPLATE" "$custom_file"
+    custom_scaffolded=true
+  fi
+
   # ── New UQ blocks: pure bash ingestion, no agent involved ────────────────
   # NB: split_question_blocks gates on `[ -f "$file" ]` — a process
   # substitution `<(...)` is a named pipe, not a regular file, so it fails
@@ -989,6 +1003,14 @@ EOF
   rm -rf "$workdir"
 
   echo "Wrote $clar_file (${total} question(s): ${cq_total} extracted, ${sq_total} standard, ${uq_total} custom; ${unanswered_count} unanswered, ${blocking_count} blocking)" >&2
+  # `$custom_scaffolded && echo ...` would leak a false's exit 1 out of this
+  # function (no `else` branch) as this script's own exit status under
+  # `set -e`, since this is the last statement executed — same class of bug
+  # flagged on render_uq_from_custom_questions's own final line. `if` avoids
+  # it: the statement's exit status is 0 whenever the condition is false.
+  if $custom_scaffolded; then
+    echo "Scaffolded $custom_file — edit it and re-run to add UQ questions (git add it so context discovery sees it)." >&2
+  fi
 }
 
 # ─── Subcommand: resolve-collect (resolve mode, pre-agent) ───────────────────
