@@ -6,6 +6,8 @@
 **Selected fixtures:** {{selected_count}}
 **Overall verdict:** {{overall_verdict}}
 
+{{evidence_block}}
+
 ## Summary
 
 | Verdict | Count |

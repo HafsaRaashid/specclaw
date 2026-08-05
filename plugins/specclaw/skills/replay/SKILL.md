@@ -1,5 +1,5 @@
 ---
-description: Golden-master comparison — replays captured legacy fixtures (.specclaw/baseline/manifest.json + fixtures/) against the new app's own behaviour and reports MATCH/DIVERGES/ERROR per fixture, with every divergence checked against decisions.md for an explicit sanctioning CQ. Runs in the new (rebuild) repo, after /specclaw:verify and before /specclaw:pr. `<change-name>` scopes to that change's BL item(s); `--all` runs the full 43-fixture regression sweep. Read-only with respect to app source, fixtures, and the manifest — writes only .specclaw/changes/<name>/replay-report.md (or .specclaw/replay/report-<timestamp>.md for --all) plus a throwaway generated test project under .specclaw/replay/run-<timestamp>/, deleted after the run unless --keep is passed. Exit code reflects the verdict (0 PASS, 1 FAIL, 2 INCOMPLETE) so it can gate CI.
+description: Golden-master comparison — replays captured legacy fixtures (.specclaw/baseline/manifest.json + fixtures/) against the new app's own behaviour and reports MATCH/DIVERGES/ERROR per fixture, with every divergence checked against decisions.md for an explicit sanctioning CQ. Runs in the new (rebuild) repo, after /specclaw:verify and before /specclaw:pr. `<change-name>` scopes to that change's BL item(s); `--all` runs the full regression sweep across every fixture in the manifest. Read-only with respect to app source, fixtures, and the manifest. Writes .specclaw/changes/<name>/replay-report.md (or .specclaw/replay/report-<timestamp>.md for --all) and, by default, retains a durable evidence package — the generated tests (source), actual outputs, a fixture-manifest excerpt, and run metadata — under .specclaw/changes/<name>/replay-evidence/run-<timestamp>/, meant to be committed alongside the change's PR as citable proof of mechanical verification. `--discard` opts a single run out of evidence retention (never recommended for an acceptance run); `--keep` is accepted for backward compatibility and behaves identically to the default. `--prune-evidence <n>` keeps only the newest n evidence runs for a change, on request only. Exit code reflects the verdict (0 PASS, 1 FAIL, 2 INCOMPLETE) so it can gate CI.
 ---
 
 # specclaw replay
@@ -10,14 +10,52 @@ Compares the new app's actual behaviour against `.specclaw/baseline/`'s captured
 
 Invocation:
 ```
-/specclaw:replay <change-name>          # fixtures relevant to this change's BL item(s)
-/specclaw:replay --all                  # full regression: every fixture in the manifest
-/specclaw:replay <change-name> --keep   # keep the generated test project after the run
+/specclaw:replay <change-name>                    # fixtures relevant to this change's BL item(s); retains evidence
+/specclaw:replay --all                            # full regression: every fixture in the manifest; retains evidence
+/specclaw:replay <change-name> --keep              # accepted for compatibility — identical to the default
+/specclaw:replay <change-name> --discard           # opt this one run out of evidence retention (never for an acceptance run)
+/specclaw:replay <change-name> --prune-evidence <n> # keep only the newest n evidence runs for this change; no new replay run
 ```
+
+## Evidence Retention
+
+Retention is the default, not an opt-in. A verdict alone ("PASS") is a claim; the generated tests and their actual results are the proof — that the rebuilt application was mechanically compared against recorded behaviour of the original application, not just asserted to be. Deleting them after the run, as this command used to do by default, threw the proof away and kept only the claim.
+
+**Where evidence lives** — a per-change run:
+```
+.specclaw/changes/<name>/replay-evidence/
+├── evidence-summary.md        # the ONE mutable file — regenerated in full every run
+└── run-<timestamp>/
+    ├── report.md               # identical content to replay-report.md for this run
+    ├── run-metadata.json        # legacy SHA, new-repo SHA, plugin version, dotnet
+    │                            # version, date, fixture counts by verdict, overall verdict
+    ├── tests/                   # the generated test project — SOURCE ONLY (never
+    │                            # bin/, obj/, or restored packages — an explicit
+    │                            # exclusion list in the copy step, not a hoped-for
+    │                            # dotnet clean)
+    ├── actual-results/          # actual-output JSON per fixture, from this run
+    └── expected/                # manifest excerpt: fixture IDs + hashes replayed
+                                  # against (never a copy of the fixture files
+                                  # themselves — those stay the single source of
+                                  # truth in .specclaw/baseline/fixtures/)
+```
+For `--all` runs, the same `run-<timestamp>/` structure lives under `.specclaw/replay/evidence/` instead (no `evidence-summary.md` there — that index is change-scoped by design).
+
+**Rules:**
+- Every part of a `run-<timestamp>/` folder, once written, is immutable — a later run never modifies or deletes it. Runs accumulate. `evidence-summary.md` is the sole exception: it's fully regenerated (never appended to) on every run and by `--prune-evidence`.
+- `--keep` is accepted and silently treated identically to the default — retention already keeps everything that matters, so there's nothing left for `--keep` to additionally preserve.
+- `--discard` is the genuine opt-out, for a throwaway run (mid-debugging iteration, say) — the report is still written, but no evidence folder is created and `evidence-summary.md` is left untouched. **Never use `--discard` for a run whose result is meant to gate an acceptance decision or a PR.**
+- `--prune-evidence <n>` keeps only the newest `n` run folders for a change (or the `--all` evidence pool), deleting the rest and regenerating `evidence-summary.md` to match. This never happens automatically — only when explicitly requested.
+- Evidence is committable by design — nothing this command writes is gitignored. `finalize` checks whether the target repo's own `.gitignore` would swallow the evidence path anyway and warns loudly if so, rather than letting "proof" silently end up untracked. The expectation is that a change's final passing run's evidence is committed alongside its PR — that's what makes it citable later, to a client or anyone else.
+- `replay-report.md` (and the identical `report.md` inside the evidence folder) carries a short evidence-pointer header: the evidence path (or a plain statement that this run's evidence was discarded), a brief run-metadata summary, and — for client consumption — one sentence naming what the package actually contains.
+
+**Full proof chain, in one place:** legacy-side evidence is `.specclaw/baseline/harness/` + `fixtures/` + `manifest.json` — already permanent (harness and manifest are archived-then-replaced on re-record, per `/specclaw:baseline`'s own convention; fixture files are additive and never deleted by any specclaw command). New-side evidence is this command's `replay-evidence/` folders. Together they are the complete, durable record of what was captured from the original application and what the rebuild was actually checked against.
 
 ## Step 0 — Setup
 
 Generate a run id: `run_id=$(date +%Y-%m-%d-%H%M%S)`. This ids both the run directory (`.specclaw/replay/run-<run_id>/`) and, for `--all`, the report filename (`.specclaw/replay/report-<run_id>.md`).
+
+**If `--prune-evidence <n>` was passed**, this is the entire job — run `specclaw-replay prune-evidence .specclaw <change-name-or---all> <n>`, relay its one-line summary, and stop. No new replay happens; nothing below this point runs.
 
 **Archive the prior report, if any, before writing a new one** — for a per-change run only (an `--all` report is already uniquely timestamped, nothing to archive):
 ```bash
@@ -105,29 +143,29 @@ Deterministic. For every DIVERGES fixture where the agent claimed a sanctioning 
 ## Step 8 — Render the report
 
 ```bash
-specclaw-replay render .specclaw <change-name-or---all> .specclaw/replay/run-<run_id>
+specclaw-replay render .specclaw <change-name-or---all> .specclaw/replay/run-<run_id> [--discard]
 ```
 
-Deterministic. Renders `$CLAUDE_PLUGIN_ROOT/templates/replay-report.md` from `selection.json` + `mapping.json` + `compare.json` + `sanction-verified.json`: header (date, legacy SHA, fixture counts by verdict), the full per-fixture table (verdict + sanction citation where applicable), the NOT REPLAYABLE list with remediation, every DR rule from `domain-model.md` left uncovered by any REPLAYABLE fixture in this run, and the overall verdict:
+Pass `--discard` only if that flag was on the original invocation — it tells `render` to write a plain "evidence discarded" notice instead of a path to a folder that (per Step 9) won't exist. Deterministic. Renders `$CLAUDE_PLUGIN_ROOT/templates/replay-report.md` from `selection.json` + `mapping.json` + `compare.json` + `sanction-verified.json`: header (date, legacy SHA, fixture counts by verdict), the **evidence-pointer block** (evidence path or discard notice, a brief run-metadata summary, and the one-sentence client explanation of what the package contains), the full per-fixture table (verdict + sanction citation where applicable), the NOT REPLAYABLE list with remediation, every DR rule from `domain-model.md` left uncovered by any REPLAYABLE fixture in this run, and the overall verdict:
 
 - **PASS** — every REPLAYABLE fixture is MATCH, or DIVERGES-but-SANCTIONED.
 - **FAIL** — any ERROR, or any DIVERGES that is not SANCTIONED.
 - **INCOMPLETE** — the selected set was non-empty but every fixture in it came back NOT REPLAYABLE (nothing was actually exercised).
 
-Writes the report to `.specclaw/changes/<change>/replay-report.md` (named change) or `.specclaw/replay/report-<run_id>.md` (`--all`), and exits `0`/`1`/`2` for PASS/FAIL/INCOMPLETE respectively.
+Writes the report to `.specclaw/changes/<change>/replay-report.md` (named change) or `.specclaw/replay/report-<run_id>.md` (`--all`), and exits `0`/`1`/`2` for PASS/FAIL/INCOMPLETE respectively — this computation is untouched by evidence retention; the same inputs produce the same verdict and exit code as before.
 
-## Step 9 — Cleanup
+## Step 9 — Retain evidence (or discard, if asked)
 
 ```bash
-specclaw-replay cleanup .specclaw/replay/run-<run_id> [--keep]
+specclaw-replay finalize .specclaw <change-name-or---all> .specclaw/replay/run-<run_id> [--keep|--discard]
 ```
 
-Deletes the run directory (generated test project, `actual/` results, intermediate JSON) unless `--keep` was passed on the original invocation. The report file itself is never touched by cleanup.
+Pass whichever of `--keep`/`--discard` was on the original invocation (neither, for the default). Unless `--discard`, this curates the run directory into `.specclaw/changes/<change>/replay-evidence/run-<run_id>/` (or `.specclaw/replay/evidence/run-<run_id>/` for `--all`) — see **Evidence Retention** above for the exact structure — regenerates `evidence-summary.md` for a named change, warns if this repo's `.gitignore` would swallow the evidence path, then removes the now-redundant working run directory. `--keep` is accepted and does exactly the same thing as passing nothing. With `--discard`, it just deletes the run directory — no evidence folder, `evidence-summary.md` untouched. The report file itself (written in Step 8, already containing the correct evidence-pointer text either way) is never touched by this step.
 
 ## Step 10 — Present a summary
 
-Relay `render`'s one-line summary and the overall verdict to the user, plus the report's path. If FAIL, name the unsanctioned divergences and ERRORs directly rather than telling the user to open the file.
+Relay `render`'s one-line summary and the overall verdict to the user, plus the report's path and (unless `--discard`) the evidence folder path from `finalize`'s own summary line. **If `finalize` warned about `.gitignore` swallowing the evidence path, surface that warning directly** — don't let "proof" silently end up untracked without the user knowing. If FAIL, name the unsanctioned divergences and ERRORs directly rather than telling the user to open the file.
 
 ## What this command does not do
 
-`/specclaw:replay` never modifies application source, `.specclaw/baseline/fixtures/`, or `manifest.json` — it is read-only against all three. It never lets an agent assert MATCH/DIVERGES/ERROR (Steps 5 and 7 are bash, not agent judgment) and never accepts a divergence as sanctioned on the agent's word alone (Step 7 re-verifies mechanically). It never silently skips a fixture — every non-compared fixture is NOT REPLAYABLE with a stated reason in the report. It does not modify `/specclaw:verify` or any other command; it is a new sibling that runs after verify, before `/specclaw:pr`.
+`/specclaw:replay` never modifies application source, `.specclaw/baseline/fixtures/`, or `manifest.json` — it is read-only against all three. It never lets an agent assert MATCH/DIVERGES/ERROR (Steps 5 and 7 are bash, not agent judgment) and never accepts a divergence as sanctioned on the agent's word alone (Step 7 re-verifies mechanically). It never silently skips a fixture — every non-compared fixture is NOT REPLAYABLE with a stated reason in the report. It does not modify `/specclaw:verify` or any other command; it is a new sibling that runs after verify, before `/specclaw:pr`. It never modifies or deletes a previously-written evidence run folder — only `--prune-evidence`, run explicitly, ever removes one, and even then only the oldest beyond the requested count. It never prunes evidence automatically as a side effect of a normal run. It never changes how fixtures are selected, how the replay-mapper/replay-auditor agents classify or write tests, how `compare`/`sanction-check` compute their verdicts, or the resulting exit codes — evidence retention is purely what happens to the artifacts *after* that verdict is already final.

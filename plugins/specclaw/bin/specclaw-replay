@@ -48,14 +48,32 @@ Subcommands:
                 `### CQ-0NN —` heading in decisions.md (never an Outstanding
                 Question). Writes sanction-verified.json.
 
-  render        <specclaw_dir> <change_name|--all> <run_dir>
+  render        <specclaw_dir> <change_name|--all> <run_dir> [--discard]
                 Renders replay-report.md (or report-<run_id>.md for --all)
-                from selection/mapping/compare/sanction-verified JSON.
-                Archives any prior per-change report first. Exits 0/1/2 for
+                from selection/mapping/compare/sanction-verified JSON, plus
+                an evidence-package pointer header (pass --discard when the
+                caller will discard evidence, so the report says so instead
+                of pointing at a folder that won't exist). Archives any
+                prior per-change report first. Exits 0/1/2 for
                 PASS/FAIL/INCOMPLETE.
 
-  cleanup       <run_dir> [--keep]
-                Deletes the run directory unless --keep is passed.
+  finalize      <specclaw_dir> <change_name|--all> <run_dir> [--keep|--discard]
+                Retention is the default: curates the run directory's
+                generated tests (source only — never bin/obj) + actual
+                results + a fixture-manifest excerpt + run-metadata.json
+                into .specclaw/changes/<name>/replay-evidence/run-<id>/ (or
+                .specclaw/replay/evidence/run-<id>/ for --all), regenerates
+                evidence-summary.md, warns if .gitignore would swallow the
+                evidence path, then removes the working run directory.
+                --keep is accepted and silently treated the same as the
+                default. --discard skips all of the above and just deletes
+                the run directory — no evidence, summary left untouched.
+
+  prune-evidence <specclaw_dir> <change_name|--all> <n>
+                Keeps only the newest <n> evidence run folders for that
+                change (or the --all evidence pool), deleting older ones.
+                Never runs automatically — explicit-only, standalone from
+                any replay run.
 
 Options:
   -h, --help    Show this help message
@@ -601,11 +619,167 @@ cmd_sanction_check() {
   echo "Sanction check complete: ${sanctioned_n} sanctioned, ${unsanctioned_n} unsanctioned (of ${diverges_n} DIVERGES)."
 }
 
+# ─── Evidence retention helpers ──────────────────────────────────────────────
+# Retention is the default (see `finalize` below): every run's generated
+# tests + results are curated into a durable evidence folder instead of the
+# throwaway run directory being deleted. These helpers are shared by
+# `render` (which only needs the *path*, to print it in the report, before
+# the folder itself necessarily exists) and `finalize`/`prune-evidence`
+# (which populate/list/prune it) — kept as pure path/JSON computations, not
+# threaded through argv, same convention as this script's other bins'
+# "recompute independently, it's cheap" pattern.
+
+run_id_from_dir() {
+  local run_dir="$1" run_id
+  run_id="$(basename "$run_dir")"
+  printf '%s' "${run_id#run-}"
+}
+
+# Evidence directory, relative to the project root — for display in the
+# report and for the .gitignore check (git check-ignore wants a repo-
+# relative path, not an absolute one).
+evidence_dir_rel() {
+  local target="$1" run_id="$2"
+  if [ "$target" = "--all" ]; then
+    printf '.specclaw/replay/evidence/run-%s' "$run_id"
+  else
+    printf '.specclaw/changes/%s/replay-evidence/run-%s' "$target" "$run_id"
+  fi
+}
+
+evidence_dir_abs() {
+  local specclaw_dir_abs="$1" target="$2" run_id="$3"
+  if [ "$target" = "--all" ]; then
+    printf '%s/replay/evidence/run-%s' "$specclaw_dir_abs" "$run_id"
+  else
+    printf '%s/changes/%s/replay-evidence/run-%s' "$specclaw_dir_abs" "$target" "$run_id"
+  fi
+}
+
+evidence_root_abs() {
+  local specclaw_dir_abs="$1" target="$2"
+  if [ "$target" = "--all" ]; then
+    printf '%s/replay/evidence' "$specclaw_dir_abs"
+  else
+    printf '%s/changes/%s/replay-evidence' "$specclaw_dir_abs" "$target"
+  fi
+}
+
+# Per-verdict counts + overall PASS/FAIL/INCOMPLETE, independently
+# recomputed from compare.json (+ sanction-verified.json, if present) for
+# evidence purposes (run-metadata.json, evidence-summary.md). Deliberately
+# NOT wired into `cmd_render`'s own (pre-existing, untouched) computation
+# of the same numbers — two independent readers of the same source files,
+# not a shared refactor, so this addition can never perturb render's
+# existing byte-for-byte behaviour.
+compute_verdict_summary() {
+  local compare_file="$1" sanction_file="$2" selected_count="$3"
+  local merged
+  if [ -n "$sanction_file" ] && [ -f "$sanction_file" ]; then
+    merged=$(jq --slurpfile s "$sanction_file" '
+      (.results) as $r
+      | ($s[0].sanctions // []) as $sc
+      | [ $r[] | . as $row
+          | if $row.verdict == "DIVERGES" then
+              ( ($sc[] | select(.scenario_id == $row.scenario_id)) // {sanctioned:false} ) as $m
+              | $row + {sanctioned: $m.sanctioned}
+            else $row end
+        ]
+    ' "$compare_file")
+  else
+    merged=$(jq '[ .results[] | if .verdict == "DIVERGES" then . + {sanctioned:false} else . end ]' "$compare_file")
+  fi
+
+  jq -n --argjson merged "$merged" --argjson selected "$selected_count" '
+    {
+      match: ([$merged[] | select(.verdict=="MATCH")] | length),
+      sanctioned: ([$merged[] | select(.verdict=="DIVERGES" and .sanctioned==true)] | length),
+      diverged: ([$merged[] | select(.verdict=="DIVERGES" and (.sanctioned!=true))] | length),
+      error: ([$merged[] | select(.verdict=="ERROR")] | length),
+      not_replayable: ([$merged[] | select(.verdict=="NOT REPLAYABLE")] | length)
+    }
+    | . + {
+        overall: (if ($selected > 0 and .not_replayable == $selected) then "INCOMPLETE"
+                  elif (.error > 0 or .diverged > 0) then "FAIL"
+                  else "PASS" end)
+      }
+    | . + { exit_code: (if .overall == "INCOMPLETE" then 2 elif .overall == "FAIL" then 1 else 0 end) }
+  '
+}
+
+# Evidence copy of the generated test project — SOURCE ONLY. Explicit
+# exclusion list enforced in the copy step itself (never bin/, obj/, the
+# run's own pipeline-bookkeeping JSON, or its logs) — not left to hoping a
+# `dotnet clean` ran first.
+copy_test_source() {
+  local run_dir="$1" dest_dir="$2"
+  mkdir -p "$dest_dir"
+  local f rel
+  while IFS= read -r f; do
+    rel="${f#"$run_dir"/}"
+    case "$rel" in
+      bin/*|*/bin/*|obj/*|*/obj/*) continue ;;
+      actual/*) continue ;;
+      selection.json|mapping.json|compare.json|sanction.json|sanction-verified.json) continue ;;
+      dotnet-build.log|dotnet-test.log|.dotnet-cmd) continue ;;
+    esac
+    mkdir -p "$dest_dir/$(dirname "$rel")"
+    cp "$f" "$dest_dir/$rel"
+  done < <(find "$run_dir" -type f)
+}
+
+# Rebuilds the one mutable file in a change's evidence tree: a plain-
+# language table of every run's evidence for this change, newest first.
+# Reads ONLY each run's own run-metadata.json — never compare.json/
+# sanction-verified.json, which are long gone by the time this is called
+# for an old run (finalize deletes the working run directory once its
+# useful contents are curated into the evidence tree).
+regenerate_evidence_summary() {
+  local specclaw_dir_abs="$1" target="$2"
+  local evidence_root="${specclaw_dir_abs}/changes/${target}/replay-evidence"
+  local summary_file="${evidence_root}/evidence-summary.md"
+  mkdir -p "$evidence_root"
+
+  local -a run_dirs=()
+  while IFS= read -r d; do
+    run_dirs+=("$d")
+  done < <(find "$evidence_root" -maxdepth 1 -type d -name 'run-*' 2>/dev/null | sort -r)
+
+  local rows="" row d meta
+  for d in "${run_dirs[@]}"; do
+    meta="$d/run-metadata.json"
+    [ -f "$meta" ] || continue
+    row="$(jq -r '
+      "| " + .date + " | " + (.selected_count|tostring) + " | " +
+      (.counts.match|tostring) + " | " + (.counts.sanctioned|tostring) + " | " +
+      (.counts.diverged|tostring) + " | " + (.counts.error|tostring) + " | " +
+      (.counts.not_replayable|tostring) + " | " + .overall_verdict + " | `run-" + .run_id + "/` |"
+    ' "$meta" 2>/dev/null || true)"
+    [ -n "$row" ] && rows="${rows}${row}
+"
+  done
+  rows="$(printf '%s' "$rows" | sed '/./,$!d')"
+  [ -z "$rows" ] && rows="_No replay runs recorded yet for this change._"
+
+  local template="$PLUGIN_ROOT/templates/replay-evidence-summary.md"
+  local content
+  if [ -f "$template" ]; then
+    content="$(cat "$template")"
+  else
+    content="# Replay Evidence: {{target}}
+
+{{table_rows}}"
+  fi
+  content="$(fill_placeholder "$content" "{{target}}" "$target")"
+  content="$(fill_placeholder "$content" "{{table_rows}}" "$rows")"
+  printf '%s\n' "$content" > "$summary_file"
+}
+
 # ─── Subcommand: render ──────────────────────────────────────────────────────
 
 cmd_render() {
   require_jq
-  local specclaw_dir="$1" target="$2" run_dir="$3"
+  local specclaw_dir="$1" target="$2" run_dir="$3" discard_flag="${4:-}"
   local specclaw_dir_abs
   specclaw_dir_abs="$(cd "$specclaw_dir" && pwd)"
 
@@ -713,6 +887,26 @@ cmd_render() {
   local today
   today=$(date +%Y-%m-%d)
 
+  # ── Evidence pointer block. Retention is the default — `--discard` opts
+  # a single run out of the evidence package, but the report itself is
+  # always written either way, so it must say plainly which case this is. ─
+  local evidence_run_id evidence_block
+  evidence_run_id="$(run_id_from_dir "$run_dir")"
+  if [ "$discard_flag" = "--discard" ]; then
+    evidence_block="**Evidence package:** discarded (\`--discard\` was passed) — no retained proof package exists for this run; the verdicts above are not independently reviewable evidence."
+  else
+    local evidence_rel new_repo_sha plugin_version dotnet_cmd_r dotnet_version
+    evidence_rel="$(evidence_dir_rel "$target" "$evidence_run_id")"
+    new_repo_sha="$(git -C "$(cd "${specclaw_dir_abs}/.." && pwd)" rev-parse --short HEAD 2>/dev/null || echo "unknown")"
+    plugin_version="$(jq -r '.version // "unknown"' "$PLUGIN_ROOT/.claude-plugin/plugin.json" 2>/dev/null || echo "unknown")"
+    dotnet_cmd_r="dotnet"
+    [ -f "$run_dir/.dotnet-cmd" ] && dotnet_cmd_r="$(cat "$run_dir/.dotnet-cmd")"
+    dotnet_version="$("$dotnet_cmd_r" --version 2>/dev/null || echo "unknown")"
+    evidence_block="**Evidence package:** \`${evidence_rel}/\` (new-repo commit \`${new_repo_sha}\`, dotnet \`${dotnet_version}\`, specclaw v${plugin_version})
+
+This package contains the generated tests (source), the actual outputs produced by the rebuilt application, references (fixture IDs + hashes) to the sealed legacy fixtures they were compared against, and the per-fixture verdicts below — together, mechanical proof that the rebuilt application's behaviour was compared against the original application's recorded behaviour."
+  fi
+
   local content
   content="$(cat "$template")"
   content="$(fill_placeholder "$content" "{{target}}" "$target")"
@@ -720,6 +914,7 @@ cmd_render() {
   content="$(fill_placeholder "$content" "{{legacy_commit_sha}}" "$legacy_sha")"
   content="$(fill_placeholder "$content" "{{bl_item}}" "$bl_item")"
   content="$(fill_placeholder "$content" "{{selected_count}}" "$selected_count")"
+  content="$(fill_placeholder "$content" "{{evidence_block}}" "$evidence_block")"
   content="$(fill_placeholder "$content" "{{match_count}}" "$match_n")"
   content="$(fill_placeholder "$content" "{{diverges_count}}" "$diverge_n")"
   content="$(fill_placeholder "$content" "{{error_count}}" "$error_n")"
@@ -745,20 +940,171 @@ cmd_render() {
   exit "$exit_code"
 }
 
-# ─── Subcommand: cleanup ─────────────────────────────────────────────────────
+# ─── Subcommand: finalize (retention is the default) ─────────────────────────
+# Replaces the old `cleanup` (which deleted the run directory by default,
+# keeping it only on --keep). Now the default curates the run directory's
+# generated tests + results into a durable, change-scoped evidence folder
+# — the proof a client can be shown, not just the verdict. `--keep` is
+# accepted and silently treated identically to the default (retention
+# already IS keeping everything that matters; there's nothing extra `--keep`
+# needs to do). `--discard` is the new opt-out, for a genuinely throwaway
+# run (e.g. mid-debugging) — never recommended for an acceptance run.
 
-cmd_cleanup() {
-  local run_dir="$1" keep="${2:-}"
-  if [ "$keep" = "--keep" ]; then
-    echo "Keeping run directory: ${run_dir}"
+cmd_finalize() {
+  local specclaw_dir="$1" target="$2" run_dir="$3" mode="${4:-}"
+
+  if [ "$mode" = "--discard" ]; then
+    if [ -d "$run_dir" ]; then
+      rm -rf "$run_dir"
+      echo "Discarded run directory (--discard passed): ${run_dir}. No evidence retained for this run; evidence-summary.md left unchanged."
+    else
+      warn "Run directory already gone: ${run_dir}"
+    fi
     return 0
   fi
-  if [ ! -d "$run_dir" ]; then
-    warn "Run directory already gone: ${run_dir}"
-    return 0
+
+  require_jq
+  [ -d "$run_dir" ] || die "Run directory not found: ${run_dir}"
+
+  local specclaw_dir_abs project_root
+  specclaw_dir_abs="$(cd "$specclaw_dir" && pwd)"
+  project_root="$(cd "$specclaw_dir_abs/.." && pwd)"
+
+  local run_id evidence_dir
+  run_id="$(run_id_from_dir "$run_dir")"
+  evidence_dir="$(evidence_dir_abs "$specclaw_dir_abs" "$target" "$run_id")"
+  mkdir -p "$evidence_dir/tests" "$evidence_dir/actual-results" "$evidence_dir/expected"
+
+  local report_src
+  if [ "$target" = "--all" ]; then
+    report_src="${specclaw_dir_abs}/replay/report-${run_id}.md"
+  else
+    report_src="${specclaw_dir_abs}/changes/${target}/replay-report.md"
   fi
+  [ -f "$report_src" ] || die "Report not found at ${report_src} — run 'render' before 'finalize'."
+  cp "$report_src" "$evidence_dir/report.md"
+
+  copy_test_source "$run_dir" "$evidence_dir/tests"
+
+  if [ -d "$run_dir/actual" ]; then
+    local af
+    while IFS= read -r af; do
+      cp "$af" "$evidence_dir/actual-results/"
+    done < <(find "$run_dir/actual" -maxdepth 1 -name '*.json' 2>/dev/null)
+  fi
+
+  local selection="$run_dir/selection.json"
+  if [ -f "$selection" ]; then
+    jq '{ fixtures: [ .fixtures[] | {scenario_id, content_hash, fixture_path} ] }' "$selection" \
+      > "$evidence_dir/expected/manifest-excerpt.json"
+  else
+    warn "selection.json not found in ${run_dir} — expected/manifest-excerpt.json will be empty."
+    echo '{ "fixtures": [] }' > "$evidence_dir/expected/manifest-excerpt.json"
+  fi
+
+  local legacy_sha bl_item selected_count
+  legacy_sha=$(jq -r '.legacy_commit_sha // "unknown"' "$selection" 2>/dev/null || echo "unknown")
+  bl_item=$(jq -c '.bl_item // null' "$selection" 2>/dev/null || echo null)
+  selected_count=$(jq -r '.selected_count // 0' "$selection" 2>/dev/null || echo 0)
+
+  local new_repo_sha plugin_version dotnet_cmd dotnet_version
+  new_repo_sha="$(git -C "$project_root" rev-parse --short HEAD 2>/dev/null || echo "unknown")"
+  plugin_version="$(jq -r '.version // "unknown"' "$PLUGIN_ROOT/.claude-plugin/plugin.json" 2>/dev/null || echo "unknown")"
+  dotnet_cmd="dotnet"
+  [ -f "$run_dir/.dotnet-cmd" ] && dotnet_cmd="$(cat "$run_dir/.dotnet-cmd")"
+  dotnet_version="$("$dotnet_cmd" --version 2>/dev/null || echo "unknown")"
+
+  local counts today
+  counts="$(compute_verdict_summary "$run_dir/compare.json" "$run_dir/sanction-verified.json" "$selected_count")"
+  today="$(date +%Y-%m-%d)"
+
+  jq -n \
+    --arg run_id "$run_id" \
+    --arg target "$target" \
+    --argjson bl_item "$bl_item" \
+    --arg date "$today" \
+    --arg legacy_sha "$legacy_sha" \
+    --arg new_repo_sha "$new_repo_sha" \
+    --arg plugin_version "$plugin_version" \
+    --arg dotnet_version "$dotnet_version" \
+    --argjson selected_count "$selected_count" \
+    --argjson counts "$counts" \
+    '{
+      run_id: $run_id,
+      target: $target,
+      bl_item: $bl_item,
+      date: $date,
+      legacy_commit_sha: $legacy_sha,
+      new_repo_commit_sha: $new_repo_sha,
+      plugin_version: $plugin_version,
+      dotnet_version: $dotnet_version,
+      selected_count: $selected_count,
+      counts: ($counts | del(.overall, .exit_code)),
+      overall_verdict: $counts.overall
+    }' > "$evidence_dir/run-metadata.json"
+
+  # Committable-by-design: evidence is meant to travel with the change's PR.
+  # If this repo's own .gitignore would swallow it, that's a real problem
+  # to surface now, not discover later when the "proof" turns out untracked.
+  if command -v git >/dev/null 2>&1 && git -C "$project_root" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    local rel_evidence_dir
+    rel_evidence_dir="$(evidence_dir_rel "$target" "$run_id")"
+    if git -C "$project_root" check-ignore -q -- "$rel_evidence_dir" 2>/dev/null; then
+      warn "Evidence path ${rel_evidence_dir} is matched by this repo's .gitignore — it will NOT be tracked by git unless the ignore rule is adjusted. Evidence is meant to be committed with the change's PR as citable proof."
+    fi
+  fi
+
+  [ "$target" != "--all" ] && regenerate_evidence_summary "$specclaw_dir_abs" "$target"
+
   rm -rf "$run_dir"
-  echo "Removed run directory: ${run_dir}"
+  echo "Evidence retained at ${evidence_dir} (report.md, run-metadata.json, tests/, actual-results/, expected/). Working run directory removed."
+}
+
+# ─── Subcommand: prune-evidence ──────────────────────────────────────────────
+# Explicit-only pruning of accumulated evidence runs. Never invoked as part
+# of the normal replay pipeline — a human (or the skill, only when asked)
+# runs it on its own, separate from any new replay.
+
+cmd_prune_evidence() {
+  require_jq
+  local specclaw_dir="$1" target="$2" n="$3"
+  [[ "$n" =~ ^[0-9]+$ ]] && [ "$n" -ge 1 ] || die "--prune-evidence requires a positive integer (got '${n}')."
+
+  local specclaw_dir_abs
+  specclaw_dir_abs="$(cd "$specclaw_dir" && pwd)"
+
+  if [ "$target" != "--all" ]; then
+    [ -d "${specclaw_dir_abs}/changes/${target}" ] || die "Change '${target}' not found under ${specclaw_dir_abs}/changes/."
+  fi
+
+  local evidence_root
+  evidence_root="$(evidence_root_abs "$specclaw_dir_abs" "$target")"
+
+  if [ ! -d "$evidence_root" ]; then
+    echo "No evidence folder at ${evidence_root} — nothing to prune."
+    return 0
+  fi
+
+  local -a run_dirs=()
+  while IFS= read -r d; do
+    run_dirs+=("$d")
+  done < <(find "$evidence_root" -maxdepth 1 -type d -name 'run-*' 2>/dev/null | sort -r)
+
+  local total="${#run_dirs[@]}"
+  if [ "$total" -le "$n" ]; then
+    echo "Only ${total} evidence run(s) present for ${target} (<= requested ${n}) — nothing pruned."
+    return 0
+  fi
+
+  local i removed=0
+  for (( i=n; i<total; i++ )); do
+    rm -rf "${run_dirs[$i]}"
+    removed=$((removed + 1))
+  done
+
+  [ "$target" != "--all" ] && regenerate_evidence_summary "$specclaw_dir_abs" "$target"
+
+  echo "Pruned ${removed} evidence run(s) for ${target}, keeping the newest ${n} (of ${total} total)."
 }
 
 # ─── Main ─────────────────────────────────────────────────────────────────────
@@ -789,12 +1135,16 @@ case "${1:-}" in
     cmd_sanction_check "$2" "$3"
     ;;
   render)
-    [ $# -ge 4 ] || die "Usage: specclaw-replay render <specclaw_dir> <change_name|--all> <run_dir>"
-    cmd_render "$2" "$3" "$4"
+    [ $# -ge 4 ] || die "Usage: specclaw-replay render <specclaw_dir> <change_name|--all> <run_dir> [--discard]"
+    cmd_render "$2" "$3" "$4" "${5:-}"
     ;;
-  cleanup)
-    [ $# -ge 2 ] || die "Usage: specclaw-replay cleanup <run_dir> [--keep]"
-    cmd_cleanup "$2" "${3:-}"
+  finalize)
+    [ $# -ge 4 ] || die "Usage: specclaw-replay finalize <specclaw_dir> <change_name|--all> <run_dir> [--keep|--discard]"
+    cmd_finalize "$2" "$3" "$4" "${5:-}"
+    ;;
+  prune-evidence)
+    [ $# -ge 4 ] || die "Usage: specclaw-replay prune-evidence <specclaw_dir> <change_name|--all> <n>"
+    cmd_prune_evidence "$2" "$3" "$4"
     ;;
   "")
     usage
