@@ -1,10 +1,14 @@
 # Custom Questions
 
 <!--
-  Per-repo custom questions for /specclaw:clarify. This file is never
-  created or written by /specclaw:clarify itself — copy this starter into
-  .specclaw/analysis/custom-questions.md in YOUR target repo and edit it
-  there; clarify only ever *reads* it.
+  Per-repo custom questions for /specclaw:clarify. /specclaw:clarify
+  scaffolds this exact file to .specclaw/analysis/custom-questions.md the
+  first time a Mode A run (or --bank-only) finds nothing at that path —
+  edit it in place there afterward. Once anything exists at that path —
+  even an empty file, even a malformed one — clarify never overwrites,
+  re-renders, or otherwise touches it again, no matter how it got there or
+  what it contains; it's user-authored from that point on, and clarify
+  only ever *reads* it to ingest new UQ-NNN questions.
 
   One heading per question. Everything below a heading up to the next
   heading is that question's body — sloppy authoring is fine, clarify
