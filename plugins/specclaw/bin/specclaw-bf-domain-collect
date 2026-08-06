@@ -433,10 +433,8 @@ parse_one_pas_types() {
 
     if $accumulating && [[ "$buf" == *\)\;* ]]; then
       local list="${buf%%\)\;*}"
-      local IFS_OLD="$IFS"
-      IFS=','
-      local -a ids=($list)
-      IFS="$IFS_OLD"
+      local -a ids
+      IFS=',' read -ra ids <<< "$list"
       local values_json="" first_val=true id
       for id in "${ids[@]}"; do
         id="${id#"${id%%[![:space:]]*}"}"

@@ -85,6 +85,7 @@ match_files_by_name() {
   local files_file="$1" pattern="$2" f
   while IFS= read -r f; do
     [ -z "$f" ] && continue
+    # shellcheck disable=SC2254 # $pattern is a caller-supplied glob (e.g. "*.csproj"); quoting would make it a literal match instead
     case "${f##*/}" in
       $pattern) printf '%s\n' "$f" ;;
     esac
@@ -567,6 +568,7 @@ cmd_collect() {
   local graph_tmp
   graph_tmp="$(mktemp)"
 
+  # shellcheck disable=SC2094 # resolve_unit_to_scoped_file only reads $tmp_scoped (via awk); it never writes to it
   while IFS= read -r pas_file; do
     [ -z "$pas_file" ] && continue
     case "$pas_file" in *.pas) ;; *) continue ;; esac
@@ -579,6 +581,7 @@ cmd_collect() {
     done < <(extract_uses_clause_units "$project_root/$pas_file")
   done < "$tmp_scoped"
 
+  # shellcheck disable=SC2094 # resolve_node_import only reads $tmp_scoped (via grep); it never writes to it
   while IFS= read -r js_file; do
     [ -z "$js_file" ] && continue
     case "$js_file" in *.js|*.jsx|*.ts|*.tsx) ;; *) continue ;; esac
@@ -593,6 +596,7 @@ cmd_collect() {
     done < <(extract_node_relative_imports "$project_root/$js_file")
   done < "$tmp_scoped"
 
+  # shellcheck disable=SC2094 # resolve_dotnet_project_ref only reads $tmp_scoped (via grep); it never writes to it
   while IFS= read -r csproj_file; do
     [ -z "$csproj_file" ] && continue
     case "$csproj_file" in *.csproj) ;; *) continue ;; esac

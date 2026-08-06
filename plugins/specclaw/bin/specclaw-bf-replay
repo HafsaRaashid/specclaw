@@ -229,7 +229,11 @@ resolve_bl_id() {
 
   if [ -f "$backlog_file" ] && ! grep -qE "^### ${bl_id} " "$backlog_file"; then
     local via
-    via=$([ -n "$item_num" ] && printf "an 'item %s' citation" "$item_num" || printf 'a direct citation')
+    if [ -n "$item_num" ]; then
+      via="an 'item $item_num' citation"
+    else
+      via='a direct citation'
+    fi
     warn "Derived ${bl_id} from ${via} but rebuild-backlog.md has no matching '### ${bl_id} —' heading — treating as unresolved."
     printf ''
     return 0
@@ -1068,7 +1072,9 @@ cmd_finalize() {
 cmd_prune_evidence() {
   require_jq
   local specclaw_dir="$1" target="$2" n="$3"
-  [[ "$n" =~ ^[0-9]+$ ]] && [ "$n" -ge 1 ] || die "--prune-evidence requires a positive integer (got '${n}')."
+  if ! { [[ "$n" =~ ^[0-9]+$ ]] && [ "$n" -ge 1 ]; }; then
+    die "--prune-evidence requires a positive integer (got '${n}')."
+  fi
 
   local specclaw_dir_abs
   specclaw_dir_abs="$(cd "$specclaw_dir" && pwd)"

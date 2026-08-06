@@ -14,8 +14,6 @@
 # best-effort fallback — same tolerant pattern as every sibling script).
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-
 # ─── Help ─────────────────────────────────────────────────────────────────────
 
 usage() {
@@ -234,7 +232,9 @@ cmd_harness_collect() {
 
   local seams_file="$baseline_dir/seams.md"
   local scenarios_file="$baseline_dir/scenarios.md"
-  [ -f "$seams_file" ] && [ -f "$scenarios_file" ] || die "No .specclaw/baseline/seams.md and scenarios.md found — run /specclaw:bf-baseline (design mode) first, confirm the recommended seam, then re-run with --harness."
+  if ! { [ -f "$seams_file" ] && [ -f "$scenarios_file" ]; }; then
+    die "No .specclaw/baseline/seams.md and scenarios.md found — run /specclaw:bf-baseline (design mode) first, confirm the recommended seam, then re-run with --harness."
+  fi
 
   # Archive any prior harness wholesale (it's a directory, not a single file
   # — same archive-then-replace convention, applied to a directory).

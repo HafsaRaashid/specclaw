@@ -206,7 +206,7 @@ yaml_val() {
     value="${value%%"${BASH_REMATCH[1]}"*}"
   fi
   if [[ "$value" =~ [[:space:]]+$ ]]; then
-    value="${value%${BASH_REMATCH[0]}}"
+    value="${value%"${BASH_REMATCH[0]}"}"
   fi
   value="${value#\"}"
   value="${value%\"}"
@@ -625,8 +625,7 @@ render_uq_from_custom_questions() {
   local -a qfiles=("$workdir2"/q*.md)
   shopt -u nullglob
   # Stable numeric order (q1, q2, ... q10, not q1, q10, q2).
-  IFS=$'\n' qfiles=($(printf '%s\n' "${qfiles[@]}" | sed -E 's/.*\/q([0-9]+)\.md/\1 &/' | sort -n | cut -d' ' -f2-))
-  unset IFS
+  mapfile -t qfiles < <(printf '%s\n' "${qfiles[@]}" | sed -E 's/.*\/q([0-9]+)\.md/\1 &/' | sort -n | cut -d' ' -f2-)
 
   local out="" first=true
   local f heading qtype blocking options default id
