@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# specclaw-replay — golden-master comparison: replays captured legacy fixtures
+# specclaw-bf-replay — golden-master comparison: replays captured legacy fixtures
 # against the new app's own behaviour. Bash + coreutils + jq (required — this
 # script parses nested JSON in manifest.json/fixtures/compare results, unlike
 # sibling bins that only hand-build flat JSON).
@@ -12,7 +12,7 @@ PLUGIN_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 usage() {
   cat <<'EOF'
-Usage: specclaw-replay <subcommand> [options]
+Usage: specclaw-bf-replay <subcommand> [options]
 
 Subcommands:
   resolve       <specclaw_dir> <change_name|--all> <out_selection_json>
@@ -85,7 +85,7 @@ warn() { echo "WARN: $*" >&2; }
 
 require_jq() {
   command -v jq >/dev/null 2>&1 \
-    || die "jq is required by specclaw-replay (nested manifest/fixture JSON parsing) but was not found on PATH."
+    || die "jq is required by specclaw-bf-replay (nested manifest/fixture JSON parsing) but was not found on PATH."
 }
 
 # MSYS2/Git-Bash paths (/c/...) are not understood by MSBuild when baked into
@@ -265,7 +265,7 @@ cmd_resolve() {
   local fixtures_dir="$specclaw_dir_abs/baseline/fixtures"
   local backlog_file="$specclaw_dir_abs/analysis/rebuild-backlog.md"
 
-  [ -f "$manifest" ] || die "manifest.json not found at ${manifest} — run /specclaw:baseline --record first."
+  [ -f "$manifest" ] || die "manifest.json not found at ${manifest} — run /specclaw:bf-baseline --record first."
   [ -d "$fixtures_dir" ] || die "Fixtures directory not found at ${fixtures_dir}."
   jq -e . "$manifest" >/dev/null 2>&1 || die "manifest.json at ${manifest} is not valid JSON."
 
@@ -1115,35 +1115,35 @@ case "${1:-}" in
     exit 0
     ;;
   resolve)
-    [ $# -ge 4 ] || die "Usage: specclaw-replay resolve <specclaw_dir> <change_name|--all> <out_selection_json>"
+    [ $# -ge 4 ] || die "Usage: specclaw-bf-replay resolve <specclaw_dir> <change_name|--all> <out_selection_json>"
     cmd_resolve "$2" "$3" "$4"
     ;;
   init-rundir)
-    [ $# -ge 3 ] || die "Usage: specclaw-replay init-rundir <specclaw_dir> <run_dir>"
+    [ $# -ge 3 ] || die "Usage: specclaw-bf-replay init-rundir <specclaw_dir> <run_dir>"
     cmd_init_rundir "$2" "$3"
     ;;
   run-tests)
-    [ $# -ge 2 ] || die "Usage: specclaw-replay run-tests <run_dir>"
+    [ $# -ge 2 ] || die "Usage: specclaw-bf-replay run-tests <run_dir>"
     cmd_run_tests "$2"
     ;;
   compare)
-    [ $# -ge 3 ] || die "Usage: specclaw-replay compare <specclaw_dir> <run_dir>"
+    [ $# -ge 3 ] || die "Usage: specclaw-bf-replay compare <specclaw_dir> <run_dir>"
     cmd_compare "$2" "$3"
     ;;
   sanction-check)
-    [ $# -ge 3 ] || die "Usage: specclaw-replay sanction-check <specclaw_dir> <run_dir>"
+    [ $# -ge 3 ] || die "Usage: specclaw-bf-replay sanction-check <specclaw_dir> <run_dir>"
     cmd_sanction_check "$2" "$3"
     ;;
   render)
-    [ $# -ge 4 ] || die "Usage: specclaw-replay render <specclaw_dir> <change_name|--all> <run_dir> [--discard]"
+    [ $# -ge 4 ] || die "Usage: specclaw-bf-replay render <specclaw_dir> <change_name|--all> <run_dir> [--discard]"
     cmd_render "$2" "$3" "$4" "${5:-}"
     ;;
   finalize)
-    [ $# -ge 4 ] || die "Usage: specclaw-replay finalize <specclaw_dir> <change_name|--all> <run_dir> [--keep|--discard]"
+    [ $# -ge 4 ] || die "Usage: specclaw-bf-replay finalize <specclaw_dir> <change_name|--all> <run_dir> [--keep|--discard]"
     cmd_finalize "$2" "$3" "$4" "${5:-}"
     ;;
   prune-evidence)
-    [ $# -ge 4 ] || die "Usage: specclaw-replay prune-evidence <specclaw_dir> <change_name|--all> <n>"
+    [ $# -ge 4 ] || die "Usage: specclaw-bf-replay prune-evidence <specclaw_dir> <change_name|--all> <n>"
     cmd_prune_evidence "$2" "$3" "$4"
     ;;
   "")
@@ -1151,6 +1151,6 @@ case "${1:-}" in
     exit 1
     ;;
   *)
-    die "Unknown subcommand: $1. Run specclaw-replay --help for usage."
+    die "Unknown subcommand: $1. Run specclaw-bf-replay --help for usage."
     ;;
 esac

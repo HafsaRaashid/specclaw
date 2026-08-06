@@ -5,7 +5,7 @@ namespace Replay.Harness;
 /// .specclaw/baseline/fixtures/GM-*.json's own `output` records it — so a
 /// fixture captured from the legacy app and an actual result captured here
 /// from the new app are structurally comparable field-for-field. Do not
-/// rename these fields; `specclaw-replay compare` reads `ExceptionType`/
+/// rename these fields; `specclaw-bf-replay compare` reads `ExceptionType`/
 /// `InnerExceptionType` by name (and compares them by short type name only,
 /// tolerating a legacy->new namespace rename such as ADR-0002's
 /// `ExecutivePlanning.Core` -> the new repo's own Core namespace).

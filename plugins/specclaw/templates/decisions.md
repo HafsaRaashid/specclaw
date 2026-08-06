@@ -4,7 +4,7 @@
 **Source:** .specclaw/analysis/clarifications.md
 
 <!--
-  This is the clean, pinnable decision record /specclaw:clarify --resolve
+  This is the clean, pinnable decision record /specclaw:bf-clarify --resolve
   produces from clarifications.md's answered questions, swept across all
   three question families (CQ-NNN/SQ-NNN/UQ-NNN). Every entry below is a
   mechanical transcription of an already-answered question — the

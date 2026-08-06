@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# specclaw-baseline — deterministic fact-collection for /specclaw:baseline
+# specclaw-bf-baseline — deterministic fact-collection for /specclaw:bf-baseline
 #
-# Unlike specclaw-clarify (which owns rendering to protect a hard
+# Unlike specclaw-bf-clarify (which owns rendering to protect a hard
 # ID-stability/never-overwrite-an-answer invariant), this script follows the
 # plugin's standard analysis-command split: bash gathers facts and archives
 # prior output, the baseline-designer agent interprets and writes
@@ -20,19 +20,19 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 usage() {
   cat <<'EOF'
-Usage: specclaw-baseline <subcommand> [options]
+Usage: specclaw-bf-baseline <subcommand> [options]
 
 Subcommands:
   collect          <specclaw_dir>
                    Design-mode (Mode A) pre-agent step. Requires
                    .specclaw/analysis/domain-model.md to exist —
-                   /specclaw:baseline derives scenarios from its numbered
+                   /specclaw:bf-baseline derives scenarios from its numbered
                    business rules and cannot proceed without it. Reports
                    which supplementary analysis documents
                    (codebase-report.md, architecture.md, functional-spec.md,
                    rebuild-backlog.md) are present, for stack detection and
                    backlog-item linkage. Outputs one JSON object to stdout.
-                   Exits non-zero, naming /specclaw:domain, if
+                   Exits non-zero, naming /specclaw:bf-domain, if
                    domain-model.md is missing.
 
   harness-collect  <specclaw_dir>
@@ -69,7 +69,7 @@ EOF
 die() { echo "ERROR: $*" >&2; exit 1; }
 warn() { echo "WARN: $*" >&2; }
 
-# ─── Generic JSON helpers (copied verbatim from specclaw-analyze-codebase —
+# ─── Generic JSON helpers (copied verbatim from specclaw-bf-analyze-codebase —
 # no shared lib, per repo convention) ─────────────────────────────────────────
 
 json_escape() {
@@ -114,7 +114,7 @@ emit_json() {
 SUPP_DOCS=(codebase-report.md architecture.md functional-spec.md rebuild-backlog.md)
 
 # ─── Scenario-block parsing (scenarios.md) ───────────────────────────────────
-# Same "one block per file, keyed by ID" technique specclaw-clarify uses for
+# Same "one block per file, keyed by ID" technique specclaw-bf-clarify uses for
 # CQ-NNN blocks, applied to scenarios.md's "### GM-NNN" blocks. Read-only here
 # (record never rewrites scenarios.md) — used to build the deterministic
 # checklist harness-collect hands the agent, and the seam/rule/backlog-item
@@ -151,9 +151,9 @@ scenario_block_field() {
 
 # ─── Fixture JSON field extraction (best-effort, no jq dependency) ───────────
 # Mirrors this plugin's tolerant "grep/sed over JSON-shaped text" convention
-# (see specclaw-analyze-codebase's version-signal extractors). Only handles
+# (see specclaw-bf-analyze-codebase's version-signal extractors). Only handles
 # flat top-level scalar/array fields — exactly the shape the harness's own
-# fixture-writer code is required to produce (see agents/baseline-designer.md
+# fixture-writer code is required to produce (see agents/bf-baseline-designer.md
 # Mode: harness). A malformed or unreadable fixture never aborts the scan.
 #
 # Fixtures are written with System.Text.Json's indented writer, which puts
@@ -190,7 +190,7 @@ cmd_collect() {
   analysis_dir="$specclaw_dir_abs/analysis"
 
   local domain_model="$analysis_dir/domain-model.md"
-  [ -f "$domain_model" ] || die "No .specclaw/analysis/domain-model.md found — /specclaw:baseline derives its scenarios from that document's numbered business rules and cannot proceed without it. Run /specclaw:domain first."
+  [ -f "$domain_model" ] || die "No .specclaw/analysis/domain-model.md found — /specclaw:bf-baseline derives its scenarios from that document's numbered business rules and cannot proceed without it. Run /specclaw:bf-domain first."
 
   local -a docs_present=() docs_missing=()
   local d
@@ -234,7 +234,7 @@ cmd_harness_collect() {
 
   local seams_file="$baseline_dir/seams.md"
   local scenarios_file="$baseline_dir/scenarios.md"
-  [ -f "$seams_file" ] && [ -f "$scenarios_file" ] || die "No .specclaw/baseline/seams.md and scenarios.md found — run /specclaw:baseline (design mode) first, confirm the recommended seam, then re-run with --harness."
+  [ -f "$seams_file" ] && [ -f "$scenarios_file" ] || die "No .specclaw/baseline/seams.md and scenarios.md found — run /specclaw:bf-baseline (design mode) first, confirm the recommended seam, then re-run with --harness."
 
   # Archive any prior harness wholesale (it's a directory, not a single file
   # — same archive-then-replace convention, applied to a directory).
@@ -288,7 +288,7 @@ cmd_record() {
   baseline_dir="$specclaw_dir_abs/baseline"
 
   local scenarios_file="$baseline_dir/scenarios.md"
-  [ -f "$scenarios_file" ] || die "No .specclaw/baseline/scenarios.md found — run /specclaw:baseline (design mode) first."
+  [ -f "$scenarios_file" ] || die "No .specclaw/baseline/scenarios.md found — run /specclaw:bf-baseline (design mode) first."
 
   local fixtures_dir="$baseline_dir/fixtures"
   local manifest_file="$baseline_dir/manifest.json"
@@ -377,15 +377,15 @@ ENDJSON
 
 case "${1:-}" in
   collect)
-    [ $# -ge 2 ] || die "Usage: specclaw-baseline collect <specclaw_dir>"
+    [ $# -ge 2 ] || die "Usage: specclaw-bf-baseline collect <specclaw_dir>"
     cmd_collect "$2"
     ;;
   harness-collect)
-    [ $# -ge 2 ] || die "Usage: specclaw-baseline harness-collect <specclaw_dir>"
+    [ $# -ge 2 ] || die "Usage: specclaw-bf-baseline harness-collect <specclaw_dir>"
     cmd_harness_collect "$2"
     ;;
   record)
-    [ $# -ge 2 ] || die "Usage: specclaw-baseline record <specclaw_dir>"
+    [ $# -ge 2 ] || die "Usage: specclaw-bf-baseline record <specclaw_dir>"
     cmd_record "$2"
     ;;
   "")
@@ -393,6 +393,6 @@ case "${1:-}" in
     exit 1
     ;;
   *)
-    die "Unknown subcommand: $1. Run specclaw-baseline --help for usage."
+    die "Unknown subcommand: $1. Run specclaw-bf-baseline --help for usage."
     ;;
 esac

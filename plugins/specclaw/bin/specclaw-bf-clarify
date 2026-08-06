@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# specclaw-clarify — deterministic engine for /specclaw:clarify
+# specclaw-bf-clarify — deterministic engine for /specclaw:bf-clarify
 #
 # Turns the extraction signals scattered through .specclaw/analysis/*.md
 # into a numbered, human-answerable question set (clarifications.md), then
@@ -47,7 +47,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 usage() {
   cat <<'EOF'
-Usage: specclaw-clarify <subcommand> [options]
+Usage: specclaw-bf-clarify <subcommand> [options]
 
 Subcommands:
   collect          <specclaw_dir> [--bank-only]
@@ -116,7 +116,7 @@ EOF
 die() { echo "ERROR: $*" >&2; exit 1; }
 warn() { echo "WARN: $*" >&2; }
 
-# ─── Generic JSON helpers (copied verbatim from specclaw-analyze-codebase —
+# ─── Generic JSON helpers (copied verbatim from specclaw-bf-analyze-codebase —
 # no shared lib, per repo convention) ─────────────────────────────────────────
 
 json_escape() {
@@ -445,10 +445,10 @@ cmd_collect() {
   done
 
   # Extraction needs at least one analysis document; the bank/custom layer
-  # needs none of them (it may run right after /specclaw:analyze, before
-  # /specclaw:architecture or /specclaw:domain have ever run).
+  # needs none of them (it may run right after /specclaw:bf-analyze, before
+  # /specclaw:bf-architecture or /specclaw:bf-domain have ever run).
   if ! $bank_only && [ "${#docs_present[@]}" -eq 0 ]; then
-    die "No analysis documents found in .specclaw/analysis/ — run /specclaw:analyze, /specclaw:architecture, and/or /specclaw:domain first (rebuild-backlog.md from /specclaw:rebuild-plan is swept too, if present). Use --bank-only to ask the standard/custom questions without any analysis documents."
+    die "No analysis documents found in .specclaw/analysis/ — run /specclaw:bf-analyze, /specclaw:bf-architecture, and/or /specclaw:bf-domain first (rebuild-backlog.md from /specclaw:bf-rebuild-plan is swept too, if present). Use --bank-only to ask the standard/custom questions without any analysis documents."
   fi
 
   local docs_present_json docs_missing_json
@@ -1025,7 +1025,7 @@ cmd_resolve_collect() {
   analysis_dir="$specclaw_dir_abs/analysis"
   local clar_file="$analysis_dir/clarifications.md"
 
-  [ -f "$clar_file" ] || die "no .specclaw/analysis/clarifications.md found — run /specclaw:clarify first."
+  [ -f "$clar_file" ] || die "no .specclaw/analysis/clarifications.md found — run /specclaw:bf-clarify first."
 
   local workdir; workdir="$(mktemp -d)"
   split_question_blocks "$clar_file" "$workdir"
@@ -1081,7 +1081,7 @@ cmd_resolve_render() {
   archive_dir="$analysis_dir/archive"
 
   local clar_file="$analysis_dir/clarifications.md"
-  [ -f "$clar_file" ] || die "no .specclaw/analysis/clarifications.md found — run /specclaw:clarify first."
+  [ -f "$clar_file" ] || die "no .specclaw/analysis/clarifications.md found — run /specclaw:bf-clarify first."
 
   local workdir; workdir="$(mktemp -d)"
   split_question_blocks "$clar_file" "$workdir"
@@ -1177,19 +1177,19 @@ ENTRY
 
 case "${1:-}" in
   collect)
-    [ $# -ge 2 ] || die "Usage: specclaw-clarify collect <specclaw_dir> [--bank-only]"
+    [ $# -ge 2 ] || die "Usage: specclaw-bf-clarify collect <specclaw_dir> [--bank-only]"
     cmd_collect "$2" "${3:-}"
     ;;
   render)
-    [ $# -ge 4 ] || die "Usage: specclaw-clarify render <specclaw_dir> <cq_draft|-> <bank_draft|->"
+    [ $# -ge 4 ] || die "Usage: specclaw-bf-clarify render <specclaw_dir> <cq_draft|-> <bank_draft|->"
     cmd_render "$2" "$3" "$4"
     ;;
   resolve-collect)
-    [ $# -ge 2 ] || die "Usage: specclaw-clarify resolve-collect <specclaw_dir>"
+    [ $# -ge 2 ] || die "Usage: specclaw-bf-clarify resolve-collect <specclaw_dir>"
     cmd_resolve_collect "$2"
     ;;
   resolve-render)
-    [ $# -ge 3 ] || die "Usage: specclaw-clarify resolve-render <specclaw_dir> <adr_file>"
+    [ $# -ge 3 ] || die "Usage: specclaw-bf-clarify resolve-render <specclaw_dir> <adr_file>"
     cmd_resolve_render "$2" "$3"
     ;;
   "")
@@ -1197,6 +1197,6 @@ case "${1:-}" in
     exit 1
     ;;
   *)
-    die "Unknown subcommand: $1. Run specclaw-clarify --help for usage."
+    die "Unknown subcommand: $1. Run specclaw-bf-clarify --help for usage."
     ;;
 esac

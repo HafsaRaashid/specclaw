@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# specclaw-rebuild-collect — deterministic fact-collection AND rendering for
-# /specclaw:rebuild-plan
+# specclaw-bf-rebuild-collect — deterministic fact-collection AND rendering for
+# /specclaw:bf-rebuild-plan
 #
-# Two responsibilities, split like specclaw-clarify (not like the plugin's
+# Two responsibilities, split like specclaw-bf-clarify (not like the plugin's
 # other analysis bin scripts, which only collect facts for an agent to write
 # the final file): this command now has the same hard invariant clarify
 # solved for — a living backlog whose BL-NNN IDs, and any human-added status
@@ -41,7 +41,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 usage() {
   cat <<'EOF'
-Usage: specclaw-rebuild-collect <subcommand> [options]
+Usage: specclaw-bf-rebuild-collect <subcommand> [options]
 
 Subcommands:
   collect  <specclaw_dir> [--refresh]
@@ -76,7 +76,7 @@ EOF
 die() { echo "ERROR: $*" >&2; exit 1; }
 warn() { echo "WARN: $*" >&2; }
 
-# ─── Generic JSON helpers (copied verbatim from specclaw-analyze-codebase —
+# ─── Generic JSON helpers (copied verbatim from specclaw-bf-analyze-codebase —
 # no shared lib, per repo convention) ─────────────────────────────────────────
 
 json_escape() {
@@ -113,7 +113,7 @@ emit_json() {
   fi
 }
 
-# ─── Config reading (copied verbatim from specclaw-clarify / specclaw-validate-
+# ─── Config reading (copied verbatim from specclaw-bf-clarify / specclaw-validate-
 # change — no shared lib, per repo convention) ────────────────────────────────
 
 yaml_val() {
@@ -181,7 +181,7 @@ project_title() {
   printf '%s' "$name"
 }
 
-# ─── Template substitution (copied verbatim from specclaw-clarify) ──────────
+# ─── Template substitution (copied verbatim from specclaw-bf-clarify) ──────────
 
 substitute() {
   # NOT "${content//"$token"/$value}" — bash's pattern-substitution
@@ -223,7 +223,7 @@ strip_trailing_separator() {
 }
 
 # ─── Generic block splitting, keyed by a "### <PREFIX>-NNN" heading ──────────
-# Same technique specclaw-clarify uses for CQ-NNN and specclaw-baseline uses
+# Same technique specclaw-bf-clarify uses for CQ-NNN and specclaw-bf-baseline uses
 # for GM-NNN, generalized to a caller-supplied prefix/heading-pattern so this
 # one script can split BL-NNN (rebuild-backlog.md), CQ-NNN (clarifications.md),
 # and GM-NNN (scenarios.md) blocks with one function.
@@ -320,10 +320,10 @@ ids_to_json_array() {
 # ─── Known analysis documents (unchanged hard prerequisite) ─────────────────
 
 DOC_SPECS=(
-  "codebase-report.md|analyze"
-  "architecture.md|architecture"
-  "domain-model.md|domain"
-  "functional-spec.md|domain"
+  "codebase-report.md|bf-analyze"
+  "architecture.md|bf-architecture"
+  "domain-model.md|bf-domain"
+  "functional-spec.md|bf-domain"
 )
 
 # ─── Subcommand: collect ─────────────────────────────────────────────────────
@@ -375,9 +375,9 @@ cmd_collect() {
       die "$(cat <<'EOF'
 .specclaw/analysis/rebuild-backlog.md already exists.
 
-/specclaw:rebuild-plan no longer regenerates an existing backlog from
+/specclaw:bf-rebuild-plan no longer regenerates an existing backlog from
 scratch — that would destroy in-flight status (Gate/Verification, struck/
-deferred items, human-added status notes). Run /specclaw:rebuild-plan
+deferred items, human-added status notes). Run /specclaw:bf-rebuild-plan
 --refresh to update it in place, or archive/delete the file manually first
 if you genuinely want a from-scratch run.
 EOF
@@ -864,7 +864,7 @@ cmd_render() {
       VERIF[$id]="NO BASELINE DATA — baseline has been run, but no scenario in scenarios.md cites this item's rules"
       VERIF_RANK[$id]=1
     else
-      VERIF[$id]="NO BASELINE DATA — /specclaw:baseline has not been run at all"
+      VERIF[$id]="NO BASELINE DATA — /specclaw:bf-baseline has not been run at all"
       VERIF_RANK[$id]=1
     fi
   done
@@ -958,10 +958,10 @@ ${body}"
   done
 
   local missing_note_decisions missing_note_clar missing_note_manifest missing_note_scenarios
-  missing_note_decisions="present"; [ -f "$decisions_file" ] || missing_note_decisions="missing — run /specclaw:clarify --resolve"
-  missing_note_clar="present"; [ -f "$clar_file" ] || missing_note_clar="missing — run /specclaw:clarify"
-  missing_note_manifest="present"; [ -f "$manifest_file" ] || missing_note_manifest="missing — run /specclaw:baseline --record"
-  missing_note_scenarios="present"; [ -f "$scenarios_file" ] || missing_note_scenarios="missing — run /specclaw:baseline"
+  missing_note_decisions="present"; [ -f "$decisions_file" ] || missing_note_decisions="missing — run /specclaw:bf-clarify --resolve"
+  missing_note_clar="present"; [ -f "$clar_file" ] || missing_note_clar="missing — run /specclaw:bf-clarify"
+  missing_note_manifest="present"; [ -f "$manifest_file" ] || missing_note_manifest="missing — run /specclaw:bf-baseline --record"
+  missing_note_scenarios="present"; [ -f "$scenarios_file" ] || missing_note_scenarios="missing — run /specclaw:bf-baseline"
 
   local status_header
   status_header="**Date:** $(date +%Y-%m-%d)
@@ -1008,8 +1008,8 @@ ${body}"
   # ── Preserve Sequencing Rationale / Coverage Check verbatim (bash never
   # regenerates prose narrative it can't verify against the source docs;
   # the change report above is the mechanism for surfacing what changed) ──
-  local sequencing_rationale="See prior version below — /specclaw:rebuild-plan --refresh does not regenerate this narrative automatically; update by hand if new items change the dependency story."
-  local coverage_check="See prior version below — carried forward unchanged by /specclaw:rebuild-plan --refresh."
+  local sequencing_rationale="See prior version below — /specclaw:bf-rebuild-plan --refresh does not regenerate this narrative automatically; update by hand if new items change the dependency story."
+  local coverage_check="See prior version below — carried forward unchanged by /specclaw:bf-rebuild-plan --refresh."
   if $is_refresh; then
     sequencing_rationale="$(awk '/^## Sequencing Rationale/{flag=1;next}/^## /{flag=0}flag' "$backlog_file" | sed '/./,$!d')"
     coverage_check="$(awk '/^## Coverage Check/{flag=1;next}/^## /{flag=0}flag' "$backlog_file" | sed '/./,$!d')"
@@ -1048,11 +1048,11 @@ ${body}"
 
 case "${1:-}" in
   collect)
-    [ $# -ge 2 ] || die "Usage: specclaw-rebuild-collect collect <specclaw_dir> [--refresh]"
+    [ $# -ge 2 ] || die "Usage: specclaw-bf-rebuild-collect collect <specclaw_dir> [--refresh]"
     cmd_collect "$2" "${3:-}"
     ;;
   render)
-    [ $# -ge 3 ] || die "Usage: specclaw-rebuild-collect render <specclaw_dir> <draft_file>"
+    [ $# -ge 3 ] || die "Usage: specclaw-bf-rebuild-collect render <specclaw_dir> <draft_file>"
     cmd_render "$2" "$3"
     ;;
   "")
@@ -1060,6 +1060,6 @@ case "${1:-}" in
     exit 1
     ;;
   *)
-    die "Unknown subcommand: $1. Run specclaw-rebuild-collect --help for usage."
+    die "Unknown subcommand: $1. Run specclaw-bf-rebuild-collect --help for usage."
     ;;
 esac

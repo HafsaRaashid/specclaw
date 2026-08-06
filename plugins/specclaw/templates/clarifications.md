@@ -4,7 +4,7 @@
 **Documents swept:** {{docs_swept}}
 
 <!--
-  This file is drafted by /specclaw:clarify (extract mode) and re-rendered
+  This file is drafted by /specclaw:bf-clarify (extract mode) and re-rendered
   on every subsequent run — never freehand-edited except for the fields a
   human fills in below each question.
 
@@ -69,7 +69,7 @@
   To answer a question: type your answer directly after "**Answer:**" (one
   line, or several up to the next "**Decided by:**" line), fill in
   "**Decided by:**" (your name) and "**Date:**" (YYYY-MM-DD). Then run
-  `/specclaw:clarify --resolve` to promote it into decisions.md.
+  `/specclaw:bf-clarify --resolve` to promote it into decisions.md.
 -->
 
 ## Summary

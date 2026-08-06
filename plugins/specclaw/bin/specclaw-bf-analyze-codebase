@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# specclaw-analyze-codebase — deterministic codebase fact-collection for /specclaw:analyze
+# specclaw-bf-analyze-codebase — deterministic codebase fact-collection for /specclaw:bf-analyze
 #
 # Gathers file enumeration, manifest/dependency detection, LOC-per-extension,
 # test-location detection, and discovered project docs into one JSON object.
@@ -16,11 +16,11 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 usage() {
   cat <<'EOF'
-Usage: specclaw-analyze-codebase <subcommand> [options]
+Usage: specclaw-bf-analyze-codebase <subcommand> [options]
 
 Subcommands:
   collect       <specclaw_dir> [path]
-                Deterministic fact-collection for /specclaw:analyze. Scopes to
+                Deterministic fact-collection for /specclaw:bf-analyze. Scopes to
                 [path] (default: repository root, i.e. the parent of
                 <specclaw_dir>): enumerates files, detects and best-effort
                 parses dependency manifests (package.json, *.csproj/*.sln,
@@ -750,7 +750,7 @@ case "${1:-}" in
     exit 0
     ;;
   collect)
-    [ $# -ge 2 ] || die "Usage: specclaw-analyze-codebase collect <specclaw_dir> [path]"
+    [ $# -ge 2 ] || die "Usage: specclaw-bf-analyze-codebase collect <specclaw_dir> [path]"
     cmd_collect "$2" "${3:-.}"
     ;;
   "")
@@ -758,6 +758,6 @@ case "${1:-}" in
     exit 1
     ;;
   *)
-    die "Unknown subcommand: $1. Run specclaw-analyze-codebase --help for usage."
+    die "Unknown subcommand: $1. Run specclaw-bf-analyze-codebase --help for usage."
     ;;
 esac
