@@ -1,0 +1,385 @@
+#!/usr/bin/env bash
+# specclaw-browser-lock — N-slot filesystem semaphore for Playwright browsers.
+# Part of the specclaw skill. Bash + coreutils only.
+#
+# Slots are directories under <specclaw_dir>/.locks/playwright/slot-<i>/, each
+# holding a `pid` file with the acquiring PID. Atomic claim via `mkdir` (mkdir
+# is atomic on POSIX; EEXIST loses the race and retries). Fail-open: on any
+# degeneracy (unwritable lock dir, acquire timeout) proceed without a slot so a
+# wedged pool can never hang the build (NFR2/NFR3).
+set -euo pipefail
+
+# Max seconds acquire will poll before giving up and failing open (NFR3).
+ACQUIRE_TIMEOUT_SECONDS="${SPECCLAW_BROWSER_LOCK_TIMEOUT:-120}"
+# Seconds between poll attempts when the pool is full.
+POLL_INTERVAL_SECONDS=0.5
+
+# ─── Helpers ──────────────────────────────────────────────────────────────────
+
+usage() {
+  cat <<'EOF'
+Usage: specclaw-browser-lock <specclaw_dir> <acquire|release <slot_id>|status|wrap <cmd>>
+
+Subcommands:
+  acquire              Claim a free slot (blocks/polls until one is free or a
+                       bounded timeout). Prints the slot id (e.g. slot-2) on
+                       success. On timeout: warns to stderr, prints `none`,
+                       exits 0 (fail-open).
+  release <slot_id>    Free the named slot. Idempotent.
+  status               Print `held/max` (live-PID slots vs max_browsers).
+  wrap <cmd>           Print (never execute) a memory-bounded form of <cmd>:
+                       `--workers=1` for Playwright commands that don't set it,
+                       one `--project=` invocation per verify.playwright.projects
+                       entry joined with `&&`, each prefixed with a
+                       `systemd-run --scope -p MemoryMax=<N>M` cap.
+                       Exit 0 = capped, 10 = emitted uncapped (warned).
+
+N (max slots) = verify.playwright.max_browsers in config.yaml (default 2).
+Memory cap    = verify.playwright.max_memory_mb in config.yaml (default 4096).
+
+Options:
+  -h, --help   Show this help message
+EOF
+}
+
+warn() { echo "WARN: $*" >&2; }
+
+# Read a simple yaml value: yaml_val <file> <dotted.key>
+# Handles top-level and one-level nested keys (good enough for config.yaml).
+yaml_val() {
+  local file="$1" key="$2"
+  local section field
+  if [[ "$key" == *.* ]]; then
+    section="${key%%.*}"
+    field="${key#*.}"
+  else
+    section=""
+    field="$key"
+  fi
+
+  local in_section=false value=""
+  while IFS= read -r line; do
+    # skip comments / blank
+    [[ "$line" =~ ^[[:space:]]*# ]] && continue
+    [[ -z "${line// /}" ]] && continue
+
+    if [[ -z "$section" ]]; then
+      if [[ "$line" =~ ^${field}:[[:space:]]*(.*) ]]; then
+        value="${BASH_REMATCH[1]}"
+        break
+      fi
+    else
+      if [[ "$line" =~ ^[a-zA-Z_] ]]; then
+        if [[ "$line" =~ ^${section}: ]]; then
+          in_section=true
+        else
+          in_section=false
+        fi
+        continue
+      fi
+      if $in_section; then
+        if [[ "$line" =~ ^[[:space:]]+${field}:[[:space:]]*(.*) ]]; then
+          value="${BASH_REMATCH[1]}"
+          break
+        fi
+      fi
+    fi
+  done < "$file"
+
+  # Strip inline `#` comments
+  if [[ "$value" =~ ([[:space:]]+#) ]]; then
+    value="${value%%"${BASH_REMATCH[1]}"*}"
+  fi
+  # Strip trailing whitespace
+  if [[ "$value" =~ [[:space:]]+$ ]]; then
+    value="${value%"${BASH_REMATCH[0]}"}"
+  fi
+  # Strip surrounding quotes
+  value="${value#\"}"
+  value="${value%\"}"
+  value="${value#\'}"
+  value="${value%\'}"
+  echo "$value"
+}
+
+# Resolve N = verify.playwright.max_browsers (default 2).
+# The two-level-deep key isn't handled by yaml_val (one nesting level only),
+# so read it directly with a scoped scan.
+read_max_browsers() {
+  local config="$1" n=""
+  if [[ -f "$config" ]]; then
+    n="$(awk '
+      /^[a-zA-Z_]/ { inv = ($0 ~ /^verify:/) }
+      inv && /^  playwright:/ { inp=1; next }
+      inv && /^  [a-zA-Z_]/ && $0 !~ /^  playwright:/ { inp=0 }
+      inp && /^    max_browsers:/ {
+        line=$0; sub(/^    max_browsers:[[:space:]]*/,"",line)
+        sub(/[[:space:]]*#.*$/,"",line); sub(/[[:space:]]+$/,"",line)
+        print line; exit
+      }
+    ' "$config")"
+  fi
+  [[ "$n" =~ ^[0-9]+$ ]] && [[ "$n" -ge 1 ]] || n=2
+  echo "$n"
+}
+
+# Normalize a raw yaml scalar: strip an inline ` #` comment (leading whitespace
+# required, so a `#` inside a value survives), trim, then unwrap one layer of
+# matching quotes.
+clean_scalar() {
+  local v="$1"
+  if [[ "$v" =~ ^(.*[^[:space:]])?[[:space:]]+#.*$ ]]; then
+    v="${BASH_REMATCH[1]}"
+  fi
+  v="${v#"${v%%[![:space:]]*}"}"
+  v="${v%"${v##*[![:space:]]}"}"
+  if [[ ${#v} -ge 2 ]]; then
+    case "$v" in
+      \"*\") v="${v#\"}"; v="${v%\"}" ;;
+      \'*\') v="${v#\'}"; v="${v%\'}" ;;
+    esac
+  fi
+  printf '%s' "$v"
+}
+
+# Print the body lines of the verify.playwright: block (yaml_val handles one
+# nesting level only, so the two-level-deep block is scanned out directly).
+# Block ends at the first line indented less than its keys.
+playwright_block() {
+  local config="$1"
+  [[ -f "$config" ]] || return 0
+  awk '
+    /^[a-zA-Z_]/                { inv = ($0 ~ /^verify:/); inp = 0 }
+    inv && /^  playwright:/     { inp = 1; next }
+    inp && /^    /              { print; next }
+    inp                         { inp = 0 }
+  ' "$config"
+}
+
+# Resolve verify.playwright.max_memory_mb (default 4096).
+read_max_memory_mb() {
+  local mb=""
+  mb="$(playwright_block "$1" | sed -n 's/^    max_memory_mb:[[:space:]]*//p' | head -1)" || true
+  mb="$(clean_scalar "$mb")"
+  [[ "$mb" =~ ^[0-9]+$ ]] && [[ "$mb" -ge 1 ]] || mb=4096
+  echo "$mb"
+}
+
+# Print verify.playwright.projects entries, one per line (no output = empty).
+# Supports both yaml list forms:
+#   inline flow:     projects: [desktop, "my project"]
+#   block sequence:  projects:
+#                      - desktop
+read_projects() {
+  local block inline body item
+  block="$(playwright_block "$1")" || true
+  [[ -n "$block" ]] || return 0
+
+  inline="$(printf '%s\n' "$block" | sed -n 's/^    projects:[[:space:]]*//p' | head -1)" || true
+  inline="$(clean_scalar "$inline")"
+  case "$inline" in
+    \[*\]*)
+      body="${inline#*[}"; body="${body%]*}"
+      local IFS=','
+      for item in $body; do
+        item="$(clean_scalar "$item")"
+        [[ -n "$item" ]] && printf '%s\n' "$item"
+      done
+      return 0
+      ;;
+  esac
+
+  printf '%s\n' "$block" | awk '
+    /^    projects:[[:space:]]*$/ { inblk = 1; next }
+    inblk {
+      if ($0 ~ /^[[:space:]]*-[[:space:]]*/) { sub(/^[[:space:]]*-[[:space:]]*/, ""); print; next }
+      if ($0 ~ /^[[:space:]]*#/ || $0 ~ /^[[:space:]]*$/) { next }
+      inblk = 0
+    }
+  ' | while IFS= read -r item; do
+        item="$(clean_scalar "$item")"
+        [[ -n "$item" ]] && printf '%s\n' "$item"
+      done || true
+}
+
+# Single-quote a string so a shell re-parses it as one literal word.
+shell_quote() {
+  local s="$1"
+  s="${s//\'/\'\\\'\'}"
+  printf "'%s'" "$s"
+}
+
+# Is `systemd-run --user --scope` actually usable here? Probed once and cached
+# for the process: `command -v` succeeds in containers where the call fails, and
+# a false-positive cap silently does nothing (edge case 11). Bounded by
+# `timeout` so a wedged systemd/dbus can never stall a build (NFR2).
+SYSTEMD_RUN_USABLE=""
+systemd_run_usable() {
+  if [[ -z "$SYSTEMD_RUN_USABLE" ]]; then
+    if command -v systemd-run >/dev/null 2>&1 &&
+       timeout 5 systemd-run --user --scope -q true >/dev/null 2>&1; then
+      SYSTEMD_RUN_USABLE=yes
+    else
+      SYSTEMD_RUN_USABLE=no
+    fi
+  fi
+  [[ "$SYSTEMD_RUN_USABLE" == "yes" ]]
+}
+
+# Is a slot occupied by a live process? slot_live <slot_dir>
+# Returns 0 (live) only if the pid file holds a PID that `kill -0` accepts.
+slot_live() {
+  local slot_dir="$1" pid
+  [[ -d "$slot_dir" ]] || return 1
+  pid="$(cat "$slot_dir/pid" 2>/dev/null || true)"
+  [[ "$pid" =~ ^[0-9]+$ ]] || return 1
+  kill -0 "$pid" 2>/dev/null
+}
+
+# ─── acquire ────────────────────────────────────────────────────────────────
+
+cmd_acquire() {
+  local specclaw_dir="$1"
+  local config="$specclaw_dir/config.yaml"
+  local pool="$specclaw_dir/.locks/playwright"
+  local n; n="$(read_max_browsers "$config")"
+
+  # Ensure the pool dir exists; fail-open if we cannot create it (NFR2).
+  if ! mkdir -p "$pool" 2>/dev/null; then
+    warn "browser-lock: cannot create lock dir '$pool' — proceeding without a slot (uncapped)"
+    echo "none"
+    return 0
+  fi
+
+  local deadline elapsed i slot_dir
+  deadline=$(( SECONDS + ACQUIRE_TIMEOUT_SECONDS ))
+  while :; do
+    for (( i = 1; i <= n; i++ )); do
+      slot_dir="$pool/slot-$i"
+      # Reclaim a stale slot held by a dead PID (FR7).
+      if [[ -d "$slot_dir" ]] && ! slot_live "$slot_dir"; then
+        rm -rf "$slot_dir" 2>/dev/null || true
+      fi
+      # Atomic claim: mkdir succeeds only if the slot dir did not exist.
+      if mkdir "$slot_dir" 2>/dev/null; then
+        echo "$$" > "$slot_dir/pid"
+        echo "slot-$i"
+        return 0
+      fi
+      # mkdir failed → another acquirer won the race; try the next slot.
+    done
+    # No free slot this pass.
+    elapsed=$SECONDS
+    if (( elapsed >= deadline )); then
+      warn "browser-lock: timed out after ${ACQUIRE_TIMEOUT_SECONDS}s waiting for a free slot (max_browsers=$n) — proceeding without a slot (uncapped)"
+      echo "none"
+      return 0
+    fi
+    sleep "$POLL_INTERVAL_SECONDS"
+  done
+}
+
+# ─── release ──────────────────────────────────────────────────────────────
+
+cmd_release() {
+  local specclaw_dir="$1" slot_id="${2:-}"
+  [[ -n "$slot_id" ]] || { warn "release requires a slot id"; return 0; }
+  local slot_dir="$specclaw_dir/.locks/playwright/$slot_id"
+  # Idempotent: releasing an already-free slot is not an error.
+  rm -rf "$slot_dir" 2>/dev/null || true
+}
+
+# ─── status ─────────────────────────────────────────────────────────────────
+
+cmd_status() {
+  local specclaw_dir="$1"
+  local config="$specclaw_dir/config.yaml"
+  local pool="$specclaw_dir/.locks/playwright"
+  local n; n="$(read_max_browsers "$config")"
+
+  local held=0 i slot_dir
+  for (( i = 1; i <= n; i++ )); do
+    slot_dir="$pool/slot-$i"
+    if slot_live "$slot_dir"; then
+      held=$(( held + 1 ))
+    fi
+  done
+  echo "${held}/${n}"
+}
+
+# ─── wrap ───────────────────────────────────────────────────────────────────
+
+# Print a memory-bounded form of the given command. Prints only — execution is
+# the caller's job (specclaw-run-long), which keeps every transformation a pure
+# string assertion in tests (NFR6).
+# Exit 0 = a memory cap was applied, 10 = emitted uncapped (warned) (NFR2).
+cmd_wrap() {
+  local specclaw_dir="$1" cmd="$2"
+  [[ -n "$cmd" ]] || { warn "wrap requires a command string"; return 1; }
+  local config="$specclaw_dir/config.yaml"
+
+  # 1. Playwright worker cap: only for Playwright commands (a Cypress or plain
+  #    script must not grow a --workers flag), and only when the command does
+  #    not already choose a worker count.
+  if [[ "$cmd" == *playwright* ]] && [[ "$cmd" != *--workers* ]]; then
+    cmd="$cmd --workers=1"
+  fi
+
+  # 2. Project fan-out: one invocation per configured project, run in sequence.
+  #    Empty list → a single invocation, project selection left to the project's
+  #    own playwright config.
+  local -a invocations=()
+  local project
+  while IFS= read -r project; do
+    [[ -n "$project" ]] || continue
+    invocations+=( "$cmd --project=$(printf '%q' "$project")" )
+  done < <(read_projects "$config")
+  [[ ${#invocations[@]} -gt 0 ]] || invocations=( "$cmd" )
+
+  # 3. Memory cap: put each invocation in its own bounded transient scope. The
+  #    invocation goes through `bash -c` because a command string may carry env
+  #    prefixes, pipes or `&&` (edge case 2) — `systemd-run <string>` execs a
+  #    binary, so `CI=1 npx …` would fail and `a | b` would leave `b` outside
+  #    the cap. Quoting, not rewriting, so the command itself is unchanged.
+  local mb capped=yes
+  mb="$(read_max_memory_mb "$config")"
+  systemd_run_usable || {
+    capped=no
+    warn "browser-lock: systemd-run unusable — emitting command uncapped (MemoryMax=${mb}M not applied)"
+  }
+
+  local out="" inv
+  for inv in "${invocations[@]}"; do
+    [[ -z "$out" ]] || out="$out && "
+    if [[ "$capped" == "yes" ]]; then
+      out="${out}systemd-run --user --scope -q -p MemoryMax=${mb}M bash -c $(shell_quote "$inv")"
+    else
+      out="$out$inv"
+    fi
+  done
+  printf '%s\n' "$out"
+
+  [[ "$capped" == "yes" ]] || return 10
+}
+
+# ─── Main dispatch ────────────────────────────────────────────────────────────
+
+[[ $# -gt 0 ]] || { usage; exit 1; }
+
+case "$1" in
+  -h|--help) usage; exit 0 ;;
+esac
+
+[[ $# -ge 2 ]] || { usage; exit 1; }
+
+specclaw_dir="$1"
+subcmd="$2"
+shift 2
+
+case "$subcmd" in
+  acquire) cmd_acquire "$specclaw_dir" ;;
+  release) cmd_release "$specclaw_dir" "${1:-}" ;;
+  status)  cmd_status "$specclaw_dir" ;;
+  wrap)    cmd_wrap "$specclaw_dir" "$*" ;;
+  *)       warn "Unknown subcommand: $subcmd (try --help)"; usage; exit 1 ;;
+esac

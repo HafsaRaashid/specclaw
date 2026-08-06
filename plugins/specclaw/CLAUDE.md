@@ -44,10 +44,25 @@ All executable scripts live in `bin/`. Key ones:
 | `specclaw-build-context` | Build coding agent payload (includes context.md; `--failure-record`/`--reflection` for loop remediation) |
 | `specclaw-loop` | Autonomous loop controller: `init` / `gates` / `decide` / `guard-tests` / `log-turn` / `escalate` / `ci-poll` / `done` |
 | `specclaw-update-context` | Output LLM prompt to rewrite context.md post-merge |
-| `specclaw-update-status` | Regenerate `.specclaw/STATUS.md` dashboard |
+| `specclaw-run-long` | Run a long command detached: heartbeats to stderr, capped tail to stdout, full log + HEAD-stamped sidecar on disk; `--reuse` skips a re-run when HEAD matches and the tree is clean |
+| `specclaw-update-status` | Regenerate `.specclaw/STATUS.md` dashboard (resolves open/merged PR state per change) |
 | `specclaw-gh-sync` | GitHub Issues sync |
 | `specclaw-pr` | Create GitHub PR (enforces test policy, triggers context update) |
 | `specclaw-validate-change` | Check phase prerequisites |
+
+## Tests
+
+Suites live in `tests/`, are bash + coreutils only (no jq in the suites themselves; `run-parser-tests.sh` shells out to it), and **every one must be registered in `.github/workflows/ci.yml`** — an unregistered suite silently never runs, which has happened twice.
+
+| Suite | Covers |
+|-------|--------|
+| `run-parser-tests.sh` | tasks/AC/changed-files parsing (needs `jq` installed) |
+| `run-memory-parallelism-tests.sh` | memory-aware build concurrency, browser slot pool |
+| `run-long-orchestration-tests.sh` | `run-long`, the e2e tier, `browser-lock wrap`, PR-aware status |
+| `run-synth-agent-tests.sh` | dynamically synthesized build subagents |
+| `run-shellcheck-gate-tests.sh` | the shellcheck gate itself |
+
+`shellcheck-gate.sh` fails CI on any shellcheck finding absent from `shellcheck-baseline.txt` (pairs of `<path> <SCxxxx>`, no line numbers, so unrelated edits do not churn it). Fix a new finding or add a targeted `# shellcheck disable=SCxxxx` with a rationale — never silence one by appending to the baseline. It skips with exit 0 when shellcheck is not installed, so the suite still runs locally.
 
 ## Templates
 

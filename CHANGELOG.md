@@ -4,6 +4,26 @@ All notable changes to specclaw are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.5] — 2026-07-17
+
+### Added
+- **Social preview card.** `docs/assets/social-preview.png` — a 1280×640,
+  <1MB GitHub-ready Open Graph card derived from the hero image, for upload
+  via Settings → Social preview (better link cards on X / Slack / Discord).
+
+## [0.5.4] — 2026-07-17
+
+### Added
+- **Search & AI-discoverability for the docs site.** Enabled the
+  `jekyll-sitemap` plugin with canonical `url`/`baseurl` so a `sitemap.xml`
+  is generated for the GitHub Pages site; added `docs/robots.txt` (allow-all
+  + sitemap reference), `docs/llms.txt` (short llms.txt-convention index) and
+  `docs/llms-full.txt` (expanded text for LLM ingestion), keyword-tuned
+  `docs/index.md`, and `docs/INDEXING.md` — a maintainer checklist for the
+  owner-only steps (enable Pages, set homepage, Google Search Console, social
+  image) plus drafted awesome-list submission text. Docs-only; no plugin
+  runtime code changed.
+
 ## [0.5.3] — 2026-07-17
 
 ### Added

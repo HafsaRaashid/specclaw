@@ -155,17 +155,22 @@ echo
 echo "--- Case 5 (NFR2): real in-repo change still parses ---"
 REAL_SPECCLAW="$REPO_ROOT/.specclaw"
 REAL_CHANGE="build-engine"
+# REAL_CHANGE is the change path relative to changes/ (e.g. "build-engine" or
+# "archive/2026-07-22-build-engine"), so both PARSE_TASKS (full path) and
+# VERIFY collect (specclaw_dir + change_name) resolve it.
 if [[ ! -f "$REAL_SPECCLAW/changes/$REAL_CHANGE/spec.md" ]]; then
-  # Fallback: pick any change that has both spec.md and tasks.md.
-  for d in "$REAL_SPECCLAW"/changes/*/; do
+  # Fallback: pick any change with both spec.md and tasks.md — active first,
+  # then archived (all active changes may be archived, e.g. after cleanup).
+  REAL_CHANGE=""
+  for d in "$REAL_SPECCLAW"/changes/*/ "$REAL_SPECCLAW"/changes/archive/*/; do
     if [[ -f "$d/spec.md" && -f "$d/tasks.md" ]]; then
-      REAL_CHANGE="$(basename "$d")"
+      REAL_CHANGE="${d#"$REAL_SPECCLAW"/changes/}"; REAL_CHANGE="${REAL_CHANGE%/}"
       break
     fi
   done
 fi
 
-if [[ -f "$REAL_SPECCLAW/changes/$REAL_CHANGE/spec.md" && -f "$REAL_SPECCLAW/changes/$REAL_CHANGE/tasks.md" ]]; then
+if [[ -n "$REAL_CHANGE" && -f "$REAL_SPECCLAW/changes/$REAL_CHANGE/spec.md" && -f "$REAL_SPECCLAW/changes/$REAL_CHANGE/tasks.md" ]]; then
   echo "    using real change: $REAL_CHANGE"
   real_ids="$("$PARSE_TASKS" "$REAL_SPECCLAW/changes/$REAL_CHANGE/tasks.md" | jq 'length')"
   if [[ "$real_ids" -gt 0 ]]; then
@@ -959,6 +964,44 @@ else
     pass "12f partial docs: stderr does not name present files as missing"
   fi
 fi
+# Case 13 — verify-glob-oom-fix: `Files:` paths with glob metacharacters (e.g.
+# Next.js dynamic routes `app/[id]/page.tsx`) must extract verbatim and NOT
+# hang. Pre-fix the strip glob-interpreted the captured path, no-op'd, and
+# infinite-looped until OOM. Guard with `timeout` so a regression fails fast.
+# ─────────────────────────────────────────────────────────────────────────────
+echo "--- Case 13: verify collect handles glob/dynamic-route paths (no hang) ---"
+gdir="$WORK/changes/glob-path"
+mkdir -p "$gdir"
+printf '# spec\n## Acceptance Criteria\n- [ ] AC-1: works\n' > "$gdir/spec.md"
+{
+  printf '# tasks\n'
+  printf -- '- [ ] `T1` — dynamic route\n'
+  printf -- '  - Files: `app/[id]/page.tsx`\n'
+  printf -- '- [ ] `T2` — catch-all + plain\n'
+  printf -- '  - Files: `app/[...slug]/route.ts`, `src/plain.ts`\n'
+} > "$gdir/tasks.md"
+
+# The critical assertion: collect terminates. `timeout` kills a runaway loop
+# (exit 124) so the hang manifests as a fail, not a stalled suite.
+gout="$(timeout 10 "$VERIFY" collect "$WORK" glob-path 2>/dev/null)"; grc=$?
+if [[ "$grc" -eq 0 ]]; then
+  pass "AC-1/AC-2 verify collect terminates on glob paths (no hang)"
+else
+  fail "AC-1/AC-2 verify collect terminates on glob paths (rc=$grc — 124=timeout/hang)"
+fi
+
+# jq-free asserts (jq is not guaranteed on every runner): count and match the
+# "path": entries directly in the JSON so a glob path that got dropped or
+# duplicated is caught regardless of jq availability.
+gcount="$(printf '%s' "$gout" | grep -c '"path":')"
+assert_eq "glob paths extracted count" "3" "${gcount:-0}"
+for needle in 'app/[id]/page.tsx' 'app/[...slug]/route.ts' 'src/plain.ts'; do
+  if grep -qF "\"path\": \"$needle\"" <<<"$gout"; then
+    pass "glob path extracted verbatim: $needle"
+  else
+    fail "glob path extracted verbatim: $needle"
+  fi
+done
 echo
 
 # ─────────────────────────────────────────────────────────────────────────────

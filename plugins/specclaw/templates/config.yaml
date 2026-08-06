@@ -9,9 +9,9 @@ project:
 
 # Model routing — use the best model for each phase
 models:
-  planning: "anthropic/claude-opus-4-6"      # Proposals, specs, design
-  coding: "openai/gpt-5.1-codex"             # Implementation
-  review: "anthropic/claude-sonnet-4-5"       # Verification & code review
+  planning: "anthropic/claude-opus-4-8"      # Proposals, specs, design
+  coding: "anthropic/claude-sonnet-5"        # Implementation
+  review: "anthropic/claude-sonnet-5"        # Verification & code review
 
 # Git strategy
 #
@@ -55,11 +55,50 @@ context:
 
 # Build settings
 build:
-  test_command: ""                 # e.g., "npm test", "pytest"
+  test_command: ""                 # Fast tier: unit/integration. e.g., "npm test", "pytest"
+  e2e_command: ""                  # Slow tier: browser/e2e. e.g., "npx playwright test"
+                                   # Run separately from test_command, per verify.e2e below.
+                                   # Absent or empty → no e2e tier, behaviour unchanged.
   lint_command: ""                 # e.g., "npm run lint"
   build_command: ""                # e.g., "npm run build"
   parallel_tasks: 3               # Max concurrent agent spawns
   timeout_seconds: 300             # Per-task timeout
+
+  # Memory-aware parallelism (opt-in). Lowers effective build concurrency
+  # when free RAM is tight; absent → parallel_tasks used unchanged.
+  memory:
+    min_free_mb: 1024             # RAM floor (MB) kept free before spawning another agent
+    per_agent_mb: 1024            # Estimated RAM (MB) reserved per parallel agent
+
+  # Dynamically synthesized per-task build subagents (opt-in).
+  # When enabled, each build task gets a bespoke agent: kind-classified,
+  # minimal tools, cost-aware Claude model from the ladder below. Default
+  # off — build dispatches the generic coder exactly as before.
+  dynamic_agents:
+    enabled: false
+    ladder:                                    # task tier -> model (cheap -> strong)
+      trivial:  "anthropic/claude-haiku-4-5"   # docs / rename / config
+      standard: "anthropic/claude-sonnet-5"    # normal impl / test / refactor
+      complex:  "anthropic/claude-opus-4-8"    # large / cross-module
+      extreme:  "anthropic/claude-fable-5"     # highly-complex only (see cap)
+    max_model: "anthropic/claude-opus-4-8"     # ceiling; extreme requires explicit highly-complex mark
+    fable_max_fraction: 0.2                     # cap Fable share of tasks per build
+    cache: true                                 # persist synthesized specs under changes/<change>/agents/
+
+# Verify settings
+verify:
+  # When the slow tier (build.e2e_command) runs. Absent → "last".
+  #   skip   — never run e2e during verify
+  #   last   — run e2e only after lint, build and test all pass
+  #   always — run e2e even when an earlier gate failed
+  e2e: last
+  heartbeat_seconds: 60            # Liveness heartbeat interval for long commands (stderr)
+  playwright:
+    max_browsers: 2                # Hard cap on concurrent Playwright/Chromium instances across all agents
+    max_memory_mb: 4096            # Memory ceiling (MB) per e2e invocation, applied via systemd-run --scope
+                                   # Absent → 4096. systemd-run unusable → command runs uncapped (warned).
+    projects: []                   # Playwright project names to run one-per-invocation, sequentially
+                                   # Absent or empty → a single invocation, no --project flag added.
 
 # Notifications
 notifications:
