@@ -1,0 +1,1201 @@
+#!/usr/bin/env bash
+# specclaw-bf-clarify — deterministic engine for /specclaw:bf-clarify
+#
+# Turns the extraction signals scattered through .specclaw/analysis/*.md
+# into a numbered, human-answerable question set (clarifications.md), then
+# promotes answered questions into a clean, pinnable decision record
+# (decisions.md).
+#
+# Three question families share one clarifications.md, one summary, one
+# --resolve pipeline:
+#   CQ-NNN — extracted from analysis docs, allocated per-repo in extraction
+#            order (unchanged from before this families upgrade).
+#   SQ-NNN — the standard bank (references/clarify-standard-questions.md):
+#            IDs are FIXED by the bank file itself, not allocated per-repo —
+#            SQ-001 always means "target platform," everywhere. Type/
+#            Blocking/Options/Proposed default are bash-owned, spliced in
+#            directly from the bank file; the agent only ever judges
+#            Applicability, drafts a contextualized Finding, and checks for
+#            a pre-existing answer (an *accepted* ADR or a decisions.md
+#            entry).
+#   UQ-NNN — per-repo custom questions (.specclaw/analysis/custom-
+#            questions.md): allocated per-repo in file order, same
+#            permanence rules as CQ. Ingestion is pure bash (tolerant
+#            defaulting of sloppy authoring) — no agent involved.
+#
+# Unlike the plugin's other analysis bin scripts (which only gather facts
+# for an agent to interpret and write), this script also owns rendering and
+# archiving both output files. That's deliberate: the one hard invariant
+# this command must never violate — stable, permanent IDs in all three
+# families, never renumbered; existing Answer/Decided-by/Date fields never
+# touched by a re-run; SQ Type/Blocking/Options/Proposed-default identical
+# across every project — is safer enforced deterministically in bash than
+# trusted to an LLM's judgment across repeated runs. The agent's job is
+# narrower here: it only ever drafts NEW question content (extract mode),
+# judges Applicability/pre-answered/contextualizes wording for NEW bank
+# questions only (bank mode), or judges ADR-worthiness of already-answered
+# questions (resolve mode) — it never edits, reorders, or retouches
+# anything this script has already committed to disk.
+#
+# Bash + coreutils only (jq optional, used for output validation with a
+# best-effort fallback — same tolerant pattern as every sibling script).
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# ─── Help ─────────────────────────────────────────────────────────────────────
+
+usage() {
+  cat <<'EOF'
+Usage: specclaw-bf-clarify <subcommand> [options]
+
+Subcommands:
+  collect          <specclaw_dir> [--bank-only]
+                   Extract-mode pre-agent step. Reports which of the five
+                   known .specclaw/analysis/*.md documents are present
+                   (exits non-zero if none are, UNLESS --bank-only — the
+                   bank/custom layer needs no analysis docs at all). If
+                   clarifications.md already exists, parses it for existing
+                   CQ-NNN/SQ-NNN/UQ-NNN IDs (so new ones never collide or
+                   renumber) and emits de-dup hint lists. Also reports the
+                   bank file's path, which of its SQ-NNN ids are already
+                   known to this project (rendered or marked Not
+                   applicable — never re-evaluated) vs genuinely new, and
+                   whether custom-questions.md/.specclaw/adr//decisions.md
+                   are present. Outputs one JSON object to stdout.
+
+  render           <specclaw_dir> <cq_draft|-> <bank_draft|->
+                   Extract-mode post-agent step. <cq_draft> is a markdown
+                   file of newly-drafted ### CQ-NNN blocks (pass "-" on a
+                   --bank-only run — extraction did not run). <bank_draft>
+                   is a markdown file of NOT-APPLICABLE: directives and
+                   narrow ### SQ-NNN blocks (Finding/Why it
+                   matters/Source/Answer only — Type/Blocking/Options/
+                   Proposed default are spliced in from the bank file by
+                   this step, never agent-authored) for the SQ-NNN ids
+                   collect reported as new (pass "-" if the bank agent
+                   found nothing new). Also ingests custom-questions.md
+                   in-line (no agent involved) into UQ-NNN blocks, tolerant
+                   of missing Type/Blocking/Options, de-duplicated by each
+                   question's original heading text. Archives the prior
+                   clarifications.md (if any), merges everything, re-sorts
+                   each family (blocking first, then by type), recomputes
+                   the summary header, and writes
+                   .specclaw/analysis/clarifications.md in section order
+                   Standard (SQ) -> Custom (UQ) -> Extracted (CQ) -> Not
+                   applicable. Deletes whichever draft file(s) were passed.
+
+  resolve-collect  <specclaw_dir>
+                   Resolve-mode pre-agent step. Requires clarifications.md
+                   to exist. Splits questions from ALL THREE families into
+                   answered/unanswered by whether **Answer:** is filled in.
+                   Outputs one JSON object to stdout (IDs only — the agent
+                   reads clarifications.md itself for content).
+
+  resolve-render   <specclaw_dir> <adr_file>
+                   Resolve-mode post-agent step. <adr_file> is a
+                   pipe-delimited file (one line per answered question:
+                   id|promote(yes/no)|suggested_adr_title|one_line_rationale)
+                   produced by the agent's ADR-worthiness judgment, for
+                   answered questions across ALL THREE families. Archives
+                   the prior decisions.md (if any), mechanically
+                   transcribes every answered question into a decision
+                   entry tagged with its origin family (Extracted/Standard
+                   bank/Custom (per-repo)), splices in the ADR-candidate
+                   annotations, lists unanswered questions, and writes
+                   .specclaw/analysis/decisions.md. Deletes <adr_file> on
+                   success.
+
+Options:
+  -h, --help    Show this help message
+EOF
+}
+
+[[ "${1:-}" == "-h" || "${1:-}" == "--help" ]] && { usage; exit 0; }
+
+die() { echo "ERROR: $*" >&2; exit 1; }
+warn() { echo "WARN: $*" >&2; }
+
+# ─── Generic JSON helpers (copied verbatim from specclaw-bf-analyze-codebase —
+# no shared lib, per repo convention) ─────────────────────────────────────────
+
+json_escape() {
+  local s="$1"
+  s="${s//\\/\\\\}"
+  s="${s//\"/\\\"}"
+  s="${s//$'\n'/\\n}"
+  s="${s//$'\r'/\\r}"
+  s="${s//$'\t'/\\t}"
+  printf '%s' "$s"
+}
+
+json_array_from_lines() {
+  local item first=true out=""
+  while IFS= read -r item; do
+    [ -z "$item" ] && continue
+    if $first; then first=false; else out="${out}, "; fi
+    out="${out}\"$(json_escape "$item")\""
+  done
+  printf '%s' "$out"
+}
+
+# Validate (best-effort) and emit a JSON object to stdout — same tolerant
+# pattern every collect-style script in this plugin already uses.
+emit_json() {
+  local output="$1"
+  if command -v jq &>/dev/null; then
+    if printf '%s' "$output" | jq . >/dev/null 2>&1; then
+      printf '%s\n' "$output"
+    else
+      warn "JSON validation failed, outputting best-effort"
+      printf '%s\n' "$output"
+    fi
+  else
+    printf '%s\n' "$output"
+  fi
+}
+
+# ─── Config reading (copied verbatim from specclaw-validate-change — no
+# shared lib, per repo convention) ────────────────────────────────────────────
+
+# Read a simple yaml value: yaml_val <file> <dotted.key>
+# Handles top-level and one-level nested keys.
+yaml_val() {
+  local file="$1" key="$2"
+  local section field
+  if [[ "$key" == *.* ]]; then
+    section="${key%%.*}"
+    field="${key#*.}"
+  else
+    section=""
+    field="$key"
+  fi
+
+  local in_section=false value=""
+  while IFS= read -r line; do
+    [[ "$line" =~ ^[[:space:]]*# ]] && continue
+    [[ -z "${line// /}" ]] && continue
+
+    if [[ -z "$section" ]]; then
+      if [[ "$line" =~ ^${field}:[[:space:]]*(.*) ]]; then
+        value="${BASH_REMATCH[1]}"
+        break
+      fi
+    else
+      if [[ "$line" =~ ^[a-zA-Z_] ]]; then
+        if [[ "$line" =~ ^${section}: ]]; then
+          in_section=true
+        else
+          in_section=false
+        fi
+        continue
+      fi
+      if $in_section; then
+        if [[ "$line" =~ ^[[:space:]]+${field}:[[:space:]]*(.*) ]]; then
+          value="${BASH_REMATCH[1]}"
+          break
+        fi
+      fi
+    fi
+  done < "$file"
+
+  # Strip inline `#` comments (must come BEFORE quote-stripping because
+  # values like `name: "foo"   # comment` would otherwise carry the comment
+  # into the result), then strip surrounding quotes.
+  if [[ "$value" =~ ([[:space:]]+#) ]]; then
+    value="${value%%"${BASH_REMATCH[1]}"*}"
+  fi
+  if [[ "$value" =~ [[:space:]]+$ ]]; then
+    value="${value%"${BASH_REMATCH[0]}"}"
+  fi
+  value="${value#\"}"
+  value="${value%\"}"
+  value="${value#\'}"
+  value="${value%\'}"
+  echo "$value"
+}
+
+# Project title for doc headers: config.yaml's project.name, falling back
+# to the project directory's basename (mirrors specclaw-ensure-init's own
+# fallback) if config.yaml or the key is absent/empty.
+project_title() {
+  local project_root="$1"
+  local config_file="$project_root/.specclaw/config.yaml"
+  local name=""
+  if [ -f "$config_file" ]; then
+    name="$(yaml_val "$config_file" "project.name")"
+  fi
+  if [ -z "$name" ]; then
+    name="$(basename "$project_root")"
+  fi
+  printf '%s' "$name"
+}
+
+# ─── Template substitution ────────────────────────────────────────────────────
+
+# NOT "${content//"$token"/$value}" — bash's pattern-substitution
+# replacement string treats a literal & as "insert the whole match" (a
+# sed-style backreference, undocumented but real). Any drafted or preserved
+# prose containing a bare & — real content does, e.g. "Meetings & Notes" —
+# would silently get that & replaced with the token's own literal text.
+# Split-and-concat via %%/# never treats $value as a replacement string, at
+# the cost of only replacing the first occurrence (fine here — every
+# template token appears exactly once).
+substitute() {
+  local content="$1" token="$2" value="$3"
+  local prefix="${content%%"$token"*}"
+  local suffix="${content#*"$token"}"
+  printf '%s' "${prefix}${value}${suffix}"
+}
+
+# ─── Question-block parsing (clarifications.md / draft files) ───────────────
+# A "block" is one `### <PFX>-NNN ...` section, split into its own file
+# named "<outdir>/<PFX>-NNN.md" (full header line included) so every reader
+# keys by filename/ID — never by position, since display order and ID are
+# deliberately decoupled (see render's re-sort step). Generalized over all
+# three prefixes (CQ/SQ/UQ) since they share one file and one --resolve
+# sweep; a stray heading with some other two-letter prefix never matches.
+
+split_question_blocks() {
+  # A block runs from its "### <PFX>-NNN" heading up to (not including) the
+  # next such heading OR any "## " section heading, whichever comes first.
+  # Without the second stop condition, the LAST block before a section
+  # boundary (e.g. "## Not Applicable" after the final Extracted-questions
+  # block) silently swallows everything after it, up to the next matching
+  # "### " heading — this file has multiple "## " sections per render
+  # (Standard/Custom/Extracted/Not Applicable), unlike a single flat list.
+  local file="$1" outdir="$2"
+  [ -f "$file" ] || return 0
+  awk -v dir="$outdir" '
+    /^### (CQ|SQ|UQ)-[0-9]+/ {
+      match($0, /(CQ|SQ|UQ)-[0-9]+/)
+      id = substr($0, RSTART, RLENGTH)
+      outfile = dir "/" id ".md"
+    }
+    /^## / && $0 !~ /^### / { id = "" }
+    id != "" { print $0 >> outfile }
+  ' "$file"
+}
+
+block_id() {
+  basename "$1" .md
+}
+
+block_title() {
+  # NB: the separator alternation must NOT be a bracket expression ([—-]) —
+  # under a byte-oriented locale/sed build (observed on this toolchain even
+  # with LC_CTYPE=C.UTF-8), a POSIX bracket class treats a multi-byte UTF-8
+  # character as its individual raw bytes, silently eating only the first
+  # byte of the em dash and corrupting every title that follows it.
+  head -1 "$1" | sed -E 's/^### (CQ|SQ|UQ)-[0-9]+[[:space:]]*(—|-)[[:space:]]*//'
+}
+
+# Extract a single-line "- **<Label>:** value" field. Used for Type, Source,
+# Blocking (raw text), Decided by, Date — every field except Answer, which
+# may span multiple lines.
+block_single_field() {
+  # `|| true` on the grep is required, not cosmetic: with `set -o pipefail`
+  # (in effect for this whole script), a `grep -m1` that finds no match
+  # exits 1, and that 1 propagates through the pipe to sed's otherwise-
+  # successful exit — under `set -e`, `local x="$(...)"` then aborts the
+  # entire script on the very first field a block happens not to have.
+  # Every well-formed block always includes every label line (blank value,
+  # never an omitted line — see templates/clarifications.md), but this
+  # stays defensive against a malformed one instead of hard-failing.
+  local file="$1" label="$2"
+  { grep -m1 -- "^- \*\*${label}:\*\*" "$file" 2>/dev/null || true; } \
+    | sed -E "s/^- \*\*${label}:\*\* *//" | sed -E 's/[[:space:]]+$//'
+}
+
+block_field_blocking_bool() {
+  local line
+  line="$(block_single_field "$1" "Blocking")"
+  case "$line" in
+    [Yy][Ee][Ss]*) echo "yes" ;;
+    *) echo "no" ;;
+  esac
+}
+
+# Answer text may span multiple lines, from right after "**Answer:**" up to
+# (not including) the "**Decided by:**" line. Avoids a spurious leading
+# blank line when the answer starts on the line after the tag rather than
+# inline.
+block_answer_text() {
+  awk '
+    /^- \*\*Answer:\*\*/ {
+      sub(/^- \*\*Answer:\*\* */, "")
+      if (length($0) > 0) { buf = $0; started = 1 } else { started = 0 }
+      capturing = 1
+      next
+    }
+    /^- \*\*Decided by:\*\*/ { capturing = 0 }
+    capturing {
+      if (started) { buf = buf "\n" $0 } else { buf = $0; started = 1 }
+      next
+    }
+    END { print buf }
+  ' "$1"
+}
+
+block_is_answered() {
+  local txt
+  txt="$(block_answer_text "$1" | tr -d '[:space:]')"
+  [ -n "$txt" ]
+}
+
+# Family for an ID prefix — used by --resolve's decision tagging.
+id_family() {
+  case "$1" in
+    SQ-*) echo "Standard bank" ;;
+    UQ-*) echo "Custom (per-repo)" ;;
+    *) echo "Extracted" ;;
+  esac
+}
+
+# Taxonomy display order (Output ordering rule). Unknown/mistyped types
+# sort last rather than being silently dropped or guessed into a bucket.
+type_rank() {
+  case "$1" in
+    DECISION) echo 1 ;;
+    DATA) echo 2 ;;
+    SCOPE) echo 3 ;;
+    DEFECT) echo 4 ;;
+    MECHANICAL) echo 5 ;;
+    TARGET-GAP) echo 6 ;;
+    CONFLICT) echo 7 ;;
+    *) echo 99 ;;
+  esac
+}
+
+# ─── Bank-entry parsing (references/clarify-standard-questions.md) ─────────
+# A bank entry is one `## SQ-NNN ...` section — double-hash, distinct from
+# clarifications.md's `### CQ|SQ|UQ-NNN` triple-hash, so the two file types
+# are never confused even though both mention SQ-NNN.
+
+BANK_FILE="$SCRIPT_DIR/../references/clarify-standard-questions.md"
+CUSTOM_QUESTIONS_TEMPLATE="$SCRIPT_DIR/../templates/custom-questions.md"
+
+split_bank_entries() {
+  local file="$1" outdir="$2"
+  [ -f "$file" ] || return 0
+  awk -v dir="$outdir" '
+    /^## SQ-[0-9]+/ {
+      match($0, /SQ-[0-9]+/)
+      id = substr($0, RSTART, RLENGTH)
+      outfile = dir "/" id ".md"
+    }
+    id != "" { print $0 >> outfile }
+  ' "$file"
+}
+
+# Extract a possibly-multi-line "- **<Label>:** ..." field: from the label
+# line (prefix stripped) up to (not including) the next "- **" field or the
+# next "## " heading. Used for Question/Options/Proposed default/
+# Applicability in a bank entry.
+bank_field_multiline() {
+  # Same "started" flag technique as block_answer_text — a field whose
+  # content starts on the line AFTER its label (e.g. "- **Options:**"
+  # followed by a numbered list on the next line, rather than inline text)
+  # must not get a spurious leading blank line in the captured output.
+  local file="$1" label="$2"
+  awk -v label="$label" '
+    BEGIN { pat = "^- \\*\\*" label ":\\*\\*" }
+    $0 ~ pat {
+      sub(pat " *", "")
+      if (length($0) > 0) { buf = $0; started = 1 } else { started = 0 }
+      capturing = 1
+      next
+    }
+    capturing && /^- \*\*/ { capturing = 0 }
+    capturing && /^## / { capturing = 0 }
+    capturing {
+      if (started) { buf = buf "\n" $0 } else { buf = $0; started = 1 }
+      next
+    }
+    END { print buf }
+  ' "$file"
+}
+
+# ─── Known analysis documents clarify sweeps ─────────────────────────────────
+
+DOC_NAMES=(codebase-report.md architecture.md domain-model.md functional-spec.md rebuild-backlog.md)
+
+# ─── Subcommand: collect (extract mode, pre-agent) ───────────────────────────
+
+cmd_collect() {
+  local specclaw_dir="$1" bank_only_flag="${2:-}"
+  local bank_only=false
+  [ "$bank_only_flag" = "--bank-only" ] && bank_only=true
+
+  [ -d "$specclaw_dir" ] || die "specclaw directory not found: $specclaw_dir"
+
+  local specclaw_dir_abs project_root analysis_dir
+  specclaw_dir_abs="$(cd "$specclaw_dir" && pwd)"
+  project_root="$(cd "$specclaw_dir_abs/.." && pwd)"
+  analysis_dir="$specclaw_dir_abs/analysis"
+
+  local -a docs_present=() docs_missing=()
+  local d
+  for d in "${DOC_NAMES[@]}"; do
+    if [ -f "$analysis_dir/$d" ]; then
+      docs_present+=("$d")
+    else
+      docs_missing+=("$d")
+    fi
+  done
+
+  # Extraction needs at least one analysis document; the bank/custom layer
+  # needs none of them (it may run right after /specclaw:bf-analyze, before
+  # /specclaw:bf-architecture or /specclaw:bf-domain have ever run).
+  if ! $bank_only && [ "${#docs_present[@]}" -eq 0 ]; then
+    die "No analysis documents found in .specclaw/analysis/ — run /specclaw:bf-analyze, /specclaw:bf-architecture, and/or /specclaw:bf-domain first (rebuild-backlog.md from /specclaw:bf-rebuild-plan is swept too, if present). Use --bank-only to ask the standard/custom questions without any analysis documents."
+  fi
+
+  local docs_present_json docs_missing_json
+  docs_present_json="$(printf '%s\n' "${docs_present[@]}" | json_array_from_lines)"
+  docs_missing_json="$(printf '%s\n' "${docs_missing[@]}" | json_array_from_lines)"
+
+  local clar_file="$analysis_dir/clarifications.md"
+  local clar_exists=false
+  local next_num=1
+  local existing_json="" first=true
+
+  # Known SQ ids: rendered as a question OR listed in Not applicable —
+  # either way, never re-evaluated by the agent again.
+  local -A known_sq=()
+  local known_sq_json="" ksfirst=true
+
+  if [ -f "$clar_file" ]; then
+    clar_exists=true
+    local workdir; workdir="$(mktemp -d)"
+    split_question_blocks "$clar_file" "$workdir"
+    local f id title source num
+    for f in "$workdir"/CQ-*.md; do
+      [ -f "$f" ] || continue
+      id="$(block_id "$f")"
+      num="${id#CQ-}"
+      num=$((10#$num))
+      [ "$num" -ge "$next_num" ] && next_num=$((num + 1))
+      title="$(block_title "$f")"
+      source="$(block_single_field "$f" "Source")"
+      if $first; then first=false; else existing_json="${existing_json},"; fi
+      existing_json="${existing_json}
+    {\"id\": \"$(json_escape "$id")\", \"title\": \"$(json_escape "$title")\", \"source\": \"$(json_escape "$source")\"}"
+    done
+    for f in "$workdir"/SQ-*.md; do
+      [ -f "$f" ] || continue
+      known_sq["$(block_id "$f")"]=1
+    done
+    rm -rf "$workdir"
+    # Not-applicable SQ ids are also "known" — one-liners keyed "- **SQ-NNN**".
+    local naid
+    while IFS= read -r naid; do
+      [ -z "$naid" ] && continue
+      known_sq["$naid"]=1
+    done < <(grep -oE '^- \*\*SQ-[0-9]+\*\*' "$clar_file" 2>/dev/null | grep -oE 'SQ-[0-9]+' || true)
+  fi
+
+  local next_id
+  next_id="$(printf 'CQ-%03d' "$next_num")"
+
+  # Bank roster diff: every SQ-NNN currently defined in the bank file,
+  # minus whatever this project already knows about.
+  local bank_path_abs="" new_sq_json="" nsfirst=true
+  if [ -f "$BANK_FILE" ]; then
+    bank_path_abs="$(cd "$(dirname "$BANK_FILE")" && pwd)/$(basename "$BANK_FILE")"
+    local bid
+    while IFS= read -r bid; do
+      [ -z "$bid" ] && continue
+      if [ -z "${known_sq[$bid]:-}" ]; then
+        if $nsfirst; then nsfirst=false; else new_sq_json="${new_sq_json}, "; fi
+        new_sq_json="${new_sq_json}\"$(json_escape "$bid")\""
+      fi
+      if $ksfirst; then ksfirst=false; else known_sq_json="${known_sq_json}, "; fi
+      known_sq_json="${known_sq_json}\"$(json_escape "$bid")\""
+    done < <(grep -oE '^## SQ-[0-9]+' "$BANK_FILE" | grep -oE 'SQ-[0-9]+')
+  else
+    warn "standard question bank not found at $BANK_FILE — the SQ layer will be skipped this run"
+  fi
+
+  local custom_path="$analysis_dir/custom-questions.md"
+  local custom_present=false
+  [ -f "$custom_path" ] && custom_present=true
+
+  local adr_dir="$specclaw_dir_abs/adr"
+  local adr_present=false
+  [ -d "$adr_dir" ] && [ -n "$(find "$adr_dir" -maxdepth 1 -name '*.md' 2>/dev/null)" ] && adr_present=true
+
+  local decisions_path="$analysis_dir/decisions.md"
+  local decisions_present=false
+  [ -f "$decisions_path" ] && decisions_present=true
+
+  local output
+  output=$(cat <<ENDJSON
+{
+  "project_root": "$(json_escape "$project_root")",
+  "analysis_dir": ".specclaw/analysis",
+  "bank_only": ${bank_only},
+  "docs_present": [${docs_present_json}
+  ],
+  "docs_missing": [${docs_missing_json}
+  ],
+  "clarifications_exists": ${clar_exists},
+  "next_id": "$(json_escape "$next_id")",
+  "existing_questions": [${existing_json}
+  ],
+  "bank_path": "$(json_escape "$bank_path_abs")",
+  "known_sq_ids": [${known_sq_json}],
+  "new_sq_ids": [${new_sq_json}],
+  "custom_questions": {"present": ${custom_present}, "path": ".specclaw/analysis/custom-questions.md"},
+  "adr_dir": {"present": ${adr_present}, "path": ".specclaw/adr"},
+  "decisions_md": {"present": ${decisions_present}, "path": ".specclaw/analysis/decisions.md"}
+}
+ENDJSON
+)
+  emit_json "$output"
+}
+
+# ─── UQ ingestion (custom-questions.md -> UQ-NNN blocks, pure bash) ─────────
+# Tolerant of sloppy authoring: a "## " heading starts a question; a
+# missing Type/Blocking/Options/Proposed-default line defaults rather than
+# errors. De-duplicated against already-ingested questions by exact
+# original-heading-text, recorded verbatim in each UQ's Source field —
+# editing an already-ingested heading's wording later does NOT retroactively
+# rewrite the rendered UQ; it reads as a new question with a new ID.
+
+# Tolerant single-line field lookup: accepts both "Label: value" and
+# "- **Label:** value" so a lightly-formatted custom-questions.md still
+# parses cleanly.
+custom_field() {
+  # `|| true` required — see block_single_field's comment; custom-
+  # questions.md entries routinely omit Type/Blocking/Proposed default
+  # lines entirely (that's the whole point of tolerating sloppy authoring),
+  # so a no-match here is the expected common case, not a malformed file.
+  local file="$1" label="$2"
+  { grep -m1 -iE "^(- )?(\*\*)?${label}:(\*\*)? " "$file" 2>/dev/null || true; } \
+    | sed -E "s/^(- )?(\*\*)?${label}:(\*\*)? *//I" | sed -E 's/[[:space:]]+$//'
+}
+
+custom_options_block() {
+  local file="$1"
+  awk '
+    /^(- )?(\*\*)?[Oo]ptions:(\*\*)?/ { capturing = 1; next }
+    capturing && /^-[[:space:]]/ { print; next }
+    capturing { capturing = 0 }
+  ' "$file"
+}
+
+render_uq_from_custom_questions() {
+  # Args: custom_questions_file clar_file(may not exist) -> prints
+  # newly-ingested ### UQ-NNN blocks (blank-line separated) to stdout, or
+  # nothing if none are new. Numbering continues a project-wide UQ counter
+  # (own sequence, independent of CQ/SQ, same permanence rules as CQ).
+  local custom_file="$1" clar_file="$2"
+  [ -f "$custom_file" ] || return 0
+
+  # Existing UQ ids + their originally-ingested heading text (from Source).
+  local -A existing_uq_headings=()
+  local next_num=1
+  if [ -f "$clar_file" ]; then
+    local workdir; workdir="$(mktemp -d)"
+    split_question_blocks "$clar_file" "$workdir"
+    local f id num src heading
+    for f in "$workdir"/UQ-*.md; do
+      [ -f "$f" ] || continue
+      id="$(block_id "$f")"
+      num="${id#UQ-}"; num=$((10#$num))
+      [ "$num" -ge "$next_num" ] && next_num=$((num + 1))
+      src="$(block_single_field "$f" "Source")"
+      heading="$(printf '%s' "$src" | sed -E 's/^.*custom-questions\.md — "(.*)"$/\1/')"
+      existing_uq_headings["$heading"]=1
+    done
+    rm -rf "$workdir"
+  fi
+
+  local workdir2; workdir2="$(mktemp -d)"
+  awk -v dir="$workdir2" '
+    /^## / {
+      n++
+      outfile = dir "/q" n ".md"
+    }
+    n > 0 { print $0 >> outfile }
+  ' "$custom_file"
+
+  shopt -s nullglob
+  local -a qfiles=("$workdir2"/q*.md)
+  shopt -u nullglob
+  # Stable numeric order (q1, q2, ... q10, not q1, q10, q2).
+  mapfile -t qfiles < <(printf '%s\n' "${qfiles[@]}" | sed -E 's/.*\/q([0-9]+)\.md/\1 &/' | sort -n | cut -d' ' -f2-)
+
+  local out="" first=true
+  local f heading qtype blocking options default id
+  for f in "${qfiles[@]}"; do
+    [ -f "$f" ] || continue
+    heading="$(head -1 "$f" | sed -E 's/^## *//' | sed -E 's/[[:space:]]+$//')"
+    [ -z "$heading" ] && continue
+    if [ -n "${existing_uq_headings[$heading]:-}" ]; then
+      continue
+    fi
+
+    qtype="$(custom_field "$f" "Type")"
+    [ -z "$qtype" ] && qtype="DECISION"
+    qtype="$(printf '%s' "$qtype" | tr '[:lower:]' '[:upper:]')"
+
+    local blocking_raw
+    blocking_raw="$(custom_field "$f" "Blocking")"
+    case "$blocking_raw" in
+      [Yy][Ee][Ss]*) blocking="yes — author-flagged as blocking" ;;
+      *) blocking="no" ;;
+    esac
+
+    options="$(custom_options_block "$f")"
+    if [ -z "$options" ]; then
+      options="  (not specified by the author — describe options when answering)"
+    else
+      options="$(printf '%s\n' "$options" | sed -E 's/^-[[:space:]]*/  - /')"
+    fi
+
+    default="$(custom_field "$f" "Proposed default")"
+    [ -z "$default" ] && default="$(custom_field "$f" "Default")"
+    [ -z "$default" ] && default="unknown — not specified by the author"
+
+    id="$(printf 'UQ-%03d' "$next_num")"
+    next_num=$((next_num + 1))
+
+    local entry
+    entry="$(cat <<ENTRY
+### ${id} — ${heading}
+
+- **Type:** ${qtype}
+- **Blocking:** ${blocking}
+- **Source:** .specclaw/analysis/custom-questions.md — "${heading}"
+- **Finding:** Author-defined question from custom-questions.md; not derived from analysis-doc extraction.
+- **Why it matters:** Not stated by the author — the repo's maintainer flagged this as needing a decision.
+- **Options:**
+${options}
+- **Proposed default:** ${default}
+- **Answer:**
+- **Decided by:**
+- **Date:**
+ENTRY
+)"
+    if $first; then first=false; else out="${out}
+
+"; fi
+    out="${out}${entry}"
+  done
+  rm -rf "$workdir2"
+
+  # `[ -n "$out" ] && printf ...` as the final statement would make this
+  # function's own return status the (non-zero) status of a false `[ -n ]`
+  # test whenever $out is empty — the common, expected case when nothing is
+  # new. Called as `x="$(this_function ...)"` under `set -e`, that non-zero
+  # status silently kills the whole script with no error message at all.
+  # An explicit `return 0` after the conditional print avoids it.
+  [ -n "$out" ] && printf '%s\n' "$out"
+  return 0
+}
+
+# ─── SQ assembly (bank-fixed fields + agent-drafted Finding/Answer) ─────────
+
+# Assemble one final SQ-NNN block: bank entry (Type/Blocking/Options/
+# Proposed default — always bash's) + the agent's draft block for this id
+# (Finding/Why it matters/Source/Answer/Decided by/Date), if the agent
+# produced one. If the agent didn't (defensive fallback — should not
+# normally happen), fall back to the bank's own generic Question text as
+# the Finding, flagged as uncontextualized, and leave Answer empty.
+assemble_sq_block() {
+  local bank_entry_file="$1" agent_block_file="${2:-}"
+  local id title
+  id="$(block_id "$bank_entry_file")"
+  title="$(head -1 "$bank_entry_file" | sed -E 's/^## [A-Z]+-[0-9]+[[:space:]]*(—|-)[[:space:]]*//')"
+
+  local qtype blocking options default
+  qtype="$(block_single_field "$bank_entry_file" "Type")"
+  blocking="$(block_field_blocking_bool "$bank_entry_file")"
+  options="$(bank_field_multiline "$bank_entry_file" "Options")"
+  default="$(bank_field_multiline "$bank_entry_file" "Proposed default")"
+
+  local finding why_it_matters source answer decided_by decided_date
+  if [ -n "$agent_block_file" ] && [ -f "$agent_block_file" ]; then
+    # Finding/Why it matters may wrap onto multiple lines — block_single_field
+    # would silently truncate at the first line, so use the multi-line-
+    # capable extractor here (it works on any "- **Label:**"-shaped file,
+    # not just bank entries).
+    finding="$(bank_field_multiline "$agent_block_file" "Finding")"
+    why_it_matters="$(bank_field_multiline "$agent_block_file" "Why it matters")"
+    source="$(block_single_field "$agent_block_file" "Source")"
+    answer="$(block_answer_text "$agent_block_file")"
+    decided_by="$(block_single_field "$agent_block_file" "Decided by")"
+    decided_date="$(block_single_field "$agent_block_file" "Date")"
+  fi
+  [ -z "${finding:-}" ] && finding="(agent did not contextualize this question — showing the standard bank's generic wording as a fallback) $(bank_field_multiline "$bank_entry_file" "Question")"
+  [ -z "${why_it_matters:-}" ] && why_it_matters="See the standard bank's applicability rationale — this question was judged applicable to this repo."
+  [ -z "${source:-}" ] && source="Standard bank v1 (references/clarify-standard-questions.md)"
+
+  cat <<BLOCK
+### ${id} — ${title}
+
+- **Type:** ${qtype}
+- **Blocking:** ${blocking}
+- **Source:** ${source}
+- **Finding:** ${finding}
+- **Why it matters:** ${why_it_matters}
+- **Options:**
+${options}
+- **Proposed default:** ${default}
+- **Answer:** ${answer:-}
+- **Decided by:** ${decided_by:-}
+- **Date:** ${decided_date:-}
+BLOCK
+}
+
+# ─── Subcommand: render (extract mode, post-agent) ───────────────────────────
+
+cmd_render() {
+  local specclaw_dir="$1" cq_draft="$2" bank_draft="$3"
+  [ -d "$specclaw_dir" ] || die "specclaw directory not found: $specclaw_dir"
+  [ "$cq_draft" = "-" ] || [ -f "$cq_draft" ] || die "CQ draft file not found: $cq_draft"
+  [ "$bank_draft" = "-" ] || [ -f "$bank_draft" ] || die "bank draft file not found: $bank_draft"
+
+  local specclaw_dir_abs project_root analysis_dir archive_dir
+  specclaw_dir_abs="$(cd "$specclaw_dir" && pwd)"
+  project_root="$(cd "$specclaw_dir_abs/.." && pwd)"
+  analysis_dir="$specclaw_dir_abs/analysis"
+  archive_dir="$analysis_dir/archive"
+
+  local clar_file="$analysis_dir/clarifications.md"
+  local custom_file="$analysis_dir/custom-questions.md"
+
+  local workdir; workdir="$(mktemp -d)"
+  mkdir -p "$workdir/existing" "$workdir/new" "$workdir/merged" "$workdir/bank" "$workdir/bank_new"
+
+  [ -f "$clar_file" ] && split_question_blocks "$clar_file" "$workdir/existing"
+  [ "$cq_draft" != "-" ] && split_question_blocks "$cq_draft" "$workdir/new"
+
+  # ── CQ + preserved-SQ + preserved-UQ merge (existing behaviour, unchanged
+  # for CQ; SQ/UQ blocks already on disk are copied verbatim exactly the
+  # same way — they were fully assembled by a prior render, so there is
+  # nothing left for this run to recompute) ─────────────────────────────────
+  local f
+  for f in "$workdir/existing"/*.md; do
+    [ -f "$f" ] || continue
+    cp "$f" "$workdir/merged/"
+  done
+  for f in "$workdir/new"/CQ-*.md; do
+    [ -f "$f" ] || continue
+    local fname; fname="$(basename "$f")"
+    if [ -f "$workdir/existing/$fname" ]; then
+      warn "draft question $(block_id "$f") collides with an existing ID — keeping the existing block, discarding the draft's duplicate (IDs must never be reused)."
+      continue
+    fi
+    cp "$f" "$workdir/merged/$fname"
+  done
+
+  # ── Not-applicable SQ list: preserved verbatim from the existing file,
+  # plus any new NOT-APPLICABLE: directives from this run's bank draft. ────
+  local not_applicable_body=""
+  if [ -f "$clar_file" ]; then
+    not_applicable_body="$(awk '/^## Not Applicable/{flag=1;next}/^## /{flag=0}flag' "$clar_file" | sed '/./,$!d' | sed -E '/^See the standard bank/d')"
+  fi
+  if [ "$bank_draft" != "-" ]; then
+    local naline
+    while IFS= read -r naline; do
+      [ -z "$naline" ] && continue
+      local naid nareason
+      naid="$(printf '%s' "$naline" | sed -E 's/^NOT-APPLICABLE:[[:space:]]*//' | cut -d'|' -f1 | sed -E 's/^[[:space:]]+|[[:space:]]+$//g')"
+      nareason="$(printf '%s' "$naline" | cut -d'|' -f2- | sed -E 's/^[[:space:]]+|[[:space:]]+$//g')"
+      [ -z "$naid" ] && continue
+      not_applicable_body="${not_applicable_body}
+- **${naid}** — ${nareason}"
+    done < <(grep -E '^NOT-APPLICABLE:' "$bank_draft" 2>/dev/null || true)
+  fi
+  not_applicable_body="$(printf '%s' "$not_applicable_body" | sed '/./,$!d')"
+  [ -z "$not_applicable_body" ] && not_applicable_body="None."
+
+  # ── New SQ blocks: assemble bank-fixed fields + agent draft, only for
+  # ids the bank defines that aren't already known (rendered or N/A'd). ────
+  if [ -f "$BANK_FILE" ]; then
+    split_bank_entries "$BANK_FILE" "$workdir/bank"
+  fi
+  [ "$bank_draft" != "-" ] && split_question_blocks "$bank_draft" "$workdir/bank_new"
+
+  local -A already_known_sq=()
+  local bf
+  for bf in "$workdir/existing"/SQ-*.md; do
+    [ -f "$bf" ] || continue
+    already_known_sq["$(block_id "$bf")"]=1
+  done
+  local naid2
+  while IFS= read -r naid2; do
+    [ -z "$naid2" ] && continue
+    already_known_sq["$naid2"]=1
+  done < <(printf '%s\n' "$not_applicable_body" | grep -oE 'SQ-[0-9]+' || true)
+
+  for bf in "$workdir/bank"/SQ-*.md; do
+    [ -f "$bf" ] || continue
+    local bid; bid="$(block_id "$bf")"
+    [ -n "${already_known_sq[$bid]:-}" ] && continue
+    # This bank id is genuinely new to this project. Did the agent produce
+    # a NOT-APPLICABLE directive for it instead of a block? Already handled
+    # above via not_applicable_body. Only assemble a block if the agent
+    # actually drafted one (or fall back gracefully if it drafted neither —
+    # defensive, should not happen if the agent followed its instructions).
+    if printf '%s' "$not_applicable_body" | grep -q "$bid"; then
+      continue
+    fi
+    local agent_block="$workdir/bank_new/${bid}.md"
+    [ -f "$agent_block" ] || agent_block=""
+    assemble_sq_block "$bf" "$agent_block" > "$workdir/merged/${bid}.md"
+  done
+
+  # ── Scaffold custom-questions.md on first run only ───────────────────────
+  # Verbatim copy of the template, and ONLY if nothing exists at that path
+  # yet. Once anything exists there — even empty, even malformed — it is
+  # user-authored from that point on: never overwritten, re-rendered, or
+  # otherwise touched again, no matter how it got there. Scaffolding and
+  # ingestion (below) are independent steps — a freshly-scaffolded file's
+  # own example questions are ingested the same as any other content.
+  local custom_scaffolded=false
+  if [ ! -f "$custom_file" ] && [ -f "$CUSTOM_QUESTIONS_TEMPLATE" ]; then
+    cp "$CUSTOM_QUESTIONS_TEMPLATE" "$custom_file"
+    custom_scaffolded=true
+  fi
+
+  # ── New UQ blocks: pure bash ingestion, no agent involved ────────────────
+  # NB: split_question_blocks gates on `[ -f "$file" ]` — a process
+  # substitution `<(...)` is a named pipe, not a regular file, so it fails
+  # that test and the function silently no-ops. Write to a real temp file.
+  local uq_new
+  uq_new="$(render_uq_from_custom_questions "$custom_file" "$clar_file")"
+  if [ -n "$uq_new" ]; then
+    local uq_tmp; uq_tmp="$(mktemp)"
+    printf '%s\n' "$uq_new" > "$uq_tmp"
+    split_question_blocks "$uq_tmp" "$workdir/merged"
+    rm -f "$uq_tmp"
+  fi
+
+  shopt -s nullglob
+  local -a merged_files=("$workdir/merged"/*.md)
+  shopt -u nullglob
+
+  if [ "${#merged_files[@]}" -eq 0 ] && [ "$not_applicable_body" = "None." ]; then
+    rm -rf "$workdir"
+    die "no question blocks to render (no drafts, no prior clarifications.md, and nothing in custom-questions.md)."
+  fi
+
+  # Archive prior file now that its content is safely preserved in
+  # $workdir/existing / $workdir/merged.
+  if [ -f "$clar_file" ]; then
+    mkdir -p "$archive_dir"
+    mv "$clar_file" "$archive_dir/$(date +%Y-%m-%d-%H%M%S)-clarifications.md"
+  fi
+
+  # ── Sort each family independently (blocking-first, then type-rank, then
+  # ID) and compute the combined summary. ─────────────────────────────────
+  local sortlist; sortlist="$(mktemp)"
+  local total=0 blocking_count=0 unanswered_count=0
+  local cq_total=0 sq_total=0 uq_total=0
+  declare -A type_counts=(
+    [DECISION]=0 [DATA]=0 [SCOPE]=0 [DEFECT]=0 [MECHANICAL]=0 [TARGET-GAP]=0 [CONFLICT]=0
+  )
+
+  local id
+  for f in "${merged_files[@]}"; do
+    id="$(block_id "$f")"
+    local qtype blocking sortkey trank brank family
+    qtype="$(block_single_field "$f" "Type")"
+    blocking="$(block_field_blocking_bool "$f")"
+    family="$(id_family "$id")"
+
+    if [[ -v type_counts[$qtype] ]]; then
+      type_counts[$qtype]=$((type_counts[$qtype] + 1))
+    else
+      warn "unknown Type '$qtype' in question $id — expected one of: DECISION, DATA, SCOPE, DEFECT, MECHANICAL, TARGET-GAP, CONFLICT"
+    fi
+    trank="$(type_rank "$qtype")"
+
+    total=$((total + 1))
+    case "$id" in
+      CQ-*) cq_total=$((cq_total + 1)) ;;
+      SQ-*) sq_total=$((sq_total + 1)) ;;
+      UQ-*) uq_total=$((uq_total + 1)) ;;
+    esac
+    if [ "$blocking" = "yes" ]; then
+      blocking_count=$((blocking_count + 1))
+      brank=0
+    else
+      brank=1
+    fi
+    block_is_answered "$f" || unanswered_count=$((unanswered_count + 1))
+
+    # Family rank keeps SQ/UQ/CQ from interleaving even at the same
+    # blocking/type rank — each family renders as its own section, but one
+    # sortlist keeps the code path uniform.
+    local frank
+    case "$id" in SQ-*) frank=0 ;; UQ-*) frank=1 ;; *) frank=2 ;; esac
+
+    sortkey="$(printf '%d-%d-%02d-%s' "$frank" "$brank" "$trank" "$id")"
+    printf '%s\t%s\n' "$sortkey" "$f" >> "$sortlist"
+  done
+
+  render_section() {
+    local want_frank="$1"
+    local body="" bfirst=true blockfile sortkey frank rest
+    while IFS=$'\t' read -r sortkey blockfile; do
+      [ -z "$blockfile" ] && continue
+      frank="${sortkey%%-*}"
+      [ "$frank" != "$want_frank" ] && continue
+      if $bfirst; then bfirst=false; else body="${body}
+
+"; fi
+      body="${body}$(cat "$blockfile")"
+    done < <(sort "$sortlist")
+    [ -z "$body" ] && body="None."
+    printf '%s' "$body"
+  }
+
+  local standard_questions custom_questions extracted_questions
+  standard_questions="$(render_section 0)"
+  custom_questions="$(render_section 1)"
+  extracted_questions="$(render_section 2)"
+  rm -f "$sortlist"
+
+  local summary
+  summary="$(cat <<EOF
+**Total questions:** ${total} (Extracted: ${cq_total}, Standard bank: ${sq_total}, Custom: ${uq_total})
+**Blocking:** ${blocking_count}
+**Unanswered:** ${unanswered_count}
+**By type:** DECISION: ${type_counts[DECISION]}, DATA: ${type_counts[DATA]}, SCOPE: ${type_counts[SCOPE]}, DEFECT: ${type_counts[DEFECT]}, MECHANICAL: ${type_counts[MECHANICAL]}, TARGET-GAP: ${type_counts[TARGET-GAP]}, CONFLICT: ${type_counts[CONFLICT]}
+EOF
+)"
+
+  # Recompute which of the five known docs are present, for the header —
+  # cheap, self-contained, avoids threading collect's output through argv.
+  local -a docs_present=()
+  for d in "${DOC_NAMES[@]}"; do
+    [ -f "$analysis_dir/$d" ] && docs_present+=("$d")
+  done
+  local docs_swept
+  docs_swept="$(IFS=', '; echo "${docs_present[*]}")"
+  [ -z "$docs_swept" ] && docs_swept="none (bank/custom-only run)"
+
+  local title date_str template_file doc
+  title="$(project_title "$project_root")"
+  date_str="$(date +%Y-%m-%d)"
+  template_file="$SCRIPT_DIR/../templates/clarifications.md"
+
+  doc="$(cat "$template_file")"
+  doc="$(substitute "$doc" '{{title}}' "$title")"
+  doc="$(substitute "$doc" '{{date}}' "$date_str")"
+  doc="$(substitute "$doc" '{{docs_swept}}' "$docs_swept")"
+  doc="$(substitute "$doc" '{{summary}}' "$summary")"
+  doc="$(substitute "$doc" '{{standard_questions}}' "$standard_questions")"
+  doc="$(substitute "$doc" '{{custom_questions}}' "$custom_questions")"
+  doc="$(substitute "$doc" '{{questions}}' "$extracted_questions")"
+  doc="$(substitute "$doc" '{{not_applicable}}' "$not_applicable_body")"
+
+  printf '%s\n' "$doc" > "$clar_file"
+
+  [ "$cq_draft" != "-" ] && rm -f "$cq_draft"
+  [ "$bank_draft" != "-" ] && rm -f "$bank_draft"
+  rm -rf "$workdir"
+
+  echo "Wrote $clar_file (${total} question(s): ${cq_total} extracted, ${sq_total} standard, ${uq_total} custom; ${unanswered_count} unanswered, ${blocking_count} blocking)" >&2
+  # `$custom_scaffolded && echo ...` would leak a false's exit 1 out of this
+  # function (no `else` branch) as this script's own exit status under
+  # `set -e`, since this is the last statement executed — same class of bug
+  # flagged on render_uq_from_custom_questions's own final line. `if` avoids
+  # it: the statement's exit status is 0 whenever the condition is false.
+  if $custom_scaffolded; then
+    echo "Scaffolded $custom_file — edit it and re-run to add UQ questions (git add it so context discovery sees it)." >&2
+  fi
+}
+
+# ─── Subcommand: resolve-collect (resolve mode, pre-agent) ───────────────────
+
+cmd_resolve_collect() {
+  local specclaw_dir="$1"
+  [ -d "$specclaw_dir" ] || die "specclaw directory not found: $specclaw_dir"
+
+  local specclaw_dir_abs project_root analysis_dir
+  specclaw_dir_abs="$(cd "$specclaw_dir" && pwd)"
+  project_root="$(cd "$specclaw_dir_abs/.." && pwd)"
+  analysis_dir="$specclaw_dir_abs/analysis"
+  local clar_file="$analysis_dir/clarifications.md"
+
+  [ -f "$clar_file" ] || die "no .specclaw/analysis/clarifications.md found — run /specclaw:bf-clarify first."
+
+  local workdir; workdir="$(mktemp -d)"
+  split_question_blocks "$clar_file" "$workdir"
+
+  local -a answered=() unanswered=()
+  local f id
+  for f in "$workdir"/*.md; do
+    [ -f "$f" ] || continue
+    id="$(block_id "$f")"
+    if block_is_answered "$f"; then
+      answered+=("$id")
+    else
+      unanswered+=("$id")
+    fi
+  done
+  rm -rf "$workdir"
+
+  if [ "${#answered[@]}" -eq 0 ]; then
+    die "no answered questions found in .specclaw/analysis/clarifications.md — fill in at least one **Answer:** field before running --resolve."
+  fi
+
+  local answered_json unanswered_json
+  answered_json="$(printf '%s\n' "${answered[@]}" | json_array_from_lines)"
+  unanswered_json="$(printf '%s\n' "${unanswered[@]}" | json_array_from_lines)"
+
+  local output
+  output=$(cat <<ENDJSON
+{
+  "project_root": "$(json_escape "$project_root")",
+  "clarifications_path": ".specclaw/analysis/clarifications.md",
+  "total_questions": $(( ${#answered[@]} + ${#unanswered[@]} )),
+  "answered_ids": [${answered_json}
+  ],
+  "unanswered_ids": [${unanswered_json}
+  ]
+}
+ENDJSON
+)
+  emit_json "$output"
+}
+
+# ─── Subcommand: resolve-render (resolve mode, post-agent) ──────────────────
+
+cmd_resolve_render() {
+  local specclaw_dir="$1" adr_file="$2"
+  [ -d "$specclaw_dir" ] || die "specclaw directory not found: $specclaw_dir"
+  [ -f "$adr_file" ] || die "ADR-judgment file not found: $adr_file"
+
+  local specclaw_dir_abs project_root analysis_dir archive_dir
+  specclaw_dir_abs="$(cd "$specclaw_dir" && pwd)"
+  project_root="$(cd "$specclaw_dir_abs/.." && pwd)"
+  analysis_dir="$specclaw_dir_abs/analysis"
+  archive_dir="$analysis_dir/archive"
+
+  local clar_file="$analysis_dir/clarifications.md"
+  [ -f "$clar_file" ] || die "no .specclaw/analysis/clarifications.md found — run /specclaw:bf-clarify first."
+
+  local workdir; workdir="$(mktemp -d)"
+  split_question_blocks "$clar_file" "$workdir"
+
+  shopt -s nullglob
+  local -a block_files=("$workdir"/*.md)
+  shopt -u nullglob
+
+  local decisions_body="" unanswered_body="" dfirst=true
+  local f id title qtype source answer decided_by decided_date blocking_txt entry family
+
+  for f in "${block_files[@]}"; do
+    id="$(block_id "$f")"
+    title="$(block_title "$f")"
+    qtype="$(block_single_field "$f" "Type")"
+    family="$(id_family "$id")"
+
+    if block_is_answered "$f"; then
+      source="$(block_single_field "$f" "Source")"
+      answer="$(block_answer_text "$f")"
+      decided_by="$(block_single_field "$f" "Decided by")"
+      decided_date="$(block_single_field "$f" "Date")"
+
+      entry="$(cat <<ENTRY
+### ${id} — ${title}
+
+- **Type:** ${qtype}
+- **Family:** ${family}
+- **Decision:** ${answer}
+- **Decided by:** ${decided_by:-⚠ not recorded}
+- **Date:** ${decided_date:-⚠ not recorded}
+- **Source:** ${source}
+ENTRY
+)"
+      if $dfirst; then dfirst=false; else decisions_body="${decisions_body}
+
+"; fi
+      decisions_body="${decisions_body}${entry}"
+    else
+      blocking_txt="$(block_single_field "$f" "Blocking")"
+      unanswered_body="${unanswered_body}- **${id}** — ${title} (Type: ${qtype}, Family: ${family}, Blocking: ${blocking_txt})
+"
+    fi
+  done
+  rm -rf "$workdir"
+
+  [ -n "$decisions_body" ] || decisions_body="No decisions recorded yet — no answered questions found in clarifications.md."
+  [ -n "$unanswered_body" ] || unanswered_body="All questions in clarifications.md have been answered."
+
+  # Splice in the agent's ADR-worthiness judgments.
+  local adr_body="" any_promoted=false
+  local aid apromote atitle arationale
+  while IFS='|' read -r aid apromote atitle arationale; do
+    [ -z "$aid" ] && continue
+    case "$apromote" in
+      [Yy]es|[Yy])
+        any_promoted=true
+        adr_body="${adr_body}- **${aid}** — ${atitle} — ${arationale}
+"
+        ;;
+    esac
+  done < "$adr_file"
+  $any_promoted || adr_body="No decisions in this run were judged significant enough to warrant a standalone ADR."
+
+  # Archive prior decisions.md, now that everything it would have held is
+  # already re-derived fresh from clarifications.md above.
+  local decisions_file="$analysis_dir/decisions.md"
+  if [ -f "$decisions_file" ]; then
+    mkdir -p "$archive_dir"
+    mv "$decisions_file" "$archive_dir/$(date +%Y-%m-%d-%H%M%S)-decisions.md"
+  fi
+
+  local title_val date_str template_file doc
+  title_val="$(project_title "$project_root")"
+  date_str="$(date +%Y-%m-%d)"
+  template_file="$SCRIPT_DIR/../templates/decisions.md"
+
+  doc="$(cat "$template_file")"
+  doc="$(substitute "$doc" '{{title}}' "$title_val")"
+  doc="$(substitute "$doc" '{{date}}' "$date_str")"
+  doc="$(substitute "$doc" '{{decisions}}' "$decisions_body")"
+  doc="$(substitute "$doc" '{{adr_candidates}}' "$adr_body")"
+  doc="$(substitute "$doc" '{{unanswered}}' "$unanswered_body")"
+
+  printf '%s\n' "$doc" > "$decisions_file"
+
+  rm -f "$adr_file"
+
+  echo "Wrote $decisions_file" >&2
+}
+
+# ─── Main ─────────────────────────────────────────────────────────────────────
+
+case "${1:-}" in
+  collect)
+    [ $# -ge 2 ] || die "Usage: specclaw-bf-clarify collect <specclaw_dir> [--bank-only]"
+    cmd_collect "$2" "${3:-}"
+    ;;
+  render)
+    [ $# -ge 4 ] || die "Usage: specclaw-bf-clarify render <specclaw_dir> <cq_draft|-> <bank_draft|->"
+    cmd_render "$2" "$3" "$4"
+    ;;
+  resolve-collect)
+    [ $# -ge 2 ] || die "Usage: specclaw-bf-clarify resolve-collect <specclaw_dir>"
+    cmd_resolve_collect "$2"
+    ;;
+  resolve-render)
+    [ $# -ge 3 ] || die "Usage: specclaw-bf-clarify resolve-render <specclaw_dir> <adr_file>"
+    cmd_resolve_render "$2" "$3"
+    ;;
+  "")
+    usage
+    exit 1
+    ;;
+  *)
+    die "Unknown subcommand: $1. Run specclaw-bf-clarify --help for usage."
+    ;;
+esac

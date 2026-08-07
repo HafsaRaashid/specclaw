@@ -110,6 +110,13 @@ All commands are namespaced under `/specclaw:`. Most are model-invokable — Cla
 | `/specclaw:issue <change>` | Create a Jira issue from a proposal |
 | `/specclaw:azdo-issue <change>` | Create an Azure Boards Work Item from a proposal |
 | `/specclaw:status` | Show the project dashboard |
+| `/specclaw:bf-analyze [path]` | Analyze an existing/legacy codebase and write `.specclaw/analysis/codebase-report.md` (read-only) |
+| `/specclaw:bf-architecture [path]` | Write a C4-model architecture view (L1→L4, Mermaid) of an existing/legacy codebase to `.specclaw/analysis/architecture.md` (read-only) |
+| `/specclaw:bf-domain [path]` | Write domain/functional documentation (entities, rules, capabilities, workflows, UI inventory) of an existing/legacy codebase to `.specclaw/analysis/domain-model.md` + `.specclaw/analysis/functional-spec.md` (read-only) |
+| `/specclaw:bf-rebuild-plan` | Read the four `.specclaw/analysis/*.md` documents and write an ordered, dependency-sequenced `.specclaw/analysis/rebuild-backlog.md` of individually-proposable features (read-only, calls no lifecycle command) |
+| `/specclaw:bf-clarify [--resolve]` | Turn the inferences/hedges/gaps/conflicts scattered through `.specclaw/analysis/*.md` into a numbered, classified question set (`clarifications.md`); `--resolve` promotes answered questions into a pinnable decision record (`decisions.md`) (read-only) |
+| `/specclaw:bf-baseline [--harness\|--record]` | Design the golden-master harness that proves a rebuild matches the legacy app: seam ranking + determinism audit + scenarios (default), generate the runnable capture project (`--harness`), or validate a human-run capture into a manifest (`--record`) (read-only, never runs the legacy app or captures a fixture itself) |
+| `/specclaw:bf-replay <change-name>\|--all` | Replay captured legacy fixtures against the new app's actual behaviour and report MATCH/DIVERGES/ERROR per fixture, checked against `decisions.md` for a sanctioning decision; retains a committable evidence package by default (read-only against app source, fixtures, and manifest) |
 | `/specclaw:archive <change>` | Archive a completed change |
 | `/specclaw:auto` | Advance the queue of active changes autonomously |
 

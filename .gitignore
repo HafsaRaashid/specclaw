@@ -6,3 +6,6 @@ dist/
 .specclaw/.env
 .session-id
 .specclaw/.update-check
+obj/
+bin/Debug/
+bin/Release/

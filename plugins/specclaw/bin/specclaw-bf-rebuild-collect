@@ -1,0 +1,1065 @@
+#!/usr/bin/env bash
+# specclaw-bf-rebuild-collect — deterministic fact-collection AND rendering for
+# /specclaw:bf-rebuild-plan
+#
+# Two responsibilities, split like specclaw-bf-clarify (not like the plugin's
+# other analysis bin scripts, which only collect facts for an agent to write
+# the final file): this command now has the same hard invariant clarify
+# solved for — a living backlog whose BL-NNN IDs, and any human-added status
+# note a person typed into an item, must survive every --refresh untouched.
+# That is safer enforced deterministically in bash than trusted to an LLM's
+# judgment across repeated runs, so bash owns the final file; the
+# rebuild-planner agent only ever drafts NEW or REVISED item content to a
+# transient draft file.
+#
+#   collect  — pre-agent step. Checks the four analysis documents, detects
+#              which optional inputs (decisions.md, clarifications.md,
+#              baseline/manifest.json, baseline/scenarios.md) are present,
+#              refuses to proceed on a second run without --refresh, and (on
+#              --refresh) parses the existing rebuild-backlog.md's BL-NNN
+#              items. Extracts only ID-level facts (booleans, short ID
+#              strings) — never prose; the agent reads the documents
+#              directly for content, same "bash collects, agent interprets"
+#              split as every sibling analysis command.
+#
+#   render   — post-agent step. Re-parses every input document fresh (does
+#              not trust collect's JSON, which may be stale by the time the
+#              agent finishes), merges the agent's draft with every
+#              preserved existing item, computes Gate/Verification/
+#              dependency-and-readiness ordering for every active item from
+#              scratch, computes the refresh change report by diffing
+#              against the old file's own stored Gate/Verification lines,
+#              archives the prior file, and writes the new one.
+#
+# Bash + coreutils only (jq optional, used for output validation with a
+# best-effort fallback — same tolerant pattern as every sibling script).
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# ─── Help ─────────────────────────────────────────────────────────────────────
+
+usage() {
+  cat <<'EOF'
+Usage: specclaw-bf-rebuild-collect <subcommand> [options]
+
+Subcommands:
+  collect  <specclaw_dir> [--refresh]
+           Checks that all four .specclaw/analysis/*.md documents exist
+           (exits non-zero naming exactly which are missing, as before).
+           Detects which optional inputs are present: decisions.md,
+           clarifications.md, .specclaw/baseline/manifest.json,
+           .specclaw/baseline/scenarios.md. If .specclaw/analysis/
+           rebuild-backlog.md already exists and --refresh was not passed,
+           exits non-zero instructing the user to re-run with --refresh (or
+           archive/delete it manually). Emits one JSON object to stdout.
+
+  render   <specclaw_dir> <draft_file>
+           Post-agent step. <draft_file> contains STRIKE:/DEFER:/
+           UNVERIFIABLE: directive lines (if any) followed by zero or more
+           ### BL-NNN item blocks (new items on a first-ever run; new or
+           revised items on --refresh — untouched existing items need not
+           appear in the draft at all). Archives the prior rebuild-backlog.md
+           (if any), merges the draft with every preserved existing item,
+           computes Gate/Verification/ordering for every active item,
+           renders the change report (refresh only), and writes
+           .specclaw/analysis/rebuild-backlog.md. Deletes <draft_file> on
+           success.
+
+Options:
+  -h, --help    Show this help message
+EOF
+}
+
+[[ "${1:-}" == "-h" || "${1:-}" == "--help" ]] && { usage; exit 0; }
+
+die() { echo "ERROR: $*" >&2; exit 1; }
+warn() { echo "WARN: $*" >&2; }
+
+# ─── Generic JSON helpers (copied verbatim from specclaw-bf-analyze-codebase —
+# no shared lib, per repo convention) ─────────────────────────────────────────
+
+json_escape() {
+  local s="$1"
+  s="${s//\\/\\\\}"
+  s="${s//\"/\\\"}"
+  s="${s//$'\n'/\\n}"
+  s="${s//$'\r'/\\r}"
+  s="${s//$'\t'/\\t}"
+  printf '%s' "$s"
+}
+
+json_array_from_lines() {
+  local item first=true out=""
+  while IFS= read -r item; do
+    [ -z "$item" ] && continue
+    if $first; then first=false; else out="${out}, "; fi
+    out="${out}\"$(json_escape "$item")\""
+  done
+  printf '%s' "$out"
+}
+
+emit_json() {
+  local output="$1"
+  if command -v jq &>/dev/null; then
+    if printf '%s' "$output" | jq . >/dev/null 2>&1; then
+      printf '%s\n' "$output"
+    else
+      warn "JSON validation failed, outputting best-effort"
+      printf '%s\n' "$output"
+    fi
+  else
+    printf '%s\n' "$output"
+  fi
+}
+
+# ─── Config reading (copied verbatim from specclaw-bf-clarify / specclaw-validate-
+# change — no shared lib, per repo convention) ────────────────────────────────
+
+yaml_val() {
+  local file="$1" key="$2"
+  local section field
+  if [[ "$key" == *.* ]]; then
+    section="${key%%.*}"
+    field="${key#*.}"
+  else
+    section=""
+    field="$key"
+  fi
+
+  local in_section=false value=""
+  while IFS= read -r line; do
+    [[ "$line" =~ ^[[:space:]]*# ]] && continue
+    [[ -z "${line// /}" ]] && continue
+
+    if [[ -z "$section" ]]; then
+      if [[ "$line" =~ ^${field}:[[:space:]]*(.*) ]]; then
+        value="${BASH_REMATCH[1]}"
+        break
+      fi
+    else
+      if [[ "$line" =~ ^[a-zA-Z_] ]]; then
+        if [[ "$line" =~ ^${section}: ]]; then
+          in_section=true
+        else
+          in_section=false
+        fi
+        continue
+      fi
+      if $in_section; then
+        if [[ "$line" =~ ^[[:space:]]+${field}:[[:space:]]*(.*) ]]; then
+          value="${BASH_REMATCH[1]}"
+          break
+        fi
+      fi
+    fi
+  done < "$file"
+
+  if [[ "$value" =~ ([[:space:]]+#) ]]; then
+    value="${value%%"${BASH_REMATCH[1]}"*}"
+  fi
+  if [[ "$value" =~ [[:space:]]+$ ]]; then
+    value="${value%"${BASH_REMATCH[0]}"}"
+  fi
+  value="${value#\"}"
+  value="${value%\"}"
+  value="${value#\'}"
+  value="${value%\'}"
+  echo "$value"
+}
+
+project_title() {
+  local project_root="$1"
+  local config_file="$project_root/.specclaw/config.yaml"
+  local name=""
+  if [ -f "$config_file" ]; then
+    name="$(yaml_val "$config_file" "project.name")"
+  fi
+  if [ -z "$name" ]; then
+    name="$(basename "$project_root")"
+  fi
+  printf '%s' "$name"
+}
+
+# ─── Template substitution (copied verbatim from specclaw-bf-clarify) ──────────
+
+substitute() {
+  # NOT "${content//"$token"/$value}" — bash's pattern-substitution
+  # replacement string treats a literal & as "insert the whole match" (a
+  # sed-style backreference, undocumented but real: `${x/foo/a&b}` inserts
+  # foo between a and b). Any drafted or preserved prose containing a bare
+  # & — which real content does, e.g. "Meetings & Notes" — silently gets
+  # that & replaced with the token's own literal text. Split-and-concat via
+  # %%/# never treats $value as a replacement string, so it can't trigger
+  # this at all, at the cost of only replacing the first occurrence (fine
+  # here — every template token appears exactly once).
+  local content="$1" token="$2" value="$3"
+  local prefix="${content%%"$token"*}"
+  local suffix="${content#*"$token"}"
+  printf '%s' "${prefix}${value}${suffix}"
+}
+
+# split_blocks captures every line up to (not including) the next heading —
+# for a preserved item that has no Gate:/Verification: lines yet (e.g. its
+# very first refresh) there is nothing for the skip-based field stripper to
+# anchor on, so the "---" separator that sits between this block and the
+# next one in the source document survives as this block's own trailing
+# content. Strip it here as a final, unconditional pass: drop trailing
+# blank lines, then one trailing "---" line if that's what's left, then any
+# blank lines that preceded it.
+strip_trailing_separator() {
+  awk '
+    { buf[NR] = $0 }
+    END {
+      n = NR
+      while (n > 0 && buf[n] ~ /^[[:space:]]*$/) n--
+      if (n > 0 && buf[n] ~ /^---$/) {
+        n--
+        while (n > 0 && buf[n] ~ /^[[:space:]]*$/) n--
+      }
+      for (i = 1; i <= n; i++) print buf[i]
+    }
+  '
+}
+
+# ─── Generic block splitting, keyed by a "### <PREFIX>-NNN" heading ──────────
+# Same technique specclaw-bf-clarify uses for CQ-NNN and specclaw-bf-baseline uses
+# for GM-NNN, generalized to a caller-supplied prefix/heading-pattern so this
+# one script can split BL-NNN (rebuild-backlog.md), CQ-NNN (clarifications.md),
+# and GM-NNN (scenarios.md) blocks with one function.
+
+split_blocks() {
+  # Must stop capturing at the NEXT level-2 "## " heading, not only at the
+  # next "### <PREFIX>-NNN" one — otherwise the LAST block in the document
+  # silently absorbs every trailing section (e.g. rebuild-backlog.md's
+  # "## Sequencing Rationale"/"## Coverage Check" after "## Backlog", or
+  # scenarios.md's "## No Legacy Behaviour Exists"/"## Rule Coverage Check"
+  # after "## Scenarios") into its own block file. That pollution then
+  # rides along wherever that block's content gets reused (e.g. a
+  # preserved item's body ends up literally containing the sequencing
+  # narrative, duplicating it once the dedicated placeholder ALSO renders
+  # the same text correctly elsewhere in the document).
+  local file="$1" outdir="$2" prefix="$3"
+  [ -f "$file" ] || return 0
+  awk -v dir="$outdir" -v prefix="$prefix" '
+    $0 ~ ("^### " prefix "-[0-9]+") {
+      match($0, prefix "-[0-9]+")
+      id = substr($0, RSTART, RLENGTH)
+      outfile = dir "/" id ".md"
+    }
+    $0 ~ /^## / && $0 !~ ("^### " prefix "-[0-9]+") { id = "" }
+    id != "" { print $0 >> outfile }
+  ' "$file"
+}
+
+block_id() { basename "$1" .md; }
+
+block_title_after_dash() {
+  # First line, text after the ID and its separating " — " (or " - ").
+  # NB: the separator alternation must NOT be a bracket expression ([—-]) —
+  # under a byte-oriented locale/sed build (observed on this toolchain even
+  # with LC_CTYPE=C.UTF-8), a POSIX bracket class treats a multi-byte UTF-8
+  # character as its individual raw bytes, silently eating only the first
+  # byte of the em dash and corrupting every title that follows it.
+  head -1 "$1" | sed -E 's/^### [A-Z]+-[0-9]+[[:space:]]*(—|-)[[:space:]]*//'
+}
+
+block_single_field() {
+  # Matches both clarifications.md's bulleted "- **Label:**" convention and
+  # rebuild-backlog.md's bare "**Label:**" convention — the leading "- "
+  # must be an optional GROUP in the strip pattern too (not just optional on
+  # the space after a mandatory dash), or the bare form's label survives
+  # unstripped.
+  local file="$1" label="$2"
+  { grep -m1 -- "^- \*\*${label}:\*\*\|^\*\*${label}:\*\*" "$file" 2>/dev/null \
+    | sed -E "s/^(- )?\*\*${label}:\*\* *//" | sed -E 's/[[:space:]]+$//'; } || true
+}
+
+# All DR-NNN tokens found anywhere in a file, deduped, in first-seen order.
+# Guarded against pipefail: a file with zero matches is the common case
+# (an item with no numbered-rule acceptance basis, an unanswered CQ with no
+# rule citation yet), not an error — grep's exit-1 must never propagate.
+extract_dr_ids() {
+  { grep -oE 'DR-[0-9]{3}' "$1" 2>/dev/null | awk '!seen[$0]++'; } || true
+}
+
+# All BL-NNN tokens found anywhere in a file, deduped, in first-seen order.
+extract_bl_ids() {
+  { grep -oE 'BL-[0-9]{3}' "$1" 2>/dev/null | awk '!seen[$0]++'; } || true
+}
+
+# A "Depends on:" field's real dependency ids, as a comma-joined string.
+# Only the leading id list — up to the first "(" — is a dependency claim;
+# anything in the parenthetical explanation after it is prose and may
+# incidentally name a DIFFERENT item for context (e.g. "None substantively
+# — ... though it is conventionally part of the same shell built in item
+# BL-012" — BL-012 there is not a real dependency). A leading "None" (with
+# or without its own explanatory parenthetical) always means zero
+# dependencies, regardless of what the explanation happens to mention.
+depends_on_ids() {
+  # NB: \b (word boundary) is not reliably supported by this toolchain's
+  # bash regex engine — use an explicit space-or-end alternation instead.
+  local line="$1" leading
+  leading="${line%%(*}"
+  if [[ "$leading" =~ ^[[:space:]]*[Nn]one([[:space:]]|$) ]]; then
+    return 0
+  fi
+  printf '%s' "$leading" | { grep -oE 'BL-[0-9]{3}' | awk '!seen[$0]++' | paste -sd, -; } || true
+}
+
+ids_to_json_array() {
+  local ids="$1" out="" first=true id
+  while IFS= read -r id; do
+    [ -z "$id" ] && continue
+    if $first; then first=false; else out="${out}, "; fi
+    out="${out}\"$(json_escape "$id")\""
+  done <<< "$ids"
+  printf '%s' "$out"
+}
+
+# ─── Known analysis documents (unchanged hard prerequisite) ─────────────────
+
+DOC_SPECS=(
+  "codebase-report.md|bf-analyze"
+  "architecture.md|bf-architecture"
+  "domain-model.md|bf-domain"
+  "functional-spec.md|bf-domain"
+)
+
+# ─── Subcommand: collect ─────────────────────────────────────────────────────
+
+cmd_collect() {
+  local specclaw_dir="$1" refresh_flag="${2:-}"
+  local is_refresh=false
+  [ "$refresh_flag" = "--refresh" ] && is_refresh=true
+
+  [ -d "$specclaw_dir" ] || die "specclaw directory not found: $specclaw_dir"
+
+  local specclaw_dir_abs project_root analysis_dir baseline_dir
+  specclaw_dir_abs="$(cd "$specclaw_dir" && pwd)"
+  project_root="$(cd "$specclaw_dir_abs/.." && pwd)"
+  analysis_dir="$specclaw_dir_abs/analysis"
+  baseline_dir="$specclaw_dir_abs/baseline"
+
+  # Hard prerequisite: the four analysis documents (unchanged from before).
+  local spec doc_name producing_cmd missing=""
+  for spec in "${DOC_SPECS[@]}"; do
+    doc_name="${spec%%|*}"
+    producing_cmd="${spec##*|}"
+    if [ ! -f "$analysis_dir/$doc_name" ]; then
+      missing="${missing}  - .specclaw/analysis/${doc_name} (run /specclaw:${producing_cmd})
+"
+    fi
+  done
+  if [ -n "$missing" ]; then
+    echo "ERROR: missing analysis document(s) — run the producing command first:" >&2
+    printf '%s' "$missing" >&2
+    exit 1
+  fi
+
+  local docs_json="" first=true rel_path lines
+  for spec in "${DOC_SPECS[@]}"; do
+    doc_name="${spec%%|*}"
+    rel_path=".specclaw/analysis/${doc_name}"
+    lines="$(wc -l < "$analysis_dir/$doc_name" | tr -d '[:space:]')"
+    if $first; then first=false; else docs_json="${docs_json},"; fi
+    docs_json="${docs_json}
+    {\"path\": \"$(json_escape "$rel_path")\", \"lines\": ${lines}}"
+  done
+
+  # Refuse-without-refresh gate.
+  local backlog_file="$analysis_dir/rebuild-backlog.md"
+  local mode="first-run"
+  if [ -f "$backlog_file" ]; then
+    if ! $is_refresh; then
+      die "$(cat <<'EOF'
+.specclaw/analysis/rebuild-backlog.md already exists.
+
+/specclaw:bf-rebuild-plan no longer regenerates an existing backlog from
+scratch — that would destroy in-flight status (Gate/Verification, struck/
+deferred items, human-added status notes). Run /specclaw:bf-rebuild-plan
+--refresh to update it in place, or archive/delete the file manually first
+if you genuinely want a from-scratch run.
+EOF
+)"
+    fi
+    mode="refresh"
+  fi
+
+  # Optional inputs.
+  local decisions_path="$analysis_dir/decisions.md"
+  local clar_path="$analysis_dir/clarifications.md"
+  local manifest_path="$baseline_dir/manifest.json"
+  local scenarios_path="$baseline_dir/scenarios.md"
+
+  local decisions_present=false clar_present=false manifest_present=false scenarios_present=false
+  [ -f "$decisions_path" ] && decisions_present=true
+  [ -f "$clar_path" ] && clar_present=true
+  [ -f "$manifest_path" ] && manifest_present=true
+  [ -f "$scenarios_path" ] && scenarios_present=true
+
+  # CQs: id, type, blocking (bool), answered (bool), rules[], items[].
+  local cqs_json="" cfirst=true
+  if $clar_present; then
+    local workdir; workdir="$(mktemp -d)"
+    split_blocks "$clar_path" "$workdir" "CQ"
+    local f id qtype blocking_txt blocking answered
+    for f in "$workdir"/CQ-*.md; do
+      [ -f "$f" ] || continue
+      id="$(block_id "$f")"
+      qtype="$(block_single_field "$f" "Type")"
+      blocking_txt="$(block_single_field "$f" "Blocking")"
+      case "$blocking_txt" in [Yy][Ee][Ss]*) blocking=true ;; *) blocking=false ;; esac
+      local answer_txt
+      answer_txt="$(awk '
+        /^- \*\*Answer:\*\*/ { sub(/^- \*\*Answer:\*\* */, ""); if (length($0)>0) started=1; capturing=1; buf=$0; next }
+        /^- \*\*Decided by:\*\*/ { capturing=0 }
+        capturing { buf = buf "\n" $0; next }
+        END { print buf }
+      ' "$f" | tr -d '[:space:]')"
+      if [ -n "$answer_txt" ]; then answered=true; else answered=false; fi
+      local rules_json items_json
+      rules_json="$(ids_to_json_array "$(extract_dr_ids "$f")")"
+      items_json="$(ids_to_json_array "$(extract_bl_ids "$f")")"
+      if $cfirst; then cfirst=false; else cqs_json="${cqs_json},"; fi
+      cqs_json="${cqs_json}
+    {\"id\": \"$(json_escape "$id")\", \"type\": \"$(json_escape "$qtype")\", \"blocking\": ${blocking}, \"answered\": ${answered}, \"rules\": [${rules_json}], \"items\": [${items_json}]}"
+    done
+    rm -rf "$workdir"
+  fi
+
+  # decisions.md: which CQ ids have a recorded decision.
+  local decided_json=""
+  if $decisions_present; then
+    decided_json="$(grep -oE '^### CQ-[0-9]+' "$decisions_path" 2>/dev/null \
+      | sed -E 's/^### //' | json_array_from_lines || true)"
+  fi
+
+  # Baseline: prefer manifest.json (captured fixtures); scenarios.md always
+  # read too, when present, for the full scenario roster (captured or not)
+  # and the raw "No Legacy Behaviour Exists" text.
+  local scenarios_json="" sfirst=true fixtures_json="" ffirst=true
+  local no_legacy_present=false
+  if $scenarios_present; then
+    grep -q '^## No Legacy Behaviour Exists' "$scenarios_path" 2>/dev/null && no_legacy_present=true
+    local workdir; workdir="$(mktemp -d)"
+    split_blocks "$scenarios_path" "$workdir" "GM"
+    local f id rules_json item_id
+    for f in "$workdir"/GM-*.md; do
+      [ -f "$f" ] || continue
+      id="$(block_id "$f")"
+      rules_json="$(ids_to_json_array "$(extract_dr_ids "$f")")"
+      item_id="$(extract_bl_ids "$f" | head -1)"
+      if $sfirst; then sfirst=false; else scenarios_json="${scenarios_json},"; fi
+      scenarios_json="${scenarios_json}
+    {\"id\": \"$(json_escape "$id")\", \"rules\": [${rules_json}], \"item\": \"$(json_escape "$item_id")\"}"
+    done
+    rm -rf "$workdir"
+  fi
+  if $manifest_present; then
+    if command -v jq &>/dev/null; then
+      while IFS=$'\t' read -r sid rules item sha; do
+        [ -z "$sid" ] && continue
+        local rules_json item_id
+        rules_json="$(ids_to_json_array "$(printf '%s' "$rules" | { grep -oE 'DR-[0-9]{3}' | awk '!seen[$0]++'; } || true)")"
+        item_id="$(printf '%s' "$item" | { grep -oE 'BL-[0-9]{3}' | head -1; } || true)"
+        if $ffirst; then ffirst=false; else fixtures_json="${fixtures_json},"; fi
+        fixtures_json="${fixtures_json}
+    {\"scenario_id\": \"$(json_escape "$sid")\", \"rules\": [${rules_json}], \"item\": \"$(json_escape "$item_id")\", \"legacy_commit_sha\": \"$(json_escape "$sha")\"}"
+      done < <({ jq -r '.fixtures[] | [.scenario_id, .business_rules_pinned, .verifies_backlog_item, .legacy_commit_sha] | @tsv' "$manifest_path" 2>/dev/null | tr -d '\r'; } || true)
+    else
+      warn "jq not found — falling back to scenarios.md's roster for baseline facts (manifest.json's own per-fixture text is not parsed without jq)"
+    fi
+  fi
+
+  # Refresh: parse existing rebuild-backlog.md's items (facts only).
+  local existing_json="" efirst=true next_num=1
+  if [ "$mode" = "refresh" ]; then
+    local workdir; workdir="$(mktemp -d)"
+    split_blocks "$backlog_file" "$workdir" "BL"
+    local f id title depends_json rules_json status old_gate old_verification num
+    for f in "$workdir"/BL-*.md; do
+      [ -f "$f" ] || continue
+      id="$(block_id "$f")"
+      num="${id#BL-}"; num=$((10#$num))
+      [ "$num" -ge "$next_num" ] && next_num=$((num + 1))
+      title="$(block_title_after_dash "$f")"
+      status="active"
+      grep -qE '^\*\*Status:\*\* Deferred' "$f" && status="deferred"
+      [[ "$title" == STRUCK* ]] && status="struck"
+      depends_json="$(ids_to_json_array "$(depends_on_ids "$(block_single_field "$f" "Depends on")" | tr ',' '\n')")"
+      rules_json="$(ids_to_json_array "$(extract_dr_ids "$f")")"
+      old_gate="$(block_single_field "$f" "Gate")"
+      old_verification="$(block_single_field "$f" "Verification")"
+      if $efirst; then efirst=false; else existing_json="${existing_json},"; fi
+      existing_json="${existing_json}
+    {\"id\": \"$(json_escape "$id")\", \"title\": \"$(json_escape "$title")\", \"depends_on\": [${depends_json}], \"rules\": [${rules_json}], \"status\": \"${status}\", \"old_gate\": \"$(json_escape "${old_gate%% —*}")\", \"old_verification\": \"$(json_escape "${old_verification%% —*}")\"}"
+    done
+    rm -rf "$workdir"
+  fi
+  local next_bl_id; next_bl_id="$(printf 'BL-%03d' "$next_num")"
+
+  local output
+  output=$(cat <<ENDJSON
+{
+  "project_root": "$(json_escape "$project_root")",
+  "mode": "${mode}",
+  "docs": [${docs_json}
+  ],
+  "optional_inputs": {
+    "decisions_md": {"present": ${decisions_present}, "path": ".specclaw/analysis/decisions.md"},
+    "clarifications_md": {"present": ${clar_present}, "path": ".specclaw/analysis/clarifications.md"},
+    "manifest_json": {"present": ${manifest_present}, "path": ".specclaw/baseline/manifest.json"},
+    "scenarios_md": {"present": ${scenarios_present}, "path": ".specclaw/baseline/scenarios.md"}
+  },
+  "cqs": [${cqs_json}
+  ],
+  "decided_cq_ids": [${decided_json}],
+  "scenarios": [${scenarios_json}
+  ],
+  "fixtures": [${fixtures_json}
+  ],
+  "no_legacy_behaviour_present": ${no_legacy_present},
+  "existing_items": [${existing_json}
+  ],
+  "next_bl_id": "$(json_escape "$next_bl_id")"
+}
+ENDJSON
+)
+  emit_json "$output"
+}
+
+# ─── Deterministic Gate/Verification/ordering engine (shared by render) ─────
+#
+# All of the functions below operate on a workdir containing:
+#   $workdir/items/BL-NNN.md   — final static body text for every ACTIVE item
+#                                  (preserved, revised, or newly drafted —
+#                                  origin doesn't matter once we're here)
+#   $workdir/cqs/CQ-NNN.md     — every clarifications.md block, verbatim
+#   $workdir/scenarios/GM-NNN.md — every scenarios.md block, verbatim (if any)
+# plus plain files: $workdir/fixtures.tsv (scenario_id<TAB>rules-csv<TAB>item<TAB>sha)
+# and $workdir/unverifiable.tsv (item_id<TAB>cq_id<TAB>reason)
+
+cq_touches_item() {
+  # Args: cq_rules_csv cq_items_csv item_id item_rules_csv
+  local cq_rules="$1" cq_items="$2" item_id="$3" item_rules="$4"
+  local r
+  IFS=',' read -ra _cr <<< "$cq_rules"
+  for r in "${_cr[@]}"; do
+    [ -z "$r" ] && continue
+    [[ ",${item_rules}," == *",${r},"* ]] && return 0
+  done
+  [[ ",${cq_items}," == *",${item_id},"* ]] && return 0
+  return 1
+}
+
+# ─── Subcommand: render ──────────────────────────────────────────────────────
+
+cmd_render() {
+  local specclaw_dir="$1" draft_file="$2"
+  [ -d "$specclaw_dir" ] || die "specclaw directory not found: $specclaw_dir"
+  [ -f "$draft_file" ] || die "draft file not found: $draft_file"
+
+  local specclaw_dir_abs project_root analysis_dir baseline_dir archive_dir
+  specclaw_dir_abs="$(cd "$specclaw_dir" && pwd)"
+  project_root="$(cd "$specclaw_dir_abs/.." && pwd)"
+  analysis_dir="$specclaw_dir_abs/analysis"
+  baseline_dir="$specclaw_dir_abs/baseline"
+  archive_dir="$analysis_dir/archive"
+
+  local backlog_file="$analysis_dir/rebuild-backlog.md"
+  local clar_file="$analysis_dir/clarifications.md"
+  local decisions_file="$analysis_dir/decisions.md"
+  local manifest_file="$baseline_dir/manifest.json"
+  local scenarios_file="$baseline_dir/scenarios.md"
+
+  local is_refresh=false
+  [ -f "$backlog_file" ] && is_refresh=true
+
+  local workdir; workdir="$(mktemp -d)"
+  mkdir -p "$workdir/items" "$workdir/cqs" "$workdir/scenarios" "$workdir/existing"
+
+  # ── Parse the agent's draft: directives + item blocks ──────────────────
+  local strike_file="$workdir/strike.tsv" defer_file="$workdir/defer.tsv" unverif_file="$workdir/unverifiable.tsv"
+  : > "$strike_file"; : > "$defer_file"; : > "$unverif_file"
+  grep -E '^STRIKE:' "$draft_file" 2>/dev/null | sed -E 's/^STRIKE:[[:space:]]*//' | \
+    awk -F'\\|' '{gsub(/^[ \t]+|[ \t]+$/,"",$1); gsub(/^[ \t]+|[ \t]+$/,"",$2); print $1"\t"$2}' >> "$strike_file" || true
+  grep -E '^DEFER:' "$draft_file" 2>/dev/null | sed -E 's/^DEFER:[[:space:]]*//' | \
+    awk -F'\\|' '{gsub(/^[ \t]+|[ \t]+$/,"",$1); gsub(/^[ \t]+|[ \t]+$/,"",$2); print $1"\t"$2}' >> "$defer_file" || true
+  grep -E '^UNVERIFIABLE:' "$draft_file" 2>/dev/null | sed -E 's/^UNVERIFIABLE:[[:space:]]*//' | \
+    awk -F'\\|' '{gsub(/^[ \t]+|[ \t]+$/,"",$1); gsub(/^[ \t]+|[ \t]+$/,"",$2); gsub(/^[ \t]+|[ \t]+$/,"",$3); print $1"\t"$2"\t"$3}' >> "$unverif_file" || true
+
+  split_blocks "$draft_file" "$workdir/items" "BL"
+
+  # ── Parse existing rebuild-backlog.md (if refresh): preserved static
+  # bodies (Gate:/Verification:/Settled constraints:/Status notes: lines
+  # stripped), the human-added Status-notes tail (verbatim), old Gate/
+  # Verification (for the change report), and struck/deferred status. ──
+  declare -A EXIST_TITLE EXIST_STATIC EXIST_TAIL EXIST_STATUS EXIST_OLD_GATE EXIST_OLD_VERIF
+  local existing_ids=""
+  if $is_refresh; then
+    split_blocks "$backlog_file" "$workdir/existing" "BL"
+    local f id
+    for f in "$workdir/existing"/BL-*.md; do
+      [ -f "$f" ] || continue
+      id="$(block_id "$f")"
+      existing_ids="${existing_ids} ${id}"
+      EXIST_TITLE[$id]="$(block_title_after_dash "$f")"
+      if [[ "${EXIST_TITLE[$id]}" == STRUCK* ]]; then
+        EXIST_STATUS[$id]="struck"
+      elif grep -qE '^\*\*Status:\*\* Deferred' "$f"; then
+        EXIST_STATUS[$id]="deferred"
+      else
+        EXIST_STATUS[$id]="active"
+      fi
+      EXIST_OLD_GATE[$id]="$(block_single_field "$f" "Gate")"
+      EXIST_OLD_VERIF[$id]="$(block_single_field "$f" "Verification")"
+      # Static head = every line except the heading itself, the two fields
+      # bash recomputes from scratch every run (Gate:/Verification:), and
+      # the Deferred status marker/Status-notes tail (handled separately
+      # below). "Settled constraints" is deliberately NOT stripped here —
+      # it is agent-authored content (which decisions apply, in what
+      # words), not a bash-derivable fact, so once drafted it must persist
+      # as ordinary static body content across every future refresh that
+      # doesn't re-touch this item, exactly like Merge rationale does.
+      # split_blocks captures every line up to (not including) the NEXT
+      # "### BL-" heading — which, when this item has no Gate:/Verification:
+      # lines yet to anchor on (e.g. its very first refresh), means the
+      # trailing "---" separator that belongs BETWEEN items ends up as this
+      # block's own last captured line. Strip it explicitly rather than
+      # relying on the Gate:/Verification: anchor alone.
+      # skip, once set by Gate:/Verification:/Status:Deferred, deliberately
+      # stays set through everything that follows (blank lines, the "---"
+      # separator split_blocks leaves attached to this block, bulleted
+      # continuations) — it is only ever cleared by a NEW "**" field
+      # (Settled constraints, the one thing allowed to follow Gate/
+      # Verification and still be preserved). An earlier version reset
+      # skip on the first blank line, which let the trailing "---" fall
+      # through to the catch-all print rule.
+      EXIST_STATIC[$id]="$(tail -n +2 "$f" | awk '
+        /^\*\*Gate:\*\*/ { skip=1; next }
+        /^\*\*Verification:\*\*/ { skip=1; next }
+        /^\*\*Status:\*\* Deferred/ { skip=1; next }
+        /^\*\*Status notes \(human-added\):\*\*/ { intail=1; next }
+        intail { next }
+        /^\*\*Settled constraints/ { skip=0 }
+        skip { next }
+        { print }
+      ' | strip_trailing_separator)"
+      EXIST_TAIL[$id]="$(awk '
+        /^\*\*Status notes \(human-added\):\*\*/ { intail=1 }
+        intail { print }
+      ' "$f" | strip_trailing_separator)"
+    done
+  fi
+
+  # ── Parse clarifications.md (fresh) ─────────────────────────────────────
+  declare -A CQ_BLOCKING CQ_ANSWERED CQ_RULES CQ_ITEMS CQ_TITLE
+  local cq_ids=""
+  if [ -f "$clar_file" ]; then
+    split_blocks "$clar_file" "$workdir/cqs" "CQ"
+    local f id blocking_txt answer_txt
+    for f in "$workdir/cqs"/CQ-*.md; do
+      [ -f "$f" ] || continue
+      id="$(block_id "$f")"
+      cq_ids="${cq_ids} ${id}"
+      CQ_TITLE[$id]="$(block_title_after_dash "$f")"
+      blocking_txt="$(block_single_field "$f" "Blocking")"
+      case "$blocking_txt" in [Yy][Ee][Ss]*) CQ_BLOCKING[$id]=1 ;; *) CQ_BLOCKING[$id]=0 ;; esac
+      answer_txt="$(awk '
+        /^- \*\*Answer:\*\*/ { sub(/^- \*\*Answer:\*\* */, ""); capturing=1; buf=$0; next }
+        /^- \*\*Decided by:\*\*/ { capturing=0 }
+        capturing { buf = buf "\n" $0; next }
+        END { print buf }
+      ' "$f" | tr -d '[:space:]')"
+      if [ -n "$answer_txt" ]; then CQ_ANSWERED[$id]=1; else CQ_ANSWERED[$id]=0; fi
+      CQ_RULES[$id]="$(extract_dr_ids "$f" | paste -sd, - 2>/dev/null || true)"
+      CQ_ITEMS[$id]="$(extract_bl_ids "$f" | paste -sd, - 2>/dev/null || true)"
+    done
+  fi
+
+  # ── Parse scenarios.md (fresh, if present) ──────────────────────────────
+  declare -A GM_RULES GM_ITEM
+  local gm_ids=""
+  if [ -f "$scenarios_file" ]; then
+    split_blocks "$scenarios_file" "$workdir/scenarios" "GM"
+    local f id
+    for f in "$workdir/scenarios"/GM-*.md; do
+      [ -f "$f" ] || continue
+      id="$(block_id "$f")"
+      gm_ids="${gm_ids} ${id}"
+      GM_RULES[$id]="$(extract_dr_ids "$f" | paste -sd, - 2>/dev/null || true)"
+      GM_ITEM[$id]="$(extract_bl_ids "$f" | head -1)"
+    done
+  fi
+
+  # ── Parse manifest.json (fresh, if present): which GM ids are captured ──
+  declare -A FIXTURE_SHA
+  local fixture_ids=""
+  if [ -f "$manifest_file" ] && command -v jq &>/dev/null; then
+    local sid sha
+    while IFS=$'\t' read -r sid sha; do
+      [ -z "$sid" ] && continue
+      fixture_ids="${fixture_ids} ${sid}"
+      FIXTURE_SHA[$sid]="$sha"
+    done < <({ jq -r '.fixtures[] | [.scenario_id, .legacy_commit_sha] | @tsv' "$manifest_file" 2>/dev/null | tr -d '\r'; } || true)
+  elif [ -f "$manifest_file" ]; then
+    warn "jq not found — treating manifest.json as present but unreadable; Verification will fall back to scenarios.md's roster (PENDING CAPTURE, not VERIFIABLE)"
+  fi
+
+  # ── Unverifiable overrides from the draft ───────────────────────────────
+  declare -A UNVERIF_CQ UNVERIF_REASON
+  while IFS=$'\t' read -r iid cqid reason; do
+    [ -z "$iid" ] && continue
+    UNVERIF_CQ[$iid]="$cqid"
+    UNVERIF_REASON[$iid]="$reason"
+  done < "$unverif_file"
+
+  # ── Struck / deferred sets (draft directives ∪ items already marked so
+  # in the existing file, so a status set on a prior refresh persists even
+  # when this run's draft doesn't re-mention it) ──────────────────────────
+  # Bash 5.2 quirk (observed on this toolchain): "${#arr[@]}" on a
+  # `declare -A` array that has never had a single element assigned throws
+  # "unbound variable" under `set -u`, even though the array itself is
+  # declared. Force it into the "has been assigned to" state up front so
+  # ${#STRIKE_REASON[@]}/${#DEFER_REASON[@]} are safe later even when this
+  # run strikes/defers nothing.
+  declare -A STRIKE_REASON DEFER_REASON
+  STRIKE_REASON[__init__]=1; unset 'STRIKE_REASON[__init__]'
+  DEFER_REASON[__init__]=1; unset 'DEFER_REASON[__init__]'
+  while IFS=$'\t' read -r iid reason; do
+    [ -z "$iid" ] && continue
+    STRIKE_REASON[$iid]="$reason"
+  done < "$strike_file"
+  while IFS=$'\t' read -r iid reason; do
+    [ -z "$iid" ] && continue
+    DEFER_REASON[$iid]="$reason"
+  done < "$defer_file"
+  local eid
+  for eid in $existing_ids; do
+    if [ "${EXIST_STATUS[$eid]:-active}" = "struck" ] && [ -z "${STRIKE_REASON[$eid]:-}" ]; then
+      STRIKE_REASON[$eid]="${EXIST_TITLE[$eid]#STRUCK — }"
+    fi
+    if [ "${EXIST_STATUS[$eid]:-active}" = "deferred" ] && [ -z "${DEFER_REASON[$eid]:-}" ]; then
+      DEFER_REASON[$eid]="carried forward from prior refresh"
+    fi
+  done
+
+  # ── Build the final active item set: draft items ∪ preserved existing
+  # items not struck/deferred/superseded, each with its final static body
+  # and (for preserved/revised existing ids) its reattached human tail. ──
+  declare -A FINAL_BODY FINAL_TAIL FINAL_TITLE
+  local active_ids="" new_ids="" revised_ids=""
+  local f id
+  for f in "$workdir/items"/BL-*.md; do
+    [ -f "$f" ] || continue
+    id="$(block_id "$f")"
+    [ -n "${STRIKE_REASON[$id]:-}" ] && continue
+    [ -n "${DEFER_REASON[$id]:-}" ] && continue
+    FINAL_TITLE[$id]="$(block_title_after_dash "$f")"
+    FINAL_BODY[$id]="$(tail -n +2 "$f" | strip_trailing_separator)"
+    if [[ " ${existing_ids} " == *" ${id} "* ]]; then
+      FINAL_TAIL[$id]="${EXIST_TAIL[$id]:-}"
+      revised_ids="${revised_ids} ${id}"
+    else
+      FINAL_TAIL[$id]=""
+      new_ids="${new_ids} ${id}"
+    fi
+    active_ids="${active_ids} ${id}"
+  done
+  for eid in $existing_ids; do
+    [[ " ${active_ids} " == *" ${eid} "* ]] && continue
+    [ -n "${STRIKE_REASON[$eid]:-}" ] && continue
+    [ -n "${DEFER_REASON[$eid]:-}" ] && continue
+    FINAL_TITLE[$eid]="${EXIST_TITLE[$eid]}"
+    FINAL_BODY[$eid]="${EXIST_STATIC[$eid]}"
+    FINAL_TAIL[$eid]="${EXIST_TAIL[$eid]:-}"
+    active_ids="${active_ids} ${eid}"
+  done
+
+  # ── Per-item rules[] / depends_on[] extracted from the final body ──────
+  declare -A ITEM_RULES ITEM_DEPS
+  for id in $active_ids; do
+    printf '%s\n' "${FINAL_BODY[$id]}" > "$workdir/body.tmp"
+    ITEM_RULES[$id]="$(extract_dr_ids "$workdir/body.tmp" | paste -sd, - 2>/dev/null || true)"
+    ITEM_DEPS[$id]="$(depends_on_ids "$(block_single_field "$workdir/body.tmp" "Depends on")")"
+  done
+  rm -f "$workdir/body.tmp"
+
+  # ── Dependency rank via fixed-point iteration (small, shallow DAG) ──────
+  declare -A RANK
+  for id in $active_ids; do RANK[$id]=0; done
+  local pass changed=1 maxpass=30
+  for ((pass=0; pass<maxpass && changed; pass++)); do
+    changed=0
+    for id in $active_ids; do
+      local dep maxdep=-1
+      IFS=',' read -ra _deps <<< "${ITEM_DEPS[$id]}"
+      for dep in "${_deps[@]}"; do
+        [ -z "$dep" ] && continue
+        [[ " ${active_ids} " == *" ${dep} "* ]] || continue
+        local dr="${RANK[$dep]:-0}"
+        [ "$dr" -gt "$maxdep" ] && maxdep=$dr
+      done
+      local want=0
+      [ "$maxdep" -ge 0 ] && want=$((maxdep + 1))
+      if [ "${RANK[$id]}" -ne "$want" ]; then RANK[$id]=$want; changed=1; fi
+    done
+  done
+
+  # ── Gate + Verification per active item ─────────────────────────────────
+  declare -A GATE VERIF GATE_RANK VERIF_RANK
+  for id in $active_ids; do
+    local blocked_by="" open_qs="" cid
+    for cid in $cq_ids; do
+      cq_touches_item "${CQ_RULES[$cid]}" "${CQ_ITEMS[$cid]}" "$id" "${ITEM_RULES[$id]}" || continue
+      [ "${CQ_ANSWERED[$cid]}" -eq 1 ] && continue
+      if [ "${CQ_BLOCKING[$cid]}" -eq 1 ]; then
+        blocked_by="${blocked_by}${blocked_by:+, }${cid} (${CQ_TITLE[$cid]})"
+      else
+        open_qs="${open_qs}${open_qs:+, }${cid}"
+      fi
+    done
+    if [ -n "$blocked_by" ]; then
+      GATE[$id]="BLOCKED — blocked by ${blocked_by}"
+      GATE_RANK[$id]=3
+    elif [ -n "$open_qs" ]; then
+      GATE[$id]="OPEN QUESTIONS — risk from unanswered, non-blocking: ${open_qs}"
+      GATE_RANK[$id]=2
+    else
+      GATE[$id]="CLEAR"
+      GATE_RANK[$id]=0
+    fi
+
+    if [ -n "${UNVERIF_CQ[$id]:-}" ]; then
+      VERIF[$id]="UNVERIFIABLE — acceptance must come from a stakeholder decision, not fixture comparison (see ${UNVERIF_CQ[$id]}). ${UNVERIF_REASON[$id]}"
+      VERIF_RANK[$id]=1
+      continue
+    fi
+
+    local matched_fixtures="" matched_scenarios="" gid
+    for gid in $gm_ids; do
+      local touches=false
+      IFS=',' read -ra _gr <<< "${GM_RULES[$gid]}"
+      local r
+      for r in "${_gr[@]}"; do
+        [ -z "$r" ] && continue
+        [[ ",${ITEM_RULES[$id]}," == *",${r},"* ]] && touches=true
+      done
+      [ "${GM_ITEM[$gid]}" = "$id" ] && touches=true
+      $touches || continue
+      matched_scenarios="${matched_scenarios}${matched_scenarios:+, }${gid}"
+      if [[ " ${fixture_ids} " == *" ${gid} "* ]]; then
+        matched_fixtures="${matched_fixtures}${matched_fixtures:+, }${gid} (${FIXTURE_SHA[$gid]:-unknown commit})"
+      fi
+    done
+
+    if [ -n "$matched_fixtures" ]; then
+      VERIF[$id]="VERIFIABLE — fixtures: ${matched_fixtures}"
+      VERIF_RANK[$id]=0
+    elif [ -n "$matched_scenarios" ]; then
+      VERIF[$id]="PENDING CAPTURE — scenarios designed, no recorded fixture yet: ${matched_scenarios}"
+      VERIF_RANK[$id]=1
+    elif [ -f "$scenarios_file" ] || [ -f "$manifest_file" ]; then
+      VERIF[$id]="NO BASELINE DATA — baseline has been run, but no scenario in scenarios.md cites this item's rules"
+      VERIF_RANK[$id]=1
+    else
+      VERIF[$id]="NO BASELINE DATA — /specclaw:bf-baseline has not been run at all"
+      VERIF_RANK[$id]=1
+    fi
+  done
+
+  # ── Final ordering: dependency rank, then readiness (Gate rank, then
+  # Verification rank) within the same dependency rank, then ID for a
+  # stable tiebreak. ───────────────────────────────────────────────────────
+  local sortlist="$workdir/sort.tsv"; : > "$sortlist"
+  for id in $active_ids; do
+    printf '%03d\t%d\t%d\t%s\n' "${RANK[$id]}" "${GATE_RANK[$id]}" "${VERIF_RANK[$id]}" "$id" >> "$sortlist"
+  done
+  local ordered_ids=""
+  while IFS=$'\t' read -r _r _g _v id; do
+    ordered_ids="${ordered_ids} ${id}"
+  done < <(sort -k1,1n -k2,2n -k3,3n -k4,4 "$sortlist")
+
+  # ── Render each active item ──────────────────────────────────────────────
+  local backlog_body="" bfirst=true
+  for id in $ordered_ids; do
+    local entry
+    entry="### ${id} — ${FINAL_TITLE[$id]}
+
+${FINAL_BODY[$id]}
+**Gate:** ${GATE[$id]}
+**Verification:** ${VERIF[$id]}"
+    if [ -n "${FINAL_TAIL[$id]}" ]; then
+      entry="${entry}
+
+${FINAL_TAIL[$id]}"
+    fi
+    if $bfirst; then bfirst=false; else backlog_body="${backlog_body}
+
+---
+
+"; fi
+    backlog_body="${backlog_body}${entry}"
+  done
+
+  # ── Struck tombstones (ID order) ─────────────────────────────────────────
+  local struck_body=""
+  for id in $(printf '%s\n' "${!STRIKE_REASON[@]}" | sort); do
+    struck_body="${struck_body}
+
+---
+
+### ${id} — STRUCK — ${STRIKE_REASON[$id]}"
+  done
+  [ -n "$struck_body" ] && backlog_body="${backlog_body}${struck_body}"
+
+  # ── Deferred section (ID order) ──────────────────────────────────────────
+  local deferred_body=""
+  for id in $(printf '%s\n' "${!DEFER_REASON[@]}" | sort); do
+    local title body
+    title="${FINAL_TITLE[$id]:-${EXIST_TITLE[$id]:-$id}}"
+    body="${FINAL_BODY[$id]:-${EXIST_STATIC[$id]:-}}"
+    [ -n "$deferred_body" ] && deferred_body="${deferred_body}
+
+---
+"
+    deferred_body="${deferred_body}
+
+### ${id} — ${title}
+
+**Status:** Deferred — ${DEFER_REASON[$id]}
+
+${body}"
+  done
+  [ -z "$deferred_body" ] && deferred_body="None."
+
+  # ── Status header + counts ───────────────────────────────────────────────
+  local n_clear=0 n_open=0 n_blocked=0 n_verifiable=0 n_pending=0 n_unverif=0 n_nobaseline=0
+  for id in $active_ids; do
+    case "${GATE[$id]}" in
+      CLEAR) n_clear=$((n_clear+1)) ;;
+      OPEN\ QUESTIONS*) n_open=$((n_open+1)) ;;
+      BLOCKED*) n_blocked=$((n_blocked+1)) ;;
+    esac
+    case "${VERIF[$id]}" in
+      VERIFIABLE*) n_verifiable=$((n_verifiable+1)) ;;
+      PENDING\ CAPTURE*) n_pending=$((n_pending+1)) ;;
+      UNVERIFIABLE*) n_unverif=$((n_unverif+1)) ;;
+      NO\ BASELINE\ DATA*) n_nobaseline=$((n_nobaseline+1)) ;;
+    esac
+  done
+  local recommended="None — every item is BLOCKED or no active items remain."
+  for id in $ordered_ids; do
+    if [ "${GATE_RANK[$id]}" -eq 0 ]; then
+      recommended="${id} — ${FINAL_TITLE[$id]}"
+      break
+    fi
+  done
+
+  local missing_note_decisions missing_note_clar missing_note_manifest missing_note_scenarios
+  missing_note_decisions="present"; [ -f "$decisions_file" ] || missing_note_decisions="missing — run /specclaw:bf-clarify --resolve"
+  missing_note_clar="present"; [ -f "$clar_file" ] || missing_note_clar="missing — run /specclaw:bf-clarify"
+  missing_note_manifest="present"; [ -f "$manifest_file" ] || missing_note_manifest="missing — run /specclaw:bf-baseline --record"
+  missing_note_scenarios="present"; [ -f "$scenarios_file" ] || missing_note_scenarios="missing — run /specclaw:bf-baseline"
+
+  local status_header
+  status_header="**Date:** $(date +%Y-%m-%d)
+**Inputs consumed:**
+- decisions.md: ${missing_note_decisions}
+- clarifications.md: ${missing_note_clar}
+- baseline/manifest.json: ${missing_note_manifest}
+- baseline/scenarios.md: ${missing_note_scenarios}
+
+**Gate counts:** CLEAR: ${n_clear}, OPEN QUESTIONS: ${n_open}, BLOCKED: ${n_blocked} (of $(echo "$active_ids" | wc -w | tr -d ' ') active items; ${#STRIKE_REASON[@]} struck, ${#DEFER_REASON[@]} deferred)
+**Verification counts:** VERIFIABLE: ${n_verifiable}, PENDING CAPTURE: ${n_pending}, UNVERIFIABLE: ${n_unverif}, NO BASELINE DATA: ${n_nobaseline}
+
+**Recommended next item to propose:** ${recommended}"
+
+  # ── Change report (refresh only) ─────────────────────────────────────────
+  local change_report="Not applicable — this is the first-ever run."
+  if $is_refresh; then
+    local newly_unblocked="" newly_verifiable="" added_list="" revised_list="" struck_list="" deferred_list=""
+    for id in $active_ids; do
+      [[ " ${existing_ids} " == *" ${id} "* ]] || continue
+      local og="${EXIST_OLD_GATE[$id]%% —*}"
+      local ov="${EXIST_OLD_VERIF[$id]%% —*}"
+      if [ "$og" = "BLOCKED" ] && [ "${GATE_RANK[$id]}" -lt 3 ]; then
+        newly_unblocked="${newly_unblocked}${newly_unblocked:+, }${id}"
+      fi
+      if [ "$ov" != "VERIFIABLE" ] && [ "${VERIF_RANK[$id]}" -eq 0 ]; then
+        newly_verifiable="${newly_verifiable}${newly_verifiable:+, }${id}"
+      fi
+    done
+    for id in $(printf '%s\n' "${!STRIKE_REASON[@]}" | sort); do struck_list="${struck_list}${struck_list:+, }${id}"; done
+    for id in $(printf '%s\n' "${!DEFER_REASON[@]}" | sort); do deferred_list="${deferred_list}${deferred_list:+, }${id}"; done
+    for id in $revised_ids; do revised_list="${revised_list}${revised_list:+, }${id}"; done
+    for id in $new_ids; do added_list="${added_list}${added_list:+, }${id}"; done
+
+    change_report="**Newly unblocked:** ${newly_unblocked:-none}
+**Newly verifiable:** ${newly_verifiable:-none}
+**Struck this run:** ${struck_list:-none}
+**Deferred this run:** ${deferred_list:-none}
+**Revised this run:** ${revised_list:-none}
+**Added this run:** ${added_list:-none}
+**Recommended next item to propose:** ${recommended}"
+  fi
+
+  # ── Preserve Sequencing Rationale / Coverage Check verbatim (bash never
+  # regenerates prose narrative it can't verify against the source docs;
+  # the change report above is the mechanism for surfacing what changed) ──
+  local sequencing_rationale="See prior version below — /specclaw:bf-rebuild-plan --refresh does not regenerate this narrative automatically; update by hand if new items change the dependency story."
+  local coverage_check="See prior version below — carried forward unchanged by /specclaw:bf-rebuild-plan --refresh."
+  if $is_refresh; then
+    sequencing_rationale="$(awk '/^## Sequencing Rationale/{flag=1;next}/^## /{flag=0}flag' "$backlog_file" | sed '/./,$!d')"
+    coverage_check="$(awk '/^## Coverage Check/{flag=1;next}/^## /{flag=0}flag' "$backlog_file" | sed '/./,$!d')"
+  fi
+
+  # ── Archive prior file, render, write ────────────────────────────────────
+  if [ -f "$backlog_file" ]; then
+    mkdir -p "$archive_dir"
+    mv "$backlog_file" "$archive_dir/$(date +%Y-%m-%d-%H%M%S)-rebuild-backlog.md"
+  fi
+
+  local title_val date_str template_file doc
+  title_val="$(project_title "$project_root")"
+  date_str="$(date +%Y-%m-%d)"
+  template_file="$SCRIPT_DIR/../templates/rebuild-backlog.md"
+
+  doc="$(cat "$template_file")"
+  doc="$(substitute "$doc" '{{title}}' "$title_val")"
+  doc="$(substitute "$doc" '{{path}}' ".")"
+  doc="$(substitute "$doc" '{{date}}' "$date_str")"
+  doc="$(substitute "$doc" '{{status_header}}' "$status_header")"
+  doc="$(substitute "$doc" '{{backlog_items}}' "$backlog_body")"
+  doc="$(substitute "$doc" '{{sequencing_rationale}}' "$sequencing_rationale")"
+  doc="$(substitute "$doc" '{{coverage_check}}' "$coverage_check")"
+  doc="$(substitute "$doc" '{{deferred_items}}' "$deferred_body")"
+  doc="$(substitute "$doc" '{{change_report}}' "$change_report")"
+
+  printf '%s\n' "$doc" > "$backlog_file"
+  rm -f "$draft_file"
+  rm -rf "$workdir"
+
+  echo "Wrote $backlog_file ($(echo "$active_ids" | wc -w | tr -d ' ') active item(s), ${#STRIKE_REASON[@]} struck, ${#DEFER_REASON[@]} deferred)" >&2
+}
+
+# ─── Main ─────────────────────────────────────────────────────────────────────
+
+case "${1:-}" in
+  collect)
+    [ $# -ge 2 ] || die "Usage: specclaw-bf-rebuild-collect collect <specclaw_dir> [--refresh]"
+    cmd_collect "$2" "${3:-}"
+    ;;
+  render)
+    [ $# -ge 3 ] || die "Usage: specclaw-bf-rebuild-collect render <specclaw_dir> <draft_file>"
+    cmd_render "$2" "$3"
+    ;;
+  "")
+    usage
+    exit 1
+    ;;
+  *)
+    die "Unknown subcommand: $1. Run specclaw-bf-rebuild-collect --help for usage."
+    ;;
+esac

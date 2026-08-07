@@ -1,0 +1,398 @@
+#!/usr/bin/env bash
+# specclaw-bf-baseline — deterministic fact-collection for /specclaw:bf-baseline
+#
+# Unlike specclaw-bf-clarify (which owns rendering to protect a hard
+# ID-stability/never-overwrite-an-answer invariant), this script follows the
+# plugin's standard analysis-command split: bash gathers facts and archives
+# prior output, the baseline-designer agent interprets and writes
+# .specclaw/baseline/seams.md and scenarios.md itself, per its own Output
+# section — there is no partial-answer state across runs to protect here
+# (a re-run archives the prior design wholesale and starts fresh, same as
+# codebase-report.md/architecture.md/domain-model.md/rebuild-backlog.md).
+#
+# Bash + coreutils only (jq optional, used for output validation with a
+# best-effort fallback — same tolerant pattern as every sibling script).
+set -euo pipefail
+
+# ─── Help ─────────────────────────────────────────────────────────────────────
+
+usage() {
+  cat <<'EOF'
+Usage: specclaw-bf-baseline <subcommand> [options]
+
+Subcommands:
+  collect          <specclaw_dir>
+                   Design-mode (Mode A) pre-agent step. Requires
+                   .specclaw/analysis/domain-model.md to exist —
+                   /specclaw:bf-baseline derives scenarios from its numbered
+                   business rules and cannot proceed without it. Reports
+                   which supplementary analysis documents
+                   (codebase-report.md, architecture.md, functional-spec.md,
+                   rebuild-backlog.md) are present, for stack detection and
+                   backlog-item linkage. Outputs one JSON object to stdout.
+                   Exits non-zero, naming /specclaw:bf-domain, if
+                   domain-model.md is missing.
+
+  harness-collect  <specclaw_dir>
+                   Harness-mode (--harness) pre-agent step. Requires
+                   .specclaw/baseline/seams.md and scenarios.md to already
+                   exist (Mode A must run first). Archives any prior
+                   .specclaw/baseline/harness/ directory wholesale, creates
+                   a fresh empty harness/ and fixtures/ directory, and
+                   emits the full list of GM-NNN scenario IDs parsed from
+                   scenarios.md — a deterministic checklist the agent must
+                   implement one-for-one, not re-derive by reading prose.
+                   Outputs one JSON object to stdout.
+
+  record           <specclaw_dir>
+                   Record-mode (--record) step — fully deterministic, no
+                   agent involved. Requires scenarios.md to exist. Scans
+                   .specclaw/baseline/fixtures/ for a "<scenario_id>.json"
+                   file per scenario, hashes each one found (sha256),
+                   extracts its capture metadata (captured_at, anchor_date,
+                   legacy_commit_sha, runtime_version, normalized_fields),
+                   cross-references it against scenarios.md's seam/rule/
+                   backlog-item fields, archives any prior manifest.json,
+                   and writes .specclaw/baseline/manifest.json. Reports
+                   scenarios with no fixture yet — this is not a failure,
+                   capturing is an iterative, human-run process.
+
+Options:
+  -h, --help    Show this help message
+EOF
+}
+
+[[ "${1:-}" == "-h" || "${1:-}" == "--help" ]] && { usage; exit 0; }
+
+die() { echo "ERROR: $*" >&2; exit 1; }
+warn() { echo "WARN: $*" >&2; }
+
+# ─── Generic JSON helpers (copied verbatim from specclaw-bf-analyze-codebase —
+# no shared lib, per repo convention) ─────────────────────────────────────────
+
+json_escape() {
+  local s="$1"
+  s="${s//\\/\\\\}"
+  s="${s//\"/\\\"}"
+  s="${s//$'\n'/\\n}"
+  s="${s//$'\r'/\\r}"
+  s="${s//$'\t'/\\t}"
+  printf '%s' "$s"
+}
+
+json_array_from_lines() {
+  local item first=true out=""
+  while IFS= read -r item; do
+    [ -z "$item" ] && continue
+    if $first; then first=false; else out="${out}, "; fi
+    out="${out}\"$(json_escape "$item")\""
+  done
+  printf '%s' "$out"
+}
+
+# Validate (best-effort) and emit a JSON object to stdout — same tolerant
+# pattern every collect-style script in this plugin already uses.
+emit_json() {
+  local output="$1"
+  if command -v jq &>/dev/null; then
+    if printf '%s' "$output" | jq . >/dev/null 2>&1; then
+      printf '%s\n' "$output"
+    else
+      warn "JSON validation failed, outputting best-effort"
+      printf '%s\n' "$output"
+    fi
+  else
+    printf '%s\n' "$output"
+  fi
+}
+
+# ─── Known supplementary analysis documents (soft inputs; only
+# domain-model.md is a hard prerequisite) ─────────────────────────────────────
+
+SUPP_DOCS=(codebase-report.md architecture.md functional-spec.md rebuild-backlog.md)
+
+# ─── Scenario-block parsing (scenarios.md) ───────────────────────────────────
+# Same "one block per file, keyed by ID" technique specclaw-bf-clarify uses for
+# CQ-NNN blocks, applied to scenarios.md's "### GM-NNN" blocks. Read-only here
+# (record never rewrites scenarios.md) — used to build the deterministic
+# checklist harness-collect hands the agent, and the seam/rule/backlog-item
+# metadata record cross-references against each fixture.
+
+split_scenario_blocks() {
+  local file="$1" outdir="$2"
+  [ -f "$file" ] || return 0
+  awk -v dir="$outdir" '
+    /^### GM-[0-9]+/ {
+      match($0, /GM-[0-9]+/)
+      id = substr($0, RSTART, RLENGTH)
+      outfile = dir "/" id ".md"
+    }
+    id != "" { print $0 >> outfile }
+  ' "$file"
+}
+
+scenario_block_id() {
+  basename "$1" .md
+}
+
+scenario_block_title() {
+  head -1 "$1" | sed -E 's/^### GM-[0-9]+[[:space:]]*[—-][[:space:]]*//'
+}
+
+# Extract a single-line "- **<Label>:** value" field (Seam, Business rules
+# pinned, Verifies backlog item, Kind).
+scenario_block_field() {
+  local file="$1" label="$2"
+  grep -m1 -- "^- \*\*${label}:\*\*" "$file" 2>/dev/null \
+    | sed -E "s/^- \*\*${label}:\*\* *//" | sed -E 's/[[:space:]]+$//'
+}
+
+# ─── Fixture JSON field extraction (best-effort, no jq dependency) ───────────
+# Mirrors this plugin's tolerant "grep/sed over JSON-shaped text" convention
+# (see specclaw-bf-analyze-codebase's version-signal extractors). Only handles
+# flat top-level scalar/array fields — exactly the shape the harness's own
+# fixture-writer code is required to produce (see agents/bf-baseline-designer.md
+# Mode: harness). A malformed or unreadable fixture never aborts the scan.
+#
+# Fixtures are written with System.Text.Json's indented writer, which puts
+# each array element on its own line (an empty array stays "[]" on one
+# line, but any non-empty one does not) — `grep -o` only matches within a
+# single line, so a naive pattern silently returns nothing for exactly the
+# non-empty case that matters most. Flattening newlines to spaces first
+# (safe: JSON string values can't contain a literal, unescaped newline
+# byte) makes both extractors line-independent.
+
+fixture_string_field() {
+  local file="$1" field="$2"
+  tr '\n' ' ' < "$file" 2>/dev/null \
+    | grep -o "\"${field}\"[[:space:]]*:[[:space:]]*\"[^\"]*\"" \
+    | head -1 | sed -E "s/\"${field}\"[[:space:]]*:[[:space:]]*\"([^\"]*)\"/\1/" || true
+}
+
+fixture_array_field() {
+  local file="$1" field="$2"
+  tr '\n' ' ' < "$file" 2>/dev/null \
+    | grep -o "\"${field}\"[[:space:]]*:[[:space:]]*\[[^]]*\]" \
+    | head -1 | sed -E "s/\"${field}\"[[:space:]]*:[[:space:]]*//" || true
+}
+
+# ─── Subcommand: collect (design mode, pre-agent) ────────────────────────────
+
+cmd_collect() {
+  local specclaw_dir="$1"
+  [ -d "$specclaw_dir" ] || die "specclaw directory not found: $specclaw_dir"
+
+  local specclaw_dir_abs project_root analysis_dir
+  specclaw_dir_abs="$(cd "$specclaw_dir" && pwd)"
+  project_root="$(cd "$specclaw_dir_abs/.." && pwd)"
+  analysis_dir="$specclaw_dir_abs/analysis"
+
+  local domain_model="$analysis_dir/domain-model.md"
+  [ -f "$domain_model" ] || die "No .specclaw/analysis/domain-model.md found — /specclaw:bf-baseline derives its scenarios from that document's numbered business rules and cannot proceed without it. Run /specclaw:bf-domain first."
+
+  local -a docs_present=() docs_missing=()
+  local d
+  for d in "${SUPP_DOCS[@]}"; do
+    if [ -f "$analysis_dir/$d" ]; then
+      docs_present+=("$d")
+    else
+      docs_missing+=("$d")
+    fi
+  done
+
+  local docs_present_json docs_missing_json
+  docs_present_json="$(printf '%s\n' "${docs_present[@]}" | json_array_from_lines)"
+  docs_missing_json="$(printf '%s\n' "${docs_missing[@]}" | json_array_from_lines)"
+
+  local output
+  output=$(cat <<ENDJSON
+{
+  "project_root": "$(json_escape "$project_root")",
+  "domain_model_path": ".specclaw/analysis/domain-model.md",
+  "supplementary_docs_present": [${docs_present_json}
+  ],
+  "supplementary_docs_missing": [${docs_missing_json}
+  ]
+}
+ENDJSON
+)
+  emit_json "$output"
+}
+
+# ─── Subcommand: harness-collect (harness mode, pre-agent) ───────────────────
+
+cmd_harness_collect() {
+  local specclaw_dir="$1"
+  [ -d "$specclaw_dir" ] || die "specclaw directory not found: $specclaw_dir"
+
+  local specclaw_dir_abs project_root baseline_dir
+  specclaw_dir_abs="$(cd "$specclaw_dir" && pwd)"
+  project_root="$(cd "$specclaw_dir_abs/.." && pwd)"
+  baseline_dir="$specclaw_dir_abs/baseline"
+
+  local seams_file="$baseline_dir/seams.md"
+  local scenarios_file="$baseline_dir/scenarios.md"
+  if ! { [ -f "$seams_file" ] && [ -f "$scenarios_file" ]; }; then
+    die "No .specclaw/baseline/seams.md and scenarios.md found — run /specclaw:bf-baseline (design mode) first, confirm the recommended seam, then re-run with --harness."
+  fi
+
+  # Archive any prior harness wholesale (it's a directory, not a single file
+  # — same archive-then-replace convention, applied to a directory).
+  if [ -d "$baseline_dir/harness" ]; then
+    mkdir -p "$baseline_dir/archive"
+    mv "$baseline_dir/harness" "$baseline_dir/archive/$(date +%Y-%m-%d-%H%M%S)-harness"
+  fi
+  mkdir -p "$baseline_dir/harness"
+  mkdir -p "$baseline_dir/fixtures"
+
+  # Deterministic checklist: every GM-NNN ID the agent must implement
+  # one-for-one, not re-derive by re-reading scenarios.md's prose.
+  local workdir; workdir="$(mktemp -d)"
+  split_scenario_blocks "$scenarios_file" "$workdir"
+
+  shopt -s nullglob
+  local -a block_files=("$workdir"/GM-*.md)
+  shopt -u nullglob
+
+  local ids_json="" first=true f
+  for f in "${block_files[@]}"; do
+    if $first; then first=false; else ids_json="${ids_json}, "; fi
+    ids_json="${ids_json}\"$(json_escape "$(scenario_block_id "$f")")\""
+  done
+  rm -rf "$workdir"
+
+  local output
+  output=$(cat <<ENDJSON
+{
+  "project_root": "$(json_escape "$project_root")",
+  "seams_path": ".specclaw/baseline/seams.md",
+  "scenarios_path": ".specclaw/baseline/scenarios.md",
+  "harness_dir": ".specclaw/baseline/harness",
+  "fixtures_dir": ".specclaw/baseline/fixtures",
+  "scenario_ids": [${ids_json}]
+}
+ENDJSON
+)
+  emit_json "$output"
+}
+
+# ─── Subcommand: record (record mode — fully deterministic) ─────────────────
+
+cmd_record() {
+  local specclaw_dir="$1"
+  [ -d "$specclaw_dir" ] || die "specclaw directory not found: $specclaw_dir"
+
+  local specclaw_dir_abs project_root baseline_dir
+  specclaw_dir_abs="$(cd "$specclaw_dir" && pwd)"
+  project_root="$(cd "$specclaw_dir_abs/.." && pwd)"
+  baseline_dir="$specclaw_dir_abs/baseline"
+
+  local scenarios_file="$baseline_dir/scenarios.md"
+  [ -f "$scenarios_file" ] || die "No .specclaw/baseline/scenarios.md found — run /specclaw:bf-baseline (design mode) first."
+
+  local fixtures_dir="$baseline_dir/fixtures"
+  local manifest_file="$baseline_dir/manifest.json"
+  local archive_dir="$baseline_dir/archive"
+
+  local workdir; workdir="$(mktemp -d)"
+  split_scenario_blocks "$scenarios_file" "$workdir"
+
+  shopt -s nullglob
+  local -a block_files=("$workdir"/GM-*.md)
+  shopt -u nullglob
+
+  [ "${#block_files[@]}" -gt 0 ] || { rm -rf "$workdir"; die "no GM-NNN scenarios found in .specclaw/baseline/scenarios.md — nothing to record against."; }
+
+  local fixtures_json="" missing_json="" ffirst=true mfirst=true
+  local f id seam rules backlog_item fixture_path content_hash
+  local captured_at anchor_date commit_sha runtime_version normalized_fields
+  local captured_count=0 missing_count=0
+
+  for f in "${block_files[@]}"; do
+    id="$(scenario_block_id "$f")"
+    seam="$(scenario_block_field "$f" "Seam")"
+    rules="$(scenario_block_field "$f" "Business rules pinned")"
+    backlog_item="$(scenario_block_field "$f" "Verifies backlog item")"
+    fixture_path="$fixtures_dir/${id}.json"
+
+    if [ -f "$fixture_path" ]; then
+      captured_count=$((captured_count + 1))
+      content_hash="sha256:$(sha256sum "$fixture_path" 2>/dev/null | awk '{print $1}')"
+      captured_at="$(fixture_string_field "$fixture_path" "captured_at")"
+      anchor_date="$(fixture_string_field "$fixture_path" "anchor_date")"
+      commit_sha="$(fixture_string_field "$fixture_path" "legacy_commit_sha")"
+      runtime_version="$(fixture_string_field "$fixture_path" "runtime_version")"
+      normalized_fields="$(fixture_array_field "$fixture_path" "normalized_fields")"
+      [ -n "$normalized_fields" ] || normalized_fields="[]"
+
+      if $ffirst; then ffirst=false; else fixtures_json="${fixtures_json},"; fi
+      fixtures_json="${fixtures_json}
+    {
+      \"scenario_id\": \"$(json_escape "$id")\",
+      \"seam\": \"$(json_escape "$seam")\",
+      \"business_rules_pinned\": \"$(json_escape "$rules")\",
+      \"verifies_backlog_item\": \"$(json_escape "$backlog_item")\",
+      \"fixture_path\": \"$(json_escape ".specclaw/baseline/fixtures/${id}.json")\",
+      \"content_hash\": \"$(json_escape "$content_hash")\",
+      \"captured_at\": \"$(json_escape "$captured_at")\",
+      \"anchor_date\": \"$(json_escape "$anchor_date")\",
+      \"legacy_commit_sha\": \"$(json_escape "$commit_sha")\",
+      \"runtime_version\": \"$(json_escape "$runtime_version")\",
+      \"normalized_fields\": ${normalized_fields}
+    }"
+    else
+      missing_count=$((missing_count + 1))
+      if $mfirst; then mfirst=false; else missing_json="${missing_json}, "; fi
+      missing_json="${missing_json}\"$(json_escape "$id")\""
+    fi
+  done
+  rm -rf "$workdir"
+
+  if [ -f "$manifest_file" ]; then
+    mkdir -p "$archive_dir"
+    mv "$manifest_file" "$archive_dir/$(date +%Y-%m-%d-%H%M%S)-manifest.json"
+  fi
+
+  local total="${#block_files[@]}"
+  local output
+  output=$(cat <<ENDJSON
+{
+  "project_root": "$(json_escape "$project_root")",
+  "generated": "$(date +%Y-%m-%d)",
+  "total_scenarios": ${total},
+  "fixtures": [${fixtures_json}
+  ],
+  "missing_scenarios": [${missing_json}]
+}
+ENDJSON
+)
+
+  printf '%s\n' "$output" > "$manifest_file"
+  emit_json "$output"
+
+  echo "Wrote $manifest_file (${captured_count}/${total} scenarios captured, ${missing_count} missing)" >&2
+}
+
+# ─── Main ─────────────────────────────────────────────────────────────────────
+
+case "${1:-}" in
+  collect)
+    [ $# -ge 2 ] || die "Usage: specclaw-bf-baseline collect <specclaw_dir>"
+    cmd_collect "$2"
+    ;;
+  harness-collect)
+    [ $# -ge 2 ] || die "Usage: specclaw-bf-baseline harness-collect <specclaw_dir>"
+    cmd_harness_collect "$2"
+    ;;
+  record)
+    [ $# -ge 2 ] || die "Usage: specclaw-bf-baseline record <specclaw_dir>"
+    cmd_record "$2"
+    ;;
+  "")
+    usage
+    exit 1
+    ;;
+  *)
+    die "Unknown subcommand: $1. Run specclaw-bf-baseline --help for usage."
+    ;;
+esac
