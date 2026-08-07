@@ -1,5 +1,5 @@
 ---
-description: Design, generate, and record the golden-master harness that proves a rebuild behaves identically to the legacy app it replaces. Default mode ranks seams (pure function / stateful service / data boundary / UI-excluded), audits every seam for non-determinism (clocks, identity values, unstable ordering), and derives scenarios from domain-model.md's numbered business rules — writing .specclaw/baseline/seams.md and scenarios.md. Ends by asking the human to confirm the recommended seam before any harness code is generated. `--harness` generates a runnable, stack-specific capture project (currently .NET) under .specclaw/baseline/harness/. `--record` scans .specclaw/baseline/fixtures/ for a human-produced capture, validates it against scenarios.md, and writes manifest.json. Read-only with respect to source code — writes only inside .specclaw/, and never runs the legacy app or captures a fixture itself. Requires domain-model.md (run /specclaw:bf-domain first). Use after the analysis commands, alongside /specclaw:bf-clarify, before trusting a rebuild-backlog.md item as behaviorally verified.
+description: Design, generate, and record the golden-master harness that proves a rebuild behaves identically to the legacy app it replaces. Default mode ranks seams (pure function / stateful service / data boundary / UI-excluded), audits every seam for non-determinism (clocks, identity values, unstable ordering), and derives scenarios from domain-model.md's numbered business rules — writing .specclaw/baseline/seams.md and scenarios.md. Ends by asking the human to confirm the recommended seam before any harness code is generated. `--harness` identifies the legacy repo's own stack and generates a runnable capture project for it under .specclaw/baseline/harness/ — no fixed stack list, no per-stack template. `--record` scans .specclaw/baseline/fixtures/ for a human-produced capture, validates it against scenarios.md, and writes manifest.json. Read-only with respect to source code — writes only inside .specclaw/, and never runs the legacy app or captures a fixture itself. Requires domain-model.md (run /specclaw:bf-domain first). Use after the analysis commands, alongside /specclaw:bf-clarify, before trusting a rebuild-backlog.md item as behaviorally verified.
 ---
 
 # specclaw bf-baseline
@@ -8,7 +8,7 @@ description: Design, generate, and record the golden-master harness that proves 
 
 Design, generate, and record the golden-master harness for proving behavioral equivalence between the legacy app and its rebuild. Read-only side-command — no `specclaw-validate-change` call, no `<change>` involved, matching the `analyze`/`architecture`/`domain`/`rebuild-plan`/`clarify` pattern.
 
-This command does **not** run the legacy app and does **not** capture fixtures itself, in any mode. Designing the harness (Mode A), generating the runnable capture code (Mode B, `--harness`), and validating a capture (Mode C, `--record`) are all separate from actually *running* a capture — that step is always a human, running `dotnet test` (or the generated harness's equivalent) themselves. That boundary is deliberate: capture needs a real build, possibly a real database, and human judgment about which scenarios matter.
+This command does **not** run the legacy app and does **not** capture fixtures itself, in any mode. Designing the harness (Mode A), generating the runnable capture code (Mode B, `--harness`), and validating a capture (Mode C, `--record`) are all separate from actually *running* a capture — that step is always a human, running the generated harness's own build/test command (whatever the identified stack's conventional one is) themselves. That boundary is deliberate: capture needs a real build, possibly a real database, and human judgment about which scenarios matter.
 
 ## Mode A — design (default: no flag)
 
@@ -55,13 +55,13 @@ Only run after the human has confirmed Mode A's recommended seam (Step 6 above) 
    - The resolved path of the repo's existing test project, if `codebase-report.md`'s `test_locations` names one, so the agent imitates its arrange pattern rather than inventing a new one.
    - **Tell the agent explicitly it is running in harness mode.**
 
-3. The agent writes the harness project under `.specclaw/baseline/harness/` itself (or, if the detected stack isn't .NET, just a README explaining the gap) — this skill does not write any harness file itself.
+3. The agent writes the harness project under `.specclaw/baseline/harness/` itself, including `harness-manifest.json` (per `templates/CONTRACT.md`'s schema) — this skill does not write any harness file itself.
 
-4. **Present a short summary:** which stack was detected, how many `[Fact]`s were generated against how many scenario IDs (they must match), and the exact build/run commands from the generated README.
+4. **Present a short summary:** which stack was detected (and any disagreement it flagged between manifests/extensions/`codebase-report.md`), how many test cases were generated against how many scenario IDs (they must match), and the exact build/run commands from the generated README.
 
 ## Mode C — record capture (`--record`)
 
-Fully deterministic — no agent involved. Run this after a human has actually executed the harness (`dotnet test` or equivalent) and fixture files exist under `.specclaw/baseline/fixtures/`, though it's also safe to run before any capture exists (it will correctly report every scenario as missing rather than failing).
+Fully deterministic — no agent involved. Run this after a human has actually executed the harness (its own generated build/test command) and fixture files exist under `.specclaw/baseline/fixtures/`, though it's also safe to run before any capture exists (it will correctly report every scenario as missing rather than failing).
 
 1. **Run:**
    ```bash

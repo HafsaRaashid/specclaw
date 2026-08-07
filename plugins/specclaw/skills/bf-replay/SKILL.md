@@ -27,12 +27,13 @@ Retention is the default, not an opt-in. A verdict alone ("PASS") is a claim; th
 ├── evidence-summary.md        # the ONE mutable file — regenerated in full every run
 └── run-<timestamp>/
     ├── report.md               # identical content to replay-report.md for this run
-    ├── run-metadata.json        # legacy SHA, new-repo SHA, plugin version, dotnet
-    │                            # version, date, fixture counts by verdict, overall verdict
+    ├── run-metadata.json        # legacy SHA, new-repo SHA, plugin version, stack,
+    │                            # date, fixture counts by verdict, overall verdict
     ├── tests/                   # the generated test project — SOURCE ONLY (never
-    │                            # bin/, obj/, or restored packages — an explicit
-    │                            # exclusion list in the copy step, not a hoped-for
-    │                            # dotnet clean)
+    │                            # this stack's own build/dependency output, per
+    │                            # run-config.json's evidence_exclusions — an
+    │                            # explicit exclusion list in the copy step, not a
+    │                            # hoped-for clean)
     ├── actual-results/          # actual-output JSON per fixture, from this run
     └── expected/                # manifest excerpt: fixture IDs + hashes replayed
                                   # against (never a copy of the fixture files
@@ -87,34 +88,34 @@ This subcommand also **is** the preconditions check — it fails loudly (non-zer
 specclaw-bf-replay init-rundir .specclaw .specclaw/replay/run-<run_id>
 ```
 
-Deterministic. Creates the run directory, copies the fixed (non-agent-written) harness files from `$CLAUDE_PLUGIN_ROOT/templates/replay-harness/` (`Capture.cs`, `ResultWriter.cs`) verbatim, and resolves `ReplayHarness.csproj.template`'s `{{core_project_reference}}` placeholder by searching `src/**/*.csproj` for the new repo's own Core/domain project — **fails loudly if zero or more than one candidate is found**, naming the candidates rather than guessing. Also resolves `{{target_framework}}` from that project's own `<TargetFramework>`.
+Deterministic. Creates the run directory and writes a `run-config.json` stub (`{stack: null, build_command: null, test_command: null, results_dir: "actual", evidence_exclusions: []}` per `templates/CONTRACT.md`) for the replay-mapper agent to complete in Step 3. Copies nothing — there is no fixed per-stack scaffold to copy.
 
 ## Step 3 — Spawn the replay-mapper agent
 
 `Agent` tool, `subagent_type: "bf-replay-mapper"`, model from `config.yaml` `models.review` (default: `anthropic/claude-sonnet-4-5`). Pass as context:
 - `selection.json` from Step 1 (the fixtures to map).
-- Resolved paths of `.specclaw/baseline/scenarios.md`, `.specclaw/baseline/seams.md`, `.specclaw/analysis/decisions.md`, `.specclaw/analysis/domain-model.md`.
-- The project root, so the agent reads the new repo's actual current source for each selected fixture's seam.
-- The resolved run directory path and `$CLAUDE_PLUGIN_ROOT/templates/replay-harness/Arrange.example.cs` to imitate.
+- Resolved paths of `.specclaw/baseline/scenarios.md`, `.specclaw/baseline/seams.md`, `.specclaw/analysis/decisions.md`, `.specclaw/analysis/domain-model.md`, `$CLAUDE_PLUGIN_ROOT/templates/CONTRACT.md`.
+- The project root, so the agent reads the new repo's actual current source for each selected fixture's seam, and identifies the rebuild's own stack itself (never assumed — it can genuinely differ from the legacy stack).
+- The resolved run directory path, containing Step 2's `run-config.json` stub, which the agent must complete.
 
-For each selected fixture the agent decides **REPLAYABLE** or **NOT REPLAYABLE** (with reason — the three named categories below, or a stated general reason; never a silent skip), and for every REPLAYABLE fixture generates one xUnit `[Fact]` file under the run directory that arranges via the new repo's own `DbContext.Database.Migrate()` (per ADR-0003 — the migration path itself is under test, never `EnsureCreated`), pins the clock where the seam has an injectable override, feeds the fixture's `input`, and writes the result via `ResultWriter.Write(scenarioId, runDir, output)`.
+The agent first identifies the rebuild repo's stack and completes `run-config.json` (`stack`, `build_command`, `test_command`, `evidence_exclusions`, per `CONTRACT.md`). Then, for each selected fixture, it decides **REPLAYABLE** or **NOT REPLAYABLE** (with reason — the three named categories below, or a stated general reason; never a silent skip), and for every REPLAYABLE fixture generates one test, in whichever test runner it identified as the rebuild's own convention, under the run directory — arranging via the rebuild's own real migration path (never a schema-sync shortcut), pinning the clock where the seam has an injectable override, feeding the fixture's `input`, and writing the actual-result JSON itself per `CONTRACT.md`'s field-mirroring rule.
 
 Known NOT REPLAYABLE reasons the agent must recognize explicitly (never invent a fourth silently — if none of these fit, state the real reason in full):
-- **Clock dependency**: the seam's behaviour depends on "now" and the new code still has no injectable override for that call site → reason names the exact call site, remediation says "adopt an injectable clock/TimeProvider in `PlanningService`" and cites `seams.md`'s CB-1 recommendation (or a newer ADR if one now exists).
+- **Clock dependency**: the seam's behaviour depends on "now" and the new code still has no injectable override for that call site → reason names the exact call site, remediation says "adopt an injectable clock in the affected service" and cites `seams.md`'s CB-1 recommendation (or a newer ADR if one now exists).
 - **Shape changed under a decided CQ**: the seam's input/output shape changed because of a `decisions.md` entry under `## Decisions` (not "Outstanding") — replayable only via a documented input translation that cites that CQ's ID.
 - **No-legacy-behaviour scenario**: the fixture is listed under `scenarios.md`'s "No Legacy Behaviour Exists" section — NOT REPLAYABLE by definition; point at the stakeholder-decided acceptance criteria for that behaviour instead of attempting a capture.
 
-The agent writes `.specclaw/replay/run-<run_id>/mapping.json` itself (one entry per selected fixture: verdict REPLAYABLE/NOT REPLAYABLE, reason, remediation if applicable, generated test file path if replayable) — this skill does not write it.
+The agent writes `.specclaw/replay/run-<run_id>/mapping.json` itself (one entry per selected fixture: verdict REPLAYABLE/NOT REPLAYABLE, reason, remediation if applicable, generated test file path if replayable) — this skill does not write it, and does not write `run-config.json` either (that's the agent's own responsibility, per above).
 
 **The agent never declares MATCH or DIVERGES for anything.** Its only verdicts are REPLAYABLE / NOT REPLAYABLE; the actual behavioural comparison happens mechanically in Step 5.
 
 ## Step 4 — Run the generated tests
 
 ```bash
-specclaw-bf-replay run-tests .specclaw/replay/run-<run_id>
+specclaw-bf-replay run-tests .specclaw .specclaw/replay/run-<run_id>
 ```
 
-Deterministic. Runs `dotnet build` then `dotnet test` inside the run directory, captures output (capped), and reports which fixtures wrote a valid `actual/<GM-ID>.json` and which didn't (a missing/invalid actual-result file after the test run is the ERROR signal — the generated Fact crashed before completing capture). This command does not itself decide MATCH/DIVERGES.
+Deterministic. Reads `run-config.json`; fails loudly if `test_command` is still null (the replay-mapper agent never completed it). Otherwise runs `build_command` (if non-null) then `test_command` verbatim, from the project root — this stack's own build/test tooling, named by the agent, never assumed here — captures output (capped), and reports which fixtures wrote a valid `actual/<GM-ID>.json` and which didn't (a missing/invalid actual-result file after the test run is the ERROR signal — the generated test crashed before completing capture). This command does not itself decide MATCH/DIVERGES.
 
 ## Step 5 — Compare (deterministic)
 
@@ -122,7 +123,7 @@ Deterministic. Runs `dotnet build` then `dotnet test` inside the run directory, 
 specclaw-bf-replay compare .specclaw .specclaw/replay/run-<run_id>
 ```
 
-For every REPLAYABLE fixture: loads the fixture's expected `output` and the run's actual `output`, walks both field-by-field, skips any path listed in the fixture's own `normalized_fields`, and compares `ExceptionType`/`InnerExceptionType` fields by **short type name only** (the part after the last `.`) — the rebuild renamed `ExecutivePlanning.Core` to its own namespace per ADR-0002, so a bare namespace difference must never itself register as a divergence. Writes `compare.json`: `MATCH` / `DIVERGES` (with every differing field path and both values) / `ERROR` (with the captured `dotnet test` failure detail) per fixture. NOT REPLAYABLE fixtures pass through untouched with their Step 3 reason. **This verdict is computed entirely in this script — never asserted by an agent.**
+For every REPLAYABLE fixture: loads the fixture's expected `output` and the run's actual `output`, walks both field-by-field, skips any path listed in the fixture's own `normalized_fields`, and compares the canonical `ExceptionType`/`InnerExceptionType` fields (per `CONTRACT.md`) by **short type name only** — the identifier after the last `.`, `::`, or `/`, whichever qualified-name convention the producing stack used — so a legacy-to-rebuild namespace/package rename must never itself register as a divergence. Writes `compare.json`: `MATCH` / `DIVERGES` (with every differing field path and both values) / `ERROR` (with the captured test-command failure detail) per fixture. NOT REPLAYABLE fixtures pass through untouched with their Step 3 reason. **This verdict is computed entirely in this script — never asserted by an agent.**
 
 ## Step 6 — Spawn the replay-auditor agent (only if any DIVERGES)
 
@@ -146,7 +147,7 @@ Deterministic. For every DIVERGES fixture where the agent claimed a sanctioning 
 specclaw-bf-replay render .specclaw <change-name-or---all> .specclaw/replay/run-<run_id> [--discard]
 ```
 
-Pass `--discard` only if that flag was on the original invocation — it tells `render` to write a plain "evidence discarded" notice instead of a path to a folder that (per Step 9) won't exist. Deterministic. Renders `$CLAUDE_PLUGIN_ROOT/templates/replay-report.md` from `selection.json` + `mapping.json` + `compare.json` + `sanction-verified.json`: header (date, legacy SHA, fixture counts by verdict), the **evidence-pointer block** (evidence path or discard notice, a brief run-metadata summary, and the one-sentence client explanation of what the package contains), the full per-fixture table (verdict + sanction citation where applicable), the NOT REPLAYABLE list with remediation, every DR rule from `domain-model.md` left uncovered by any REPLAYABLE fixture in this run, and the overall verdict:
+Pass `--discard` only if that flag was on the original invocation — it tells `render` to write a plain "evidence discarded" notice instead of a path to a folder that (per Step 9) won't exist. Deterministic. Renders `$CLAUDE_PLUGIN_ROOT/templates/replay-report.md` from `selection.json` + `mapping.json` + `compare.json` + `sanction-verified.json`: header (date, legacy SHA, fixture counts by verdict), the **evidence-pointer block** (evidence path or discard notice, the identified stack, a brief run-metadata summary, and the one-sentence client explanation of what the package contains), the full per-fixture table (verdict + sanction citation where applicable), the NOT REPLAYABLE list with remediation, every DR rule from `domain-model.md` left uncovered by any REPLAYABLE fixture in this run, and the overall verdict:
 
 - **PASS** — every REPLAYABLE fixture is MATCH, or DIVERGES-but-SANCTIONED.
 - **FAIL** — any ERROR, or any DIVERGES that is not SANCTIONED.

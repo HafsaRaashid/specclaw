@@ -1,6 +1,7 @@
 # Replay Report: {{target}}
 
 **Date:** {{date}}
+**Stack:** {{stack}}
 **Legacy commit:** {{legacy_commit_sha}}
 **Backlog item:** {{bl_item}}
 **Selected fixtures:** {{selected_count}}

@@ -10,8 +10,9 @@
 # (a re-run archives the prior design wholesale and starts fresh, same as
 # codebase-report.md/architecture.md/domain-model.md/rebuild-backlog.md).
 #
-# Bash + coreutils only (jq optional, used for output validation with a
-# best-effort fallback — same tolerant pattern as every sibling script).
+# Bash + coreutils, plus jq — required by the record subcommand, which
+# parses fixture JSON structurally (never by text-matching against one
+# stack's formatting convention; see CONTRACT.md).
 set -euo pipefail
 
 # ─── Help ─────────────────────────────────────────────────────────────────────
@@ -147,33 +148,28 @@ scenario_block_field() {
     | sed -E "s/^- \*\*${label}:\*\* *//" | sed -E 's/[[:space:]]+$//'
 }
 
-# ─── Fixture JSON field extraction (best-effort, no jq dependency) ───────────
-# Mirrors this plugin's tolerant "grep/sed over JSON-shaped text" convention
-# (see specclaw-bf-analyze-codebase's version-signal extractors). Only handles
-# flat top-level scalar/array fields — exactly the shape the harness's own
-# fixture-writer code is required to produce (see agents/bf-baseline-designer.md
-# Mode: harness). A malformed or unreadable fixture never aborts the scan.
-#
-# Fixtures are written with System.Text.Json's indented writer, which puts
-# each array element on its own line (an empty array stays "[]" on one
-# line, but any non-empty one does not) — `grep -o` only matches within a
-# single line, so a naive pattern silently returns nothing for exactly the
-# non-empty case that matters most. Flattening newlines to spaces first
-# (safe: JSON string values can't contain a literal, unescaped newline
-# byte) makes both extractors line-independent.
+# ─── Fixture JSON field extraction (jq-based, per CONTRACT.md) ──────────────
+# Fixtures are produced by whichever stack bf-baseline-designer generated the
+# capture harness in this run (per CONTRACT.md — never assumed to be any
+# particular language), so parsing them by text-matching against one
+# formatting convention breaks the moment a different stack's JSON writer
+# wraps lines differently. jq parses the actual structure instead, so field
+# layout never matters. A malformed or unreadable fixture is reported (see
+# cmd_record) but never aborts the scan.
 
-fixture_string_field() {
+require_jq() {
+  command -v jq >/dev/null 2>&1 \
+    || die "jq is required by specclaw-bf-baseline's record subcommand (structural fixture JSON parsing) but was not found on PATH."
+}
+
+fixture_field() {
   local file="$1" field="$2"
-  tr '\n' ' ' < "$file" 2>/dev/null \
-    | grep -o "\"${field}\"[[:space:]]*:[[:space:]]*\"[^\"]*\"" \
-    | head -1 | sed -E "s/\"${field}\"[[:space:]]*:[[:space:]]*\"([^\"]*)\"/\1/" || true
+  jq -r --arg f "$field" '.[$f] // empty' "$file" 2>/dev/null || true
 }
 
 fixture_array_field() {
   local file="$1" field="$2"
-  tr '\n' ' ' < "$file" 2>/dev/null \
-    | grep -o "\"${field}\"[[:space:]]*:[[:space:]]*\[[^]]*\]" \
-    | head -1 | sed -E "s/\"${field}\"[[:space:]]*:[[:space:]]*//" || true
+  jq -c --arg f "$field" '.[$f] // []' "$file" 2>/dev/null || echo '[]'
 }
 
 # ─── Subcommand: collect (design mode, pre-agent) ────────────────────────────
@@ -289,6 +285,7 @@ cmd_record() {
 
   local scenarios_file="$baseline_dir/scenarios.md"
   [ -f "$scenarios_file" ] || die "No .specclaw/baseline/scenarios.md found — run /specclaw:bf-baseline (design mode) first."
+  require_jq
 
   local fixtures_dir="$baseline_dir/fixtures"
   local manifest_file="$baseline_dir/manifest.json"
@@ -318,12 +315,16 @@ cmd_record() {
     if [ -f "$fixture_path" ]; then
       captured_count=$((captured_count + 1))
       content_hash="sha256:$(sha256sum "$fixture_path" 2>/dev/null | awk '{print $1}')"
-      captured_at="$(fixture_string_field "$fixture_path" "captured_at")"
-      anchor_date="$(fixture_string_field "$fixture_path" "anchor_date")"
-      commit_sha="$(fixture_string_field "$fixture_path" "legacy_commit_sha")"
-      runtime_version="$(fixture_string_field "$fixture_path" "runtime_version")"
-      normalized_fields="$(fixture_array_field "$fixture_path" "normalized_fields")"
-      [ -n "$normalized_fields" ] || normalized_fields="[]"
+      if jq -e . "$fixture_path" >/dev/null 2>&1; then
+        captured_at="$(fixture_field "$fixture_path" "captured_at")"
+        anchor_date="$(fixture_field "$fixture_path" "anchor_date")"
+        commit_sha="$(fixture_field "$fixture_path" "legacy_commit_sha")"
+        runtime_version="$(fixture_field "$fixture_path" "runtime_version")"
+        normalized_fields="$(fixture_array_field "$fixture_path" "normalized_fields")"
+      else
+        warn "${id}: fixture at .specclaw/baseline/fixtures/${id}.json is not valid JSON — recorded as captured (hash only); its metadata fields will be empty until the fixture-writer's output is fixed."
+        captured_at=""; anchor_date=""; commit_sha=""; runtime_version=""; normalized_fields="[]"
+      fi
 
       if $ffirst; then ffirst=false; else fixtures_json="${fixtures_json},"; fi
       fixtures_json="${fixtures_json}
