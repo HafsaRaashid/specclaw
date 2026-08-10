@@ -6,14 +6,22 @@
 <!--
   A seam is a place where the legacy app's behaviour can be observed as
   input -> output without driving its UI. Every candidate must be ranked
-  into exactly one of these classes:
+  into exactly one of these classes, and every seam entry must declare its
+  `seam_layer` — the closed enum in templates/CONTRACT.md (i):
 
-  | Class                     | Cost   | Fidelity | Notes |
-  |----------------------------|--------|----------|-------|
-  | Pure function              | lowest | highest  | No setup, fully deterministic. Capture these first. |
-  | Stateful service boundary   | medium | high     | Needs a database arrange step per scenario. |
-  | Data/persistence boundary   | medium | medium   | Good for cascade and delete-rule behaviour. |
-  | UI automation               | highest| lowest   | Excluded — explain why in this document, don't just omit it. |
+  | Class                     | seam_layer      | Cost   | Fidelity | Notes |
+  |----------------------------|-----------------|--------|----------|-------|
+  | Pure function              | `pure-function` | lowest | highest  | No setup, fully deterministic. Capture these first. |
+  | Stateful service boundary   | `service`       | medium | high     | Needs a database arrange step per scenario. |
+  | Data/persistence boundary   | `persistence`   | medium | medium   | Good for cascade and delete-rule behaviour. |
+  | HTTP/API boundary           | `http`          | medium | medium   | Request in, response out. Real, but it also measures routing, serialization, and middleware — prefer an inner layer when the same rule is reachable there. |
+  | UI automation               | *(none)*        | highest| lowest   | Excluded — explain why in this document, don't just omit it. |
+
+  Declare the layer explicitly per seam entry, e.g. `- **Seam layer:**
+  service`. Each scenario in scenarios.md copies its seam's declared layer
+  verbatim, and /specclaw:bf-replay mechanically enforces that the replay
+  test targets that same layer — so a layer chosen loosely here becomes a
+  seam-mismatch downstream, not a silently weaker comparison.
 
   Every ranking must be justified with a real citation (file:line, or a
   quote from an analysis document) — a seam listed without justification is
