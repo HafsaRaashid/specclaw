@@ -20,7 +20,12 @@ Subcommands:
                 Verifies manifest/fixtures are present and every selected
                 fixture's sha256 matches manifest.json's recorded hash — fails
                 loudly on any mismatch, missing manifest, or unresolved BL
-                item. Writes the selection JSON and prints a one-line summary.
+                item. Also hard-fails, BEFORE creating anything, on a manifest
+                that predates the current schema or whose selected entries
+                carry no status/seam_layer — naming
+                "re-run /specclaw:bf-baseline --record" as the fix rather
+                than assuming VERIFIABLE. Writes the selection JSON and prints
+                a one-line summary.
 
   init-rundir   <specclaw_dir> <run_dir>
                 Creates the run directory and writes a run-config.json stub
@@ -41,8 +46,14 @@ Subcommands:
                 Deterministic field-by-field diff of every REPLAYABLE
                 fixture's expected vs. actual output (per mapping.json),
                 skipping the fixture's own normalized_fields and comparing
-                Exception*Type fields by short name only. Writes compare.json.
-                Never asserted by an agent.
+                Exception*Type fields by short name only. Classifies every
+                row: "behavioural" (outcome/error_code/threw or any other
+                compared field differs), "representation" (only the raw
+                exception type/message differs — never FAILs a run), or
+                "unmapped-error-code". Re-verifies every mapping entry's
+                seam layer against the manifest first and forces a mismatch
+                to NOT REPLAYABLE/seam-mismatch whatever the agent claimed.
+                Writes compare.json. Never asserted by an agent.
 
   sanction-check <specclaw_dir> <run_dir>
                 Mechanically re-verifies every CQ the replay-auditor agent
@@ -64,7 +75,9 @@ Subcommands:
                 generated tests (source only — excludes whatever
                 run-config.json's evidence_exclusions names as this stack's
                 own build/dependency output) + actual results + a
-                fixture-manifest excerpt + run-metadata.json
+                fixture-manifest excerpt + run-metadata.json + the pipeline
+                record (run-config/selection/mapping/compare/sanction/
+                sanction-verified JSON and the build/test logs)
                 into .specclaw/changes/<name>/replay-evidence/run-<id>/ (or
                 .specclaw/replay/evidence/run-<id>/ for --all), regenerates
                 evidence-summary.md, warns if .gitignore would swallow the
@@ -90,6 +103,31 @@ warn() { echo "WARN: $*" >&2; }
 require_jq() {
   command -v jq >/dev/null 2>&1 \
     || die "jq is required by specclaw-bf-replay (nested manifest/fixture JSON parsing) but was not found on PATH."
+}
+
+# The canonical field-path language and the divergence classification are
+# defined ONCE, in lib/gm-paths.jq, and prepended to this script's jq programs
+# — specclaw-bf-baseline's record loads the exact same file to validate the
+# very paths compared here. Two lookalike implementations that disagreed about
+# what a path means would let a normalization path validate green at capture
+# time and then normalize nothing on every replay, which is exactly the noise
+# this pipeline exists to eliminate.
+GM_PATHS_JQ=""
+load_gm_paths() {
+  local lib="$PLUGIN_ROOT/lib/gm-paths.jq"
+  [ -f "$lib" ] || die "Shared path-resolution library missing: ${lib}. This ships with the plugin; a missing copy means a broken install, and compare will not fall back to a local reimplementation."
+  GM_PATHS_JQ="$(cat "$lib")"
+}
+
+# The oldest manifest schema this version can read (CONTRACT.md (c')). An
+# older manifest is refused with a fix instruction rather than read under
+# assumed defaults — a pre-v0.8 manifest has no per-fixture status at all, and
+# defaulting it to VERIFIABLE turns "we never checked" into "we checked and it
+# was fine."
+MANIFEST_SCHEMA_MIN=2
+
+plugin_version_of_this_run() {
+  jq -r '.version // "unknown"' "$PLUGIN_ROOT/.claude-plugin/plugin.json" 2>/dev/null || echo "unknown"
 }
 
 # JSON-escape a string (used only for hand-built markdown-derived text, never
@@ -278,6 +316,33 @@ cmd_resolve() {
   [ -d "$fixtures_dir" ] || die "Fixtures directory not found at ${fixtures_dir}."
   jq -e . "$manifest" >/dev/null 2>&1 || die "manifest.json at ${manifest} is not valid JSON."
 
+  # ── Version & status compatibility guard (CONTRACT.md (c')) ──────────────
+  # Runs here, before anything at all is created on disk, so a stale baseline
+  # fails with an instruction instead of producing a run directory, a report,
+  # and a verdict computed from assumed defaults.
+  local manifest_schema manifest_plugin_version
+  manifest_schema="$(jq -r '.manifest_schema // empty' "$manifest")"
+  manifest_plugin_version="$(jq -r '.plugin_version // empty' "$manifest")"
+
+  if [ -z "$manifest_schema" ]; then
+    die "manifest.json at ${manifest} has no \"manifest_schema\" field — it predates the current baseline schema (v${MANIFEST_SCHEMA_MIN}), so it carries no per-fixture status, seam_layer, or semantic error fields. Replaying against it would silently treat every fixture as VERIFIABLE and every seam layer as whatever the mapper chose.
+Fix: re-run /specclaw:bf-baseline --record"
+  fi
+  if ! [[ "$manifest_schema" =~ ^[0-9]+$ ]]; then
+    die "manifest.json at ${manifest} has a non-numeric \"manifest_schema\" (${manifest_schema}).
+Fix: re-run /specclaw:bf-baseline --record"
+  fi
+  if [ "$manifest_schema" -lt "$MANIFEST_SCHEMA_MIN" ]; then
+    die "manifest.json at ${manifest} is schema v${manifest_schema}; this specclaw requires v${MANIFEST_SCHEMA_MIN} or newer.
+Fix: re-run /specclaw:bf-baseline --record"
+  fi
+
+  local this_version
+  this_version="$(plugin_version_of_this_run)"
+  if [ -n "$manifest_plugin_version" ] && [ "$manifest_plugin_version" != "$this_version" ]; then
+    warn "Baseline was recorded by specclaw v${manifest_plugin_version}; this replay is running specclaw v${this_version}. Both versions are stamped into the report header and run-metadata.json so the difference is visible on the report's face."
+  fi
+
   local bl_id=""
   if [ "$target" != "--all" ]; then
     local change_dir="$specclaw_dir_abs/changes/${target}"
@@ -305,6 +370,16 @@ cmd_resolve() {
     sid="$(jq -r '.scenario_id' <<< "$fx")"
     fpath="$(jq -r '.fixture_path' <<< "$fx")"
     chash="$(jq -r '.content_hash' <<< "$fx")"
+
+    # Per-entry schema completeness — checked per selected fixture, not just
+    # once at the top, because a manifest can carry the right schema number and
+    # still be missing a field on the one entry this run actually depends on.
+    local fstatus flayer
+    fstatus="$(jq -r '.status // ""' <<< "$fx")"
+    flayer="$(jq -r '.seam_layer // ""' <<< "$fx")"
+    [ -n "$fstatus" ] || problems+=("${sid}: manifest entry has no \"status\" field (VERIFIABLE/PROVISIONAL/SUPERSEDED) — re-run /specclaw:bf-baseline --record")
+    [ -n "$flayer" ]  || problems+=("${sid}: manifest entry has no \"seam_layer\" field — the replay layer cannot be enforced against a layer that was never recorded. Re-run /specclaw:bf-baseline --record")
+
     local full="${project_root}/${fpath}"
     if [ ! -f "$full" ]; then
       problems+=("${sid}: fixture file missing at ${fpath}")
@@ -320,7 +395,7 @@ cmd_resolve() {
   if [ "${#problems[@]}" -gt 0 ]; then
     local joined
     joined="$(printf '  - %s\n' "${problems[@]}")"
-    die "Fixture integrity check failed — refusing to compare against a tampered baseline:
+    die "Baseline check failed — refusing to compare against a tampered or incomplete baseline:
 ${joined}"
   fi
 
@@ -339,9 +414,13 @@ ${joined}"
     --argjson dr_rules "$dr_rules_json" \
     --argjson legacy_shas "$legacy_shas_json" \
     --argjson count "$count" \
+    --argjson manifest_schema "$manifest_schema" \
+    --arg manifest_plugin_version "${manifest_plugin_version:-unknown}" \
     '{
       target: $target,
       bl_item: (if $bl == "" then null else $bl end),
+      manifest_schema: $manifest_schema,
+      manifest_plugin_version: $manifest_plugin_version,
       selected_count: $count,
       dr_rules_covered: $dr_rules,
       legacy_commit_shas: $legacy_shas,
@@ -430,38 +509,30 @@ cmd_run_tests() {
 # ─── Subcommand: compare ─────────────────────────────────────────────────────
 # Deterministic field-by-field diff. Never asserted by an agent.
 
+# The field-by-field diff, its per-field classification, and the resolution of
+# this fixture's normalized_fields against the ACTUAL output — one jq call over
+# the shared library (CONTRACT.md (g), (j.1)). Nothing about the comparison is
+# reimplemented here; this function only wires the inputs together.
 compute_diffs() {
   local expected_json="$1" actual_json="$2" normalized_json="$3"
-  jq -n --argjson expected "$expected_json" --argjson actual "$actual_json" --argjson normalized "$normalized_json" '
-    def scalars: select(type != "array" and type != "object");
-    def pathstr: map(if type == "number" then "[\(.)]" else . end) | join(".");
-    # Per CONTRACT.md: the canonical ExceptionType/InnerExceptionType fields
-    # are compared by the identifier after the last ".", "::", or "/" —
-    # whichever qualified-name convention the producing stack used.
-    def shortname:
-      if type == "string" then (split("\\.|::|/"; "") | last) else . end;
-
-    (($normalized // []) | map(sub("^output\\."; ""))) as $norm
-    | {value: ($expected // null)} as $ewrap
-    | {value: ($actual // null)} as $awrap
-    | (([$ewrap | paths(scalars)] + [$awrap | paths(scalars)]) | unique) as $allpaths
-    | [
-        $allpaths[] as $p
-        | ($p[1:] | pathstr) as $raw
-        | (if $raw == "" then "(root)" else $raw end) as $pstr
-        | select(($norm | index($pstr)) == null)
-        | ($ewrap | getpath($p)) as $ev
-        | ($awrap | getpath($p)) as $av
-        | (if ($pstr | test("ExceptionType$")) then ($ev | shortname) else $ev end) as $evc
-        | (if ($pstr | test("ExceptionType$")) then ($av | shortname) else $av end) as $avc
-        | select($evc != $avc)
-        | {field_path: $pstr, expected: $ev, actual: $av}
-      ]
-  '
+  jq -n \
+    --argjson expected "$expected_json" \
+    --argjson actual "$actual_json" \
+    --argjson normalized "$normalized_json" \
+    "$GM_PATHS_JQ"'
+      gm_diffs($expected; $actual; $normalized) as $d
+      | { diffs: $d,
+          divergence_class: gm_divergence_class($d),
+          normalization_warnings:
+            [ gm_resolution_report($normalized; $actual)[]
+              | select(.matches == 0)
+              | {path: .path, matched: 0, suggestions: .suggestions, against: "actual"} ] }
+    '
 }
 
 cmd_compare() {
   require_jq
+  load_gm_paths
   local specclaw_dir="$1" run_dir="$2"
   local project_root
   project_root="$(cd "$specclaw_dir/.." && pwd)"
@@ -487,14 +558,52 @@ cmd_compare() {
       continue
     fi
 
-    local fixture_path normalized_fields fixture_status
+    local fixture_path normalized_fields fixture_status legacy_layer
     fixture_path="$(jq -r --arg sid "$sid" '.fixtures[] | select(.scenario_id==$sid) | .fixture_path' "$selection")"
     normalized_fields="$(jq -c --arg sid "$sid" '.fixtures[] | select(.scenario_id==$sid) | .normalized_fields' "$selection")"
     # Per templates/CONTRACT.md (c'): flows through from manifest.json's own
-    # fixture-entry status field, via selection.json, untouched by resolve.
-    # Absent on a manifest recorded before this field existed -> VERIFIABLE,
-    # never a stack- or plugin-version-specific special case.
-    fixture_status="$(jq -r --arg sid "$sid" '.fixtures[] | select(.scenario_id==$sid) | .status // "VERIFIABLE"' "$selection")"
+    # fixture-entry status/seam_layer fields, via selection.json, untouched by
+    # resolve. `resolve` has already refused to run if either is absent, so
+    # there is deliberately no default applied here.
+    fixture_status="$(jq -r --arg sid "$sid" '.fixtures[] | select(.scenario_id==$sid) | .status' "$selection")"
+    legacy_layer="$(jq -r --arg sid "$sid" '.fixtures[] | select(.scenario_id==$sid) | .seam_layer' "$selection")"
+
+    # ── Seam-layer re-verification (CONTRACT.md (i)) ─────────────────────
+    # Same trust model as sanction-check re-verifying the auditor: the
+    # authoritative legacy layer is the manifest's, read here from
+    # selection.json — never the copy the agent put in mapping.json, which is
+    # checked against it rather than believed. A layer mismatch is forced to
+    # NOT REPLAYABLE regardless of the agent's REPLAYABLE claim, because a
+    # fixture replayed at another layer measures transport and middleware
+    # instead of the business rule it pins.
+    local claimed_legacy replay_layer seam_problem=""
+    claimed_legacy="$(jq -r '.legacy_seam_layer // ""' <<< "$entry")"
+    replay_layer="$(jq -r '.replay_seam_layer // ""' <<< "$entry")"
+
+    if [ -z "$legacy_layer" ] || [ "$legacy_layer" = "null" ]; then
+      seam_problem="mapping.json claims this fixture is replayable, but it is not in this run's selection at all — there is no captured seam layer to replay against."
+    elif [ -z "$replay_layer" ]; then
+      seam_problem="mapping.json declares no replay_seam_layer for this fixture, so the layer the generated test targets is unknown. The fixture was captured at '${legacy_layer}'."
+    elif [ -n "$claimed_legacy" ] && [ "$claimed_legacy" != "$legacy_layer" ]; then
+      seam_problem="mapping.json records legacy_seam_layer '${claimed_legacy}', but the manifest recorded this fixture at '${legacy_layer}'. The legacy layer is copied, never re-derived."
+    elif [ "$replay_layer" != "$legacy_layer" ]; then
+      seam_problem="captured at '${legacy_layer}', replayed at '${replay_layer}'."
+    fi
+
+    if [ -n "$seam_problem" ]; then
+      results="$(jq \
+        --arg sid "$sid" --arg status "$fixture_status" \
+        --arg legacy "$legacy_layer" --arg replay "$replay_layer" \
+        --arg reason "$seam_problem" '. + [{
+          scenario_id: $sid, verdict: "NOT REPLAYABLE", category: "seam-mismatch",
+          fixture_status: $status,
+          legacy_seam_layer: $legacy,
+          replay_seam_layer: (if $replay == "" then null else $replay end),
+          reason: ("Seam-layer mismatch — " + $reason),
+          remediation: ("Generate the replay test against the rebuild'"'"'s " + $legacy + " layer. If no equivalent " + $legacy + " seam exists in the rebuild, that is the finding to report — replaying through whichever layer happens to be reachable measures something else.")
+        }]' <<< "$results")"
+      continue
+    fi
 
     local full_fixture="${project_root}/${fixture_path}"
     local actual_file="${run_dir}/actual/${sid}.json"
@@ -508,27 +617,50 @@ cmd_compare() {
       continue
     fi
 
-    local expected_output actual_output diffs
+    local expected_output actual_output analysis
     expected_output="$(jq -c '.output' "$full_fixture")"
     actual_output="$(jq -c '.output' "$actual_file")"
-    diffs="$(compute_diffs "$expected_output" "$actual_output" "$normalized_fields")"
+    analysis="$(compute_diffs "$expected_output" "$actual_output" "$normalized_fields")"
 
-    if [ "$(jq 'length' <<< "$diffs")" = "0" ]; then
-      results="$(jq --arg sid "$sid" --arg status "$fixture_status" '. + [{scenario_id: $sid, verdict: "MATCH", fixture_status: $status}]' <<< "$results")"
-    else
-      results="$(jq --arg sid "$sid" --argjson d "$diffs" --arg status "$fixture_status" '. + [{scenario_id: $sid, verdict: "DIVERGES", diffs: $d, fixture_status: $status}]' <<< "$results")"
-    fi
+    results="$(jq \
+      --arg sid "$sid" --arg status "$fixture_status" --arg layer "$legacy_layer" \
+      --argjson a "$analysis" '. + [
+        (if ($a.diffs | length) == 0
+         then {scenario_id: $sid, verdict: "MATCH", fixture_status: $status, seam_layer: $layer}
+         else {scenario_id: $sid, verdict: "DIVERGES", fixture_status: $status, seam_layer: $layer,
+               divergence_class: $a.divergence_class, diffs: $a.diffs}
+         end)
+        + (if ($a.normalization_warnings | length) > 0
+           then {normalization_warnings: $a.normalization_warnings} else {} end)
+      ]' <<< "$results")"
   done < <(jq -c '.[]' "$mapping")
 
-  jq -n --argjson results "$results" '{results: $results}' > "$run_dir/compare.json"
+  local this_version
+  this_version="$(plugin_version_of_this_run)"
 
-  local match_n diverge_n error_n nr_n prov_n
-  match_n=$(jq '[.results[] | select(.verdict=="MATCH")] | length' "$run_dir/compare.json")
-  diverge_n=$(jq '[.results[] | select(.verdict=="DIVERGES")] | length' "$run_dir/compare.json")
-  error_n=$(jq '[.results[] | select(.verdict=="ERROR")] | length' "$run_dir/compare.json")
-  nr_n=$(jq '[.results[] | select(.verdict=="NOT REPLAYABLE")] | length' "$run_dir/compare.json")
+  jq -n --argjson results "$results" --arg pv "$this_version" '
+    {
+      compare_schema: 2,
+      plugin_version: $pv,
+      results: $results,
+      summary: {
+        match:               ([$results[] | select(.verdict=="MATCH")] | length),
+        behavioural:         ([$results[] | select(.divergence_class=="behavioural")] | length),
+        representation:      ([$results[] | select(.divergence_class=="representation")] | length),
+        unmapped_error_code: ([$results[] | select(.divergence_class=="unmapped-error-code")] | length),
+        error:               ([$results[] | select(.verdict=="ERROR")] | length),
+        seam_mismatch:       ([$results[] | select(.category=="seam-mismatch")] | length),
+        not_replayable_other:([$results[] | select(.verdict=="NOT REPLAYABLE" and .category!="seam-mismatch")] | length),
+        normalization_warnings: ([$results[] | (.normalization_warnings // [])[]] | length)
+      }
+    }' > "$run_dir/compare.json"
+
+  local s
+  s="$(jq -r '.summary | "MATCH=\(.match) BEHAVIOURAL=\(.behavioural) REPRESENTATION=\(.representation) UNMAPPED_ERROR_CODE=\(.unmapped_error_code) ERROR=\(.error) SEAM_MISMATCH=\(.seam_mismatch) NOT_REPLAYABLE=\(.not_replayable_other)"' "$run_dir/compare.json")"
+  local prov_n warn_n
   prov_n=$(jq '[.results[] | select(.fixture_status=="PROVISIONAL")] | length' "$run_dir/compare.json")
-  echo "Compare complete: MATCH=${match_n} DIVERGES=${diverge_n} ERROR=${error_n} NOT_REPLAYABLE=${nr_n} (${prov_n} exercised fixture(s) PROVISIONAL — see render's overall verdict)"
+  warn_n=$(jq '.summary.normalization_warnings' "$run_dir/compare.json")
+  echo "Compare complete: ${s} (${prov_n} exercised fixture(s) PROVISIONAL, ${warn_n} normalization warning(s) — see render's overall verdict)"
 }
 
 # ─── Subcommand: sanction-check ──────────────────────────────────────────────
@@ -541,15 +673,19 @@ cmd_sanction_check() {
   local sanction_file="$run_dir/sanction.json"
   [ -f "$compare_file" ] || die "compare.json not found in ${run_dir} — run 'compare' first."
 
+  # Only BEHAVIOURAL divergences are sanctionable (CONTRACT.md (j.2)). A row
+  # where only the raw exception type or message differed is the same business
+  # decision expressed differently — asking a human to record a product
+  # decision about it would be asking the wrong question.
   local diverges_n
-  diverges_n=$(jq '[.results[] | select(.verdict=="DIVERGES")] | length' "$compare_file")
+  diverges_n=$(jq '[.results[] | select(.divergence_class=="behavioural")] | length' "$compare_file")
   if [ "$diverges_n" = "0" ]; then
     echo '{"sanctions": []}' > "$run_dir/sanction-verified.json"
-    echo "No DIVERGES fixtures — nothing to sanction-check."
+    echo "No behavioural divergences — nothing to sanction-check."
     return 0
   fi
 
-  [ -f "$sanction_file" ] || die "sanction.json not found in ${run_dir} — the replay-auditor agent must run first (${diverges_n} DIVERGES fixture(s) to review)."
+  [ -f "$sanction_file" ] || die "sanction.json not found in ${run_dir} — the replay-auditor agent must run first (${diverges_n} behavioural divergence(s) to review)."
   jq -e . "$sanction_file" >/dev/null 2>&1 || die "sanction.json in ${run_dir} is not valid JSON."
 
   local decisions_present=true
@@ -614,7 +750,7 @@ cmd_sanction_check() {
   local sanctioned_n unsanctioned_n
   sanctioned_n=$(jq '[.sanctions[] | select(.sanctioned==true)] | length' "$run_dir/sanction-verified.json")
   unsanctioned_n=$(jq '[.sanctions[] | select(.sanctioned==false)] | length' "$run_dir/sanction-verified.json")
-  echo "Sanction check complete: ${sanctioned_n} sanctioned, ${unsanctioned_n} unsanctioned (of ${diverges_n} DIVERGES)."
+  echo "Sanction check complete: ${sanctioned_n} sanctioned, ${unsanctioned_n} unsanctioned (of ${diverges_n} behavioural divergence(s))."
 }
 
 # ─── Evidence retention helpers ──────────────────────────────────────────────
@@ -678,29 +814,38 @@ compute_verdict_summary() {
       (.results) as $r
       | ($s[0].sanctions // []) as $sc
       | [ $r[] | . as $row
-          | if $row.verdict == "DIVERGES" then
+          | if $row.divergence_class == "behavioural" then
               ( ($sc[] | select(.scenario_id == $row.scenario_id)) // {sanctioned:false} ) as $m
               | $row + {sanctioned: $m.sanctioned}
             else $row end
         ]
     ' "$compare_file")
   else
-    merged=$(jq '[ .results[] | if .verdict == "DIVERGES" then . + {sanctioned:false} else . end ]' "$compare_file")
+    merged=$(jq '[ .results[] | if .divergence_class == "behavioural" then . + {sanctioned:false} else . end ]' "$compare_file")
   fi
 
   jq -n --argjson merged "$merged" --argjson selected "$selected_count" '
+    def exercised: (.verdict=="MATCH" or .verdict=="DIVERGES" or .verdict=="ERROR");
     {
       match: ([$merged[] | select(.verdict=="MATCH")] | length),
-      sanctioned: ([$merged[] | select(.verdict=="DIVERGES" and .sanctioned==true)] | length),
-      diverged: ([$merged[] | select(.verdict=="DIVERGES" and (.sanctioned!=true))] | length),
+      sanctioned: ([$merged[] | select(.divergence_class=="behavioural" and .sanctioned==true)] | length),
+      diverged: ([$merged[] | select(.divergence_class=="behavioural" and (.sanctioned!=true))] | length),
+      representation: ([$merged[] | select(.divergence_class=="representation")] | length),
+      unmapped_error_code: ([$merged[] | select(.divergence_class=="unmapped-error-code")] | length),
       error: ([$merged[] | select(.verdict=="ERROR")] | length),
+      seam_mismatch: ([$merged[] | select(.category=="seam-mismatch")] | length),
       not_replayable: ([$merged[] | select(.verdict=="NOT REPLAYABLE")] | length),
-      provisional_exercised: ([$merged[] | select((.verdict=="MATCH" or .verdict=="DIVERGES" or .verdict=="ERROR") and .fixture_status=="PROVISIONAL")] | length)
+      provisional_exercised: ([$merged[] | select(exercised and .fixture_status=="PROVISIONAL")] | length),
+      superseded_exercised: ([$merged[] | select(exercised and .fixture_status=="SUPERSEDED")] | length)
     }
+    # CONTRACT.md (j.3), evaluated strictly in order. FAIL is tested BEFORE the
+    # soft-block cases, which is the mechanical guarantee that an unsanctioned
+    # behavioural divergence can never be downgraded to PASS-PENDING-DECISIONS
+    # by a provisional, superseded, or unmapped state sitting alongside it.
     | . + {
         overall: (if ($selected > 0 and .not_replayable == $selected) then "INCOMPLETE"
                   elif (.error > 0 or .diverged > 0) then "FAIL"
-                  elif (.provisional_exercised > 0) then "PASS-PENDING-DECISIONS"
+                  elif (.provisional_exercised > 0 or .superseded_exercised > 0 or .unmapped_error_code > 0) then "PASS-PENDING-DECISIONS"
                   else "PASS" end)
       }
     | . + { exit_code: (if .overall == "INCOMPLETE" then 2 elif (.overall == "FAIL" or .overall == "PASS-PENDING-DECISIONS") then 1 else 0 end) }
@@ -758,10 +903,14 @@ regenerate_evidence_summary() {
   for d in "${run_dirs[@]}"; do
     meta="$d/run-metadata.json"
     [ -f "$meta" ] || continue
+    # `// 0` on the newer count keys only — a run folder written by an older
+    # specclaw stays readable in this table instead of rendering as `null`.
     row="$(jq -r '
       "| " + .date + " | " + (.selected_count|tostring) + " | " +
       (.counts.match|tostring) + " | " + (.counts.sanctioned|tostring) + " | " +
-      (.counts.diverged|tostring) + " | " + (.counts.error|tostring) + " | " +
+      (.counts.diverged|tostring) + " | " + ((.counts.representation // 0)|tostring) + " | " +
+      (((.counts.provisional_exercised // 0) + (.counts.superseded_exercised // 0) + (.counts.unmapped_error_code // 0))|tostring) + " | " +
+      (.counts.error|tostring) + " | " +
       (.counts.not_replayable|tostring) + " | " + .overall_verdict + " | `run-" + .run_id + "/` |"
     ' "$meta" 2>/dev/null || true)"
     [ -n "$row" ] && rows="${rows}${row}
@@ -800,24 +949,24 @@ cmd_render() {
   [ -f "$selection" ] || die "selection.json missing in ${run_dir}."
   [ -f "$compare" ] || die "compare.json missing in ${run_dir}."
 
-  local legacy_sha bl_item selected_count
+  local legacy_sha bl_item selected_count manifest_pv manifest_schema this_version
   legacy_sha=$(jq -r '.legacy_commit_sha' "$selection")
   bl_item=$(jq -r '.bl_item // "—"' "$selection")
   selected_count=$(jq '.selected_count' "$selection")
+  manifest_pv=$(jq -r '.manifest_plugin_version // "unknown"' "$selection")
+  manifest_schema=$(jq -r '.manifest_schema // "unknown"' "$selection")
+  this_version="$(plugin_version_of_this_run)"
 
-  local match_n diverge_n error_n nr_n
-  match_n=$(jq '[.results[] | select(.verdict=="MATCH")] | length' "$compare")
-  diverge_n=$(jq '[.results[] | select(.verdict=="DIVERGES")] | length' "$compare")
-  error_n=$(jq '[.results[] | select(.verdict=="ERROR")] | length' "$compare")
-  nr_n=$(jq '[.results[] | select(.verdict=="NOT REPLAYABLE")] | length' "$compare")
-
+  # Only BEHAVIOURAL rows carry a sanction. A representation-only row was the
+  # same business decision expressed differently and was never put to the
+  # auditor at all (CONTRACT.md (j.2)).
   local merged
   if [ -f "$sanction" ]; then
     merged=$(jq --slurpfile s "$sanction" '
       (.results) as $r
       | ($s[0].sanctions // []) as $sc
       | [ $r[] | . as $row
-          | if $row.verdict == "DIVERGES" then
+          | if $row.divergence_class == "behavioural" then
               ( ($sc[] | select(.scenario_id == $row.scenario_id)) // {sanctioned:false,cq_id:null,note:"not reviewed"} ) as $m
               | $row + {sanctioned: $m.sanctioned, cq_id: $m.cq_id, sanction_note: $m.note}
             else $row end
@@ -827,22 +976,36 @@ cmd_render() {
     merged=$(jq '.results' "$compare")
   fi
 
-  local unsanctioned_diverges
-  unsanctioned_diverges=$(jq '[.[] | select(.verdict=="DIVERGES" and (.sanctioned != true))] | length' <<< "$merged")
+  local match_n behav_sanctioned_n behav_unsanctioned_n repr_n unmapped_n
+  local error_n seam_n nr_other_n nr_total_n
+  match_n=$(jq '[.[] | select(.verdict=="MATCH")] | length' <<< "$merged")
+  behav_sanctioned_n=$(jq '[.[] | select(.divergence_class=="behavioural" and .sanctioned==true)] | length' <<< "$merged")
+  behav_unsanctioned_n=$(jq '[.[] | select(.divergence_class=="behavioural" and (.sanctioned != true))] | length' <<< "$merged")
+  repr_n=$(jq '[.[] | select(.divergence_class=="representation")] | length' <<< "$merged")
+  unmapped_n=$(jq '[.[] | select(.divergence_class=="unmapped-error-code")] | length' <<< "$merged")
+  error_n=$(jq '[.[] | select(.verdict=="ERROR")] | length' <<< "$merged")
+  seam_n=$(jq '[.[] | select(.category=="seam-mismatch")] | length' <<< "$merged")
+  nr_other_n=$(jq '[.[] | select(.verdict=="NOT REPLAYABLE" and .category!="seam-mismatch")] | length' <<< "$merged")
+  nr_total_n=$(jq '[.[] | select(.verdict=="NOT REPLAYABLE")] | length' <<< "$merged")
 
-  # Ask, Don't Guess soft-block: any EXERCISED (MATCH/DIVERGES/ERROR — never
-  # NOT REPLAYABLE, which was never actually run against the fixture)
-  # fixture still resting on an open pending question keeps the overall
-  # verdict off PASS, even when every comparison itself came back clean.
-  local exercised_provisional_n
+  # Ask, Don't Guess soft-blocks: any EXERCISED (MATCH/DIVERGES/ERROR — never
+  # NOT REPLAYABLE, which was never actually run against the fixture) fixture
+  # resting on an open pending question, or whose scenario definition changed
+  # after capture, keeps the overall verdict off PASS even when every
+  # comparison itself came back clean.
+  local exercised_provisional_n exercised_superseded_n
   exercised_provisional_n=$(jq '[.[] | select((.verdict=="MATCH" or .verdict=="DIVERGES" or .verdict=="ERROR") and .fixture_status=="PROVISIONAL")] | length' <<< "$merged")
+  exercised_superseded_n=$(jq '[.[] | select((.verdict=="MATCH" or .verdict=="DIVERGES" or .verdict=="ERROR") and .fixture_status=="SUPERSEDED")] | length' <<< "$merged")
 
+  # CONTRACT.md (j.3), strictly in order. FAIL is tested before every
+  # soft-block case: an unsanctioned behavioural divergence is always FAIL and
+  # is never downgraded by a provisional/superseded/unmapped state beside it.
   local overall exit_code
-  if [ "$selected_count" -gt 0 ] && [ "$nr_n" -eq "$selected_count" ]; then
+  if [ "$selected_count" -gt 0 ] && [ "$nr_total_n" -eq "$selected_count" ]; then
     overall="INCOMPLETE"; exit_code=2
-  elif [ "$error_n" -gt 0 ] || [ "$unsanctioned_diverges" -gt 0 ]; then
+  elif [ "$error_n" -gt 0 ] || [ "$behav_unsanctioned_n" -gt 0 ]; then
     overall="FAIL"; exit_code=1
-  elif [ "$exercised_provisional_n" -gt 0 ]; then
+  elif [ "$exercised_provisional_n" -gt 0 ] || [ "$exercised_superseded_n" -gt 0 ] || [ "$unmapped_n" -gt 0 ]; then
     overall="PASS-PENDING-DECISIONS"; exit_code=1
   else
     overall="PASS"; exit_code=0
@@ -850,20 +1013,76 @@ cmd_render() {
 
   local table_rows
   table_rows=$(jq -r '
-    def provsuffix: if .fixture_status == "PROVISIONAL" then "-PROVISIONAL" else "" end;
+    def statussuffix:
+      if .fixture_status == "PROVISIONAL" then "-PROVISIONAL"
+      elif .fixture_status == "SUPERSEDED" then "-SUPERSEDED"
+      else "" end;
     .[] |
     (if .verdict == "DIVERGES" then
-       "| " + .scenario_id + " | DIVERGES" + provsuffix + " | " +
-       (if .sanctioned == true then "SANCTIONED (" + (.cq_id // "?") + ")"
+       "| " + .scenario_id + " | DIVERGES" + statussuffix + " | " +
+       (.divergence_class // "unclassified") + " | " +
+       (if .divergence_class != "behavioural" then "n/a"
+        elif .sanctioned == true then "SANCTIONED (" + (.cq_id // "?") + ")"
         else "UNSANCTIONED" end) + " | " +
        ((.diffs // []) | map(.field_path) | join("; ")) + " |"
      elif .verdict == "ERROR" then
-       "| " + .scenario_id + " | ERROR" + provsuffix + " | — | " + (.detail // "") + " |"
+       "| " + .scenario_id + " | ERROR" + statussuffix + " | — | — | " + (.detail // "") + " |"
      elif .verdict == "NOT REPLAYABLE" then
-       "| " + .scenario_id + " | NOT REPLAYABLE | — | " + (.reason // "") + " |"
+       "| " + .scenario_id + " | NOT REPLAYABLE | " + (.category // "other") + " | — | " + (.reason // "") + " |"
      else
-       "| " + .scenario_id + " | MATCH" + provsuffix + " | — | — |"
+       "| " + .scenario_id + " | MATCH" + statussuffix + " | — | — | — |"
      end)
+  ' <<< "$merged")
+
+  # ── Behavioural detail: the mechanical fact only — field, legacy value,
+  # rebuild value. No agent interpretation is added anywhere in this section;
+  # `tojson` is used so null, false, and "false" stay distinguishable. ──────
+  local behavioural_detail
+  behavioural_detail=$(jq -r '
+    [ .[] | select(.divergence_class=="behavioural")
+      | "- **" + .scenario_id + "** — " +
+        (if .sanctioned == true then "SANCTIONED (" + (.cq_id // "?") + ")" else "**UNSANCTIONED**" end) +
+        "\n" +
+        ([ (.diffs // [])[] | select(.field_class=="behavioural")
+           | "  - `" + .field_path + "` — legacy `" + (.expected|tojson) + "`, rebuild `" + (.actual|tojson) + "`"
+         ] | join("\n"))
+    ]
+    | if length == 0 then "_None — no fixture in this run behaved differently from the legacy application._"
+      else join("\n\n") end
+  ' <<< "$merged")
+
+  # Representation diffs are collected from EVERY row, not only from rows whose
+  # own class is representation — a behavioural row usually carries them too,
+  # and they are evidence either way.
+  local representation_detail
+  representation_detail=$(jq -r '
+    [ .[] | . as $row | (.diffs // [])[] | select(.field_class=="representation")
+      | "- **" + $row.scenario_id + "** `" + .field_path + "` — legacy `" +
+        (.expected|tojson) + "`, rebuild `" + (.actual|tojson) + "`"
+    ]
+    | if length == 0 then "_None — where the rebuild reported an error, it reported it under the same type name and wording._"
+      else join("\n") end
+  ' <<< "$merged")
+
+  local seam_mismatch_list
+  seam_mismatch_list=$(jq -r '
+    [ .[] | select(.category=="seam-mismatch")
+      | "- **" + .scenario_id + "** — " + (.reason // "") +
+        " Remediation: " + (.remediation // "none recorded") ]
+    | if length == 0 then "_None — every replayed fixture was exercised at the layer it was captured at._"
+      else join("\n") end
+  ' <<< "$merged")
+
+  local normalization_warning_list
+  normalization_warning_list=$(jq -r '
+    [ .[] | . as $row | (.normalization_warnings // [])[]
+      | "- **" + $row.scenario_id + "** — `" + .path +
+        "` resolves against the captured fixture but matches nothing in the rebuild'"'"'s actual output" +
+        (if (.suggestions | length) > 0
+         then " (present instead: " + ([.suggestions[] | "`" + . + "`"] | join(", ")) + ")"
+         else "" end) ]
+    | if length == 0 then "_None — every normalization path still resolves against the rebuild'"'"'s output._"
+      else join("\n") end
   ' <<< "$merged")
 
   # ── Open decisions blocking PASS — one line per exercised PROVISIONAL
@@ -871,25 +1090,37 @@ cmd_render() {
   # own provisional_ref, propagated from manifest.json — never re-derived
   # here; compare.json only ever carries the boolean-shaped fixture_status,
   # not the specific id, so this reads selection.json directly). ──────────
+  # Three distinct soft-blocks, all reported together because they all mean the
+  # same thing to a reader: this run is not yet citable as final proof, and a
+  # named human (not another run) is what clears it.
   local open_decisions_blocking_pass
   open_decisions_blocking_pass=$(jq -r --argjson merged "$merged" '
+    def exercised: (.verdict=="MATCH" or .verdict=="DIVERGES" or .verdict=="ERROR");
     . as $sel
-    | [$merged[] | select((.verdict=="MATCH" or .verdict=="DIVERGES" or .verdict=="ERROR") and .fixture_status=="PROVISIONAL")] as $prov
-    | if ($prov | length) == 0 then
-        "_None — no exercised fixture in this run rests on an open pending question._"
-      else
-        [$prov[] | . as $row
+    | [ ($merged[] | select(exercised and .fixture_status=="PROVISIONAL")
+          | . as $row
           | ($sel.fixtures[] | select(.scenario_id == $row.scenario_id) | .provisional_ref // "") as $ref
           | "- **" + $row.scenario_id + "** (" + $row.verdict + "-PROVISIONAL) — blocked by " +
-            (if $ref == "" then "an open pending question (see scenarios.md)" else $ref end)
-        ] | join("\n")
-      end
+            (if $ref == "" then "an open pending question (see scenarios.md)" else $ref end)),
+        ($merged[] | select(exercised and .fixture_status=="SUPERSEDED")
+          | "- **" + .scenario_id + "** (" + .verdict + "-SUPERSEDED) — the scenario definition changed after this fixture was captured, so replaying it proves nothing about the scenario as currently written. Recapture it (/specclaw:bf-baseline --harness, run the harness, then --record)."),
+        ($merged[] | select(.divergence_class=="unmapped-error-code")
+          | "- **" + .scenario_id + "** (unmapped error code) — " +
+            ([ (.diffs // [])[] | select(.field_class=="unmapped-error-code")
+               | "`" + .field_path + "`: legacy " + (.expected|tojson) + ", rebuild " + (.actual|tojson) ] | join("; ")) +
+            " — nobody guessed a code. Map the condition in .specclaw/baseline/error-map.md, or answer the pending question that blocked it.")
+      ]
+    | if length == 0
+      then "_None — no exercised fixture in this run rests on an open pending question, a changed scenario definition, or an unmapped error condition._"
+      else join("\n") end
   ' "$selection")
 
+  # Seam mismatches have their own section above; listing them twice would read
+  # as twice as many unreplayable fixtures as there are.
   local not_replayable_list
   not_replayable_list=$(jq -r '
-    [.[] | select(.verdict=="NOT REPLAYABLE")] |
-    if length == 0 then "_None — every selected fixture was replayable this run._"
+    [.[] | select(.verdict=="NOT REPLAYABLE" and .category!="seam-mismatch")] |
+    if length == 0 then "_None — every selected fixture was replayable this run (seam-layer mismatches, if any, are listed in their own section above)._"
     else map("- **" + .scenario_id + "** (" + (.category // "other") + "): " +
              (.reason // "no reason recorded") + " — Remediation: " +
              (.remediation // "none recorded")) | join("\n")
@@ -958,12 +1189,23 @@ This package contains the generated tests (source), the actual outputs produced 
   content="$(fill_placeholder "$content" "{{bl_item}}" "$bl_item")"
   content="$(fill_placeholder "$content" "{{selected_count}}" "$selected_count")"
   content="$(fill_placeholder "$content" "{{evidence_block}}" "$evidence_block")"
+  content="$(fill_placeholder "$content" "{{plugin_version}}" "$this_version")"
+  content="$(fill_placeholder "$content" "{{manifest_plugin_version}}" "$manifest_pv")"
+  content="$(fill_placeholder "$content" "{{manifest_schema}}" "$manifest_schema")"
   content="$(fill_placeholder "$content" "{{match_count}}" "$match_n")"
-  content="$(fill_placeholder "$content" "{{diverges_count}}" "$diverge_n")"
+  content="$(fill_placeholder "$content" "{{behavioural_sanctioned_count}}" "$behav_sanctioned_n")"
+  content="$(fill_placeholder "$content" "{{behavioural_unsanctioned_count}}" "$behav_unsanctioned_n")"
+  content="$(fill_placeholder "$content" "{{representation_count}}" "$repr_n")"
+  content="$(fill_placeholder "$content" "{{unmapped_error_code_count}}" "$unmapped_n")"
   content="$(fill_placeholder "$content" "{{error_count}}" "$error_n")"
-  content="$(fill_placeholder "$content" "{{not_replayable_count}}" "$nr_n")"
+  content="$(fill_placeholder "$content" "{{seam_mismatch_count}}" "$seam_n")"
+  content="$(fill_placeholder "$content" "{{not_replayable_other_count}}" "$nr_other_n")"
   content="$(fill_placeholder "$content" "{{overall_verdict}}" "$overall")"
   content="$(fill_placeholder "$content" "{{fixture_table_rows}}" "$table_rows")"
+  content="$(fill_placeholder "$content" "{{behavioural_divergence_detail}}" "$behavioural_detail")"
+  content="$(fill_placeholder "$content" "{{representation_detail}}" "$representation_detail")"
+  content="$(fill_placeholder "$content" "{{seam_mismatch_list}}" "$seam_mismatch_list")"
+  content="$(fill_placeholder "$content" "{{normalization_warning_list}}" "$normalization_warning_list")"
   content="$(fill_placeholder "$content" "{{not_replayable_list}}" "$not_replayable_list")"
   content="$(fill_placeholder "$content" "{{open_decisions_blocking_pass}}" "$open_decisions_blocking_pass")"
   content="$(fill_placeholder "$content" "{{dr_uncovered_list}}" "$dr_uncovered_list")"
@@ -992,7 +1234,7 @@ This package contains the generated tests (source), the actual outputs produced 
   fi
   printf '%s\n' "$content" > "$out_path"
 
-  echo "Replay report written to ${out_path}. Overall verdict: ${overall} (MATCH=${match_n} DIVERGES=${diverge_n} ERROR=${error_n} NOT_REPLAYABLE=${nr_n})."
+  echo "Replay report written to ${out_path}. Overall verdict: ${overall} (MATCH=${match_n} BEHAVIOURAL=${behav_unsanctioned_n} unsanctioned/${behav_sanctioned_n} sanctioned REPRESENTATION=${repr_n} UNMAPPED_ERROR_CODE=${unmapped_n} ERROR=${error_n} SEAM_MISMATCH=${seam_n} NOT_REPLAYABLE=${nr_other_n})."
   exit "$exit_code"
 }
 
@@ -1029,7 +1271,7 @@ cmd_finalize() {
   local run_id evidence_dir
   run_id="$(run_id_from_dir "$run_dir")"
   evidence_dir="$(evidence_dir_abs "$specclaw_dir_abs" "$target" "$run_id")"
-  mkdir -p "$evidence_dir/tests" "$evidence_dir/actual-results" "$evidence_dir/expected"
+  mkdir -p "$evidence_dir/tests" "$evidence_dir/actual-results" "$evidence_dir/expected" "$evidence_dir/pipeline"
 
   local report_src
   if [ "$target" = "--all" ]; then
@@ -1055,6 +1297,24 @@ cmd_finalize() {
     done < <(find "$run_dir/actual" -maxdepth 1 -name '*.json' 2>/dev/null)
   fi
 
+  # ── The pipeline record. These are deliberately excluded from tests/ (they
+  # are not test source) but they are the audit trail of how the verdict was
+  # reached: what the mapper decided and at which seam layer, what compare
+  # computed field by field, what the auditor claimed, what sanction-check
+  # independently confirmed, and the raw build/test output. Dropping them —
+  # as this command used to — left a report asserting a verdict with no way
+  # for a reviewer to check the working. ──────────────────────────────────
+  local pf
+  for pf in run-config.json selection.json mapping.json compare.json \
+            sanction.json sanction-verified.json build.log test.log; do
+    # An `if`, not `[ ] && cp` — under `set -e` a false test on the LAST
+    # iteration makes the whole loop return non-zero and aborts finalize.
+    if [ -f "$run_dir/$pf" ]; then cp "$run_dir/$pf" "$evidence_dir/pipeline/$pf"; fi
+  done
+  # `sanction.json`/`sanction-verified.json` are genuinely absent on a run with
+  # no behavioural divergence, and `build.log` on a stack with no build step —
+  # so a missing file here is a normal state, not a warning.
+
   local selection="$run_dir/selection.json"
   if [ -f "$selection" ]; then
     jq '{ fixtures: [ .fixtures[] | {scenario_id, content_hash, fixture_path} ] }' "$selection" \
@@ -1064,10 +1324,12 @@ cmd_finalize() {
     echo '{ "fixtures": [] }' > "$evidence_dir/expected/manifest-excerpt.json"
   fi
 
-  local legacy_sha bl_item selected_count
+  local legacy_sha bl_item selected_count manifest_pv manifest_schema
   legacy_sha=$(jq -r '.legacy_commit_sha // "unknown"' "$selection" 2>/dev/null || echo "unknown")
   bl_item=$(jq -c '.bl_item // null' "$selection" 2>/dev/null || echo null)
   selected_count=$(jq -r '.selected_count // 0' "$selection" 2>/dev/null || echo 0)
+  manifest_pv=$(jq -r '.manifest_plugin_version // "unknown"' "$selection" 2>/dev/null || echo "unknown")
+  manifest_schema=$(jq -c '.manifest_schema // null' "$selection" 2>/dev/null || echo null)
 
   local new_repo_sha plugin_version stack
   new_repo_sha="$(git -C "$project_root" rev-parse --short HEAD 2>/dev/null || echo "unknown")"
@@ -1086,6 +1348,8 @@ cmd_finalize() {
     --arg legacy_sha "$legacy_sha" \
     --arg new_repo_sha "$new_repo_sha" \
     --arg plugin_version "$plugin_version" \
+    --arg manifest_pv "$manifest_pv" \
+    --argjson manifest_schema "$manifest_schema" \
     --arg stack "$stack" \
     --argjson selected_count "$selected_count" \
     --argjson counts "$counts" \
@@ -1097,6 +1361,8 @@ cmd_finalize() {
       legacy_commit_sha: $legacy_sha,
       new_repo_commit_sha: $new_repo_sha,
       plugin_version: $plugin_version,
+      manifest_plugin_version: $manifest_pv,
+      manifest_schema: $manifest_schema,
       stack: $stack,
       selected_count: $selected_count,
       counts: ($counts | del(.overall, .exit_code)),
@@ -1117,7 +1383,7 @@ cmd_finalize() {
   [ "$target" != "--all" ] && regenerate_evidence_summary "$specclaw_dir_abs" "$target"
 
   rm -rf "$run_dir"
-  echo "Evidence retained at ${evidence_dir} (report.md, run-metadata.json, tests/, actual-results/, expected/). Working run directory removed."
+  echo "Evidence retained at ${evidence_dir} (report.md, run-metadata.json, tests/, actual-results/, expected/, pipeline/). Working run directory removed."
 }
 
 # ─── Subcommand: prune-evidence ──────────────────────────────────────────────

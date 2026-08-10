@@ -15,6 +15,9 @@
 # stack's formatting convention; see CONTRACT.md).
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PLUGIN_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+
 # ─── Help ─────────────────────────────────────────────────────────────────────
 
 usage() {
@@ -51,12 +54,28 @@ Subcommands:
                    .specclaw/baseline/fixtures/ for a "<scenario_id>.json"
                    file per scenario, hashes each one found (sha256),
                    extracts its capture metadata (captured_at, anchor_date,
-                   legacy_commit_sha, runtime_version, normalized_fields),
+                   legacy_commit_sha, runtime_version, normalized_fields,
+                   outcome/error_code/threw, seam_layer),
                    cross-references it against scenarios.md's seam/rule/
                    backlog-item fields, archives any prior manifest.json,
                    and writes .specclaw/baseline/manifest.json. Reports
                    scenarios with no fixture yet — this is not a failure,
                    capturing is an iterative, human-run process.
+
+                   VALIDATES, and refuses to write a manifest on any
+                   failure (nothing is archived either — the prior
+                   manifest survives an invalid run intact):
+                     - every scenario declares a valid seam_layer
+                       (pure-function|service|http|persistence)
+                     - every normalized_fields path resolves against that
+                       fixture's own output; a path matching zero fields
+                       names the near-miss paths that do exist
+                     - every fixture output carries outcome/error_code/threw
+                       (CONTRACT.md (b.1))
+                     - a REJECTED fixture with a null error_code is only
+                       legal when its scenario is marked PROVISIONAL
+                     - every non-null error_code has a matching heading in
+                       .specclaw/baseline/error-map.md (CONTRACT.md (h))
 
 Options:
   -h, --help    Show this help message
@@ -79,6 +98,13 @@ json_escape() {
   s="${s//$'\r'/\\r}"
   s="${s//$'\t'/\\t}"
   printf '%s' "$s"
+}
+
+# A JSON string literal, or a bare null for an absent value — so a fixture that
+# recorded no outcome/error_code reads back as null rather than as the empty
+# string, which a downstream reader would have to guess about.
+json_str_or_null() {
+  if [ -z "$1" ]; then printf 'null'; else printf '"%s"' "$(json_escape "$1")"; fi
 }
 
 json_array_from_lines() {
@@ -171,6 +197,35 @@ scenario_block_hash() {
 require_jq() {
   command -v jq >/dev/null 2>&1 \
     || die "jq is required by specclaw-bf-baseline's record subcommand (structural fixture JSON parsing) but was not found on PATH."
+}
+
+# The canonical field-path language and the error-outcome contract are defined
+# ONCE, in lib/gm-paths.jq, and prepended to this script's jq programs —
+# specclaw-bf-replay's compare loads the exact same file. A capture-time
+# validator that disagreed with the compare-time matcher about what a path
+# means would validate a fixture green and then normalize nothing on every
+# replay, which is precisely the failure mode this shared load prevents.
+GM_PATHS_JQ=""
+load_gm_paths() {
+  local lib="$PLUGIN_ROOT/lib/gm-paths.jq"
+  [ -f "$lib" ] || die "Shared path-resolution library missing: ${lib}. This ships with the plugin; a missing copy means a broken install, and record will not fall back to a local reimplementation."
+  GM_PATHS_JQ="$(cat "$lib")"
+}
+
+# ─── Seam layers (templates/CONTRACT.md (i)) ────────────────────────────────
+# A closed enum, declared per scenario and copied — never re-derived from the
+# seam's prose description, and never defaulted. It is what lets
+# specclaw-bf-replay enforce that a replay test exercises the rebuild at the
+# layer the fixture was actually captured at.
+
+SEAM_LAYERS=(pure-function service http persistence)
+
+seam_layer_valid() {
+  local candidate="$1" l
+  for l in "${SEAM_LAYERS[@]}"; do
+    [ "$candidate" = "$l" ] && return 0
+  done
+  return 1
 }
 
 fixture_field() {
@@ -303,10 +358,15 @@ cmd_record() {
   local scenarios_file="$baseline_dir/scenarios.md"
   [ -f "$scenarios_file" ] || die "No .specclaw/baseline/scenarios.md found — run /specclaw:bf-baseline (design mode) first."
   require_jq
+  load_gm_paths
 
   local fixtures_dir="$baseline_dir/fixtures"
   local manifest_file="$baseline_dir/manifest.json"
   local archive_dir="$baseline_dir/archive"
+  local error_map="$baseline_dir/error-map.md"
+
+  local plugin_version
+  plugin_version="$(jq -r '.version // "unknown"' "$PLUGIN_ROOT/.claude-plugin/plugin.json" 2>/dev/null || echo "unknown")"
 
   # Prior manifest's per-scenario content hash, read BEFORE archiving —
   # the only way to detect SUPERSEDED (see scenario_block_hash above).
@@ -331,18 +391,36 @@ cmd_record() {
   [ "${#block_files[@]}" -gt 0 ] || { rm -rf "$workdir"; die "no GM-NNN scenarios found in .specclaw/baseline/scenarios.md — nothing to record against."; }
 
   local fixtures_json="" missing_json="" ffirst=true mfirst=true
-  local f id seam rules backlog_item fixture_path content_hash scenario_hash status
+  local f id seam seam_layer rules backlog_item fixture_path content_hash scenario_hash status
   local captured_at anchor_date commit_sha runtime_version normalized_fields
+  local outcome error_code threw resolution_json
   local captured_count=0 missing_count=0
   local verifiable_count=0 provisional_count=0 superseded_count=0
+
+  # Every validation failure across every scenario is collected here and
+  # reported together at the end — a human fixing captures wants the whole
+  # list in one pass, not one error per re-run. Any entry means no manifest is
+  # written and no prior manifest is archived.
+  local -a problems=()
 
   for f in "${block_files[@]}"; do
     id="$(scenario_block_id "$f")"
     seam="$(scenario_block_field "$f" "Seam")"
+    seam_layer="$(scenario_block_field "$f" "Seam layer")"
     rules="$(scenario_block_field "$f" "Business rules pinned")"
     backlog_item="$(scenario_block_field "$f" "Verifies backlog item")"
     fixture_path="$fixtures_dir/${id}.json"
     scenario_hash="sha256:$(scenario_block_hash "$f")"
+
+    # Per CONTRACT.md (i): declared, never derived, never defaulted. Checked
+    # for every scenario, captured or not — a scenario with no layer cannot
+    # produce a manifest entry that carries one, and silently defaulting it is
+    # exactly how a service-layer fixture ends up replayed through HTTP.
+    if [ -z "$seam_layer" ]; then
+      problems+=("${id}: scenarios.md declares no '- **Seam layer:**' field. Add one of: ${SEAM_LAYERS[*]} — then re-run /specclaw:bf-baseline (design mode) if the whole document predates this field.")
+    elif ! seam_layer_valid "$seam_layer"; then
+      problems+=("${id}: seam layer '${seam_layer}' is not one of: ${SEAM_LAYERS[*]}.")
+    fi
 
     # Status per templates/CONTRACT.md (c') — computed mechanically from
     # this scenario's own text, same discipline as sanction-check's literal
@@ -368,14 +446,104 @@ cmd_record() {
         SUPERSEDED) superseded_count=$((superseded_count + 1)) ;;
       esac
       content_hash="sha256:$(sha256sum "$fixture_path" 2>/dev/null | awk '{print $1}')"
+      outcome=""; error_code=""; threw="null"; resolution_json="[]"
       if jq -e . "$fixture_path" >/dev/null 2>&1; then
         captured_at="$(fixture_field "$fixture_path" "captured_at")"
         anchor_date="$(fixture_field "$fixture_path" "anchor_date")"
         commit_sha="$(fixture_field "$fixture_path" "legacy_commit_sha")"
         runtime_version="$(fixture_field "$fixture_path" "runtime_version")"
         normalized_fields="$(fixture_array_field "$fixture_path" "normalized_fields")"
+
+        # ── One structural pass over this fixture's own output, via the same
+        # shared library specclaw-bf-replay compare uses (CONTRACT.md (g),
+        # (b.1), (h)). Everything below is read off that one result. ───────
+        # The library and the program must be ONE jq argument (they are
+        # concatenated below, no space) — passed as two, jq reads the second
+        # as a filename and every check silently reads back null.
+        local facts
+        if ! facts="$(jq -n \
+              --argjson out "$(jq -c '.output // null' "$fixture_path")" \
+              --argjson norm "$normalized_fields" \
+              "$GM_PATHS_JQ"'
+          {
+            has_outcome:    gm_has_leaf($out; "outcome"),
+            has_threw:      gm_has_leaf($out; "threw"),
+            has_error_code: gm_has_leaf($out; "error_code"),
+            summary:        gm_outcome_summary($out),
+            codes:          gm_declared_codes($out),
+            unmapped:       gm_unmapped_rejections($out),
+            resolution:     gm_resolution_report($norm; $out)
+          }' 2>&1)"; then
+          problems+=("${id}: fixture output could not be analysed — ${facts}")
+          facts='{}'
+        fi
+
+        resolution_json="$(jq -c '.resolution // []' <<< "$facts")"
+        outcome="$(jq -r '.summary.outcome // "" | tostring' <<< "$facts")"
+        error_code="$(jq -r '.summary.error_code // "" | tostring' <<< "$facts")"
+        # Not `// null` — `threw` is legitimately false, and `false // null`
+        # would record every non-throwing capture as "nothing recorded".
+        threw="$(jq -c 'if has("summary") then .summary.threw else null end' <<< "$facts")"
+
+        # (1) Dead normalization paths. A path matching zero fields normalizes
+        # nothing, so the field it names diverges on every single replay —
+        # which is how a rebuild with no defects produces a report full of
+        # divergences. Never silently accepted.
+        local dead
+        while IFS= read -r dead; do
+          [ -z "$dead" ] && continue
+          problems+=("${id}: normalized_fields path ${dead}")
+        done < <(jq -r '
+          .resolution[]? | select(.matches == 0)
+          | "\"" + .path + "\" matched nothing in the captured output"
+            + (if (.suggestions | length) > 0
+               then " — did you mean " + ([.suggestions[] | "\"" + . + "\""] | join(" or ")) + "?"
+               else " (no similarly-named path exists either — check the fixture actually captured this field)" end)
+        ' <<< "$facts" 2>/dev/null | tr -d '\r' || true)
+
+        # (2) The error-outcome contract. Required on every fixture: a seam
+        # either completed or it did not, and recording that as a business
+        # fact is what makes error comparison survive a rebuild onto another
+        # framework (CONTRACT.md (b.1)).
+        local -a missing_error_fields=()
+        [ "$(jq -r '.has_outcome' <<< "$facts")" = "true" ]    || missing_error_fields+=("outcome")
+        [ "$(jq -r '.has_threw' <<< "$facts")" = "true" ]      || missing_error_fields+=("threw")
+        [ "$(jq -r '.has_error_code' <<< "$facts")" = "true" ] || missing_error_fields+=("error_code")
+        if [ "${#missing_error_fields[@]}" -gt 0 ]; then
+          problems+=("${id}: fixture output is missing ${missing_error_fields[*]} (CONTRACT.md (b.1)). This fixture predates the semantic error contract — re-run /specclaw:bf-baseline --harness, re-capture, then --record.")
+        fi
+
+        # (3) Ask, don't guess: a recorded rejection with no semantic code is
+        # legal only when an agent genuinely raised a pending question about
+        # it, which is exactly what the scenario's PROVISIONAL marker records.
+        if [ "$status" != "PROVISIONAL" ]; then
+          local upath
+          while IFS= read -r upath; do
+            [ -z "$upath" ] && continue
+            problems+=("${id}: output.${upath} is null while its outcome is REJECTED, but the scenario is not marked PROVISIONAL. Either map the condition to a code in .specclaw/baseline/error-map.md, or raise a pending question and mark the scenario ⚠ PROVISIONAL — never leave a rejection unexplained.")
+          done < <(jq -r '.unmapped[]?' <<< "$facts" 2>/dev/null | tr -d '\r' || true)
+        fi
+
+        # (4) Every code asserted by a fixture must exist in the project's own
+        # error-map.md, verified by literal heading grep — the same discipline
+        # sanction-check uses on a CQ citation, and the reason the plugin
+        # itself never needs to know a single code.
+        # (`tr -d '\r'` on every jq-to-read pipe: jq's Windows build emits
+        # CRLF, and a trailing \r silently breaks both the regex below and the
+        # grep. Same guard specclaw-bf-rebuild-collect already applies.)
+        local code
+        while IFS= read -r code; do
+          [ -z "$code" ] && continue
+          if ! [[ "$code" =~ ^[A-Z][A-Z0-9_]*$ ]]; then
+            problems+=("${id}: error_code '${code}' is not SCREAMING_SNAKE (CONTRACT.md (b.1)).")
+          elif [ ! -f "$error_map" ]; then
+            problems+=("${id}: error_code '${code}' is asserted but .specclaw/baseline/error-map.md does not exist. That document is this project's own error vocabulary — /specclaw:bf-baseline --harness creates it.")
+          elif ! grep -qE "^### ${code}([[:space:]]|$)" "$error_map"; then
+            problems+=("${id}: error_code '${code}' has no '### ${code}' heading in .specclaw/baseline/error-map.md — an unmapped code is a guess, not a decision.")
+          fi
+        done < <(jq -r '.codes[]?' <<< "$facts" 2>/dev/null | tr -d '\r' || true)
       else
-        warn "${id}: fixture at .specclaw/baseline/fixtures/${id}.json is not valid JSON — recorded as captured (hash only); its metadata fields will be empty until the fixture-writer's output is fixed."
+        problems+=("${id}: fixture at .specclaw/baseline/fixtures/${id}.json is not valid JSON — it cannot be validated or compared. Fix the fixture-writer's output and re-capture.")
         captured_at=""; anchor_date=""; commit_sha=""; runtime_version=""; normalized_fields="[]"
       fi
 
@@ -384,6 +552,7 @@ cmd_record() {
     {
       \"scenario_id\": \"$(json_escape "$id")\",
       \"seam\": \"$(json_escape "$seam")\",
+      \"seam_layer\": \"$(json_escape "$seam_layer")\",
       \"business_rules_pinned\": \"$(json_escape "$rules")\",
       \"verifies_backlog_item\": \"$(json_escape "$backlog_item")\",
       \"fixture_path\": \"$(json_escape ".specclaw/baseline/fixtures/${id}.json")\",
@@ -395,7 +564,11 @@ cmd_record() {
       \"anchor_date\": \"$(json_escape "$anchor_date")\",
       \"legacy_commit_sha\": \"$(json_escape "$commit_sha")\",
       \"runtime_version\": \"$(json_escape "$runtime_version")\",
-      \"normalized_fields\": ${normalized_fields}
+      \"outcome\": $(json_str_or_null "$outcome"),
+      \"error_code\": $(json_str_or_null "$error_code"),
+      \"threw\": ${threw},
+      \"normalized_fields\": ${normalized_fields},
+      \"normalized_fields_resolved\": ${resolution_json}
     }"
     else
       missing_count=$((missing_count + 1))
@@ -404,6 +577,17 @@ cmd_record() {
     fi
   done
   rm -rf "$workdir"
+
+  # Refuse to write a manifest, and refuse to archive the prior one, on any
+  # validation failure. A half-valid manifest is worse than none: every
+  # downstream reader treats it as sealed evidence, and the run that produced
+  # it has already thrown away the manifest that was actually correct.
+  if [ "${#problems[@]}" -gt 0 ]; then
+    local joined
+    joined="$(printf '  - %s\n' "${problems[@]}")"
+    die "Baseline validation failed — ${#problems[@]} problem(s). manifest.json was NOT written and the existing one was NOT archived:
+${joined}"
+  fi
 
   if [ -f "$manifest_file" ]; then
     mkdir -p "$archive_dir"
@@ -414,8 +598,11 @@ cmd_record() {
   local output
   output=$(cat <<ENDJSON
 {
+  "manifest_schema": 2,
+  "plugin_version": "$(json_escape "$plugin_version")",
   "project_root": "$(json_escape "$project_root")",
   "generated": "$(date +%Y-%m-%d)",
+  "generated_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
   "total_scenarios": ${total},
   "fixtures": [${fixtures_json}
   ],
