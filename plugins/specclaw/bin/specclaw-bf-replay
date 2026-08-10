@@ -458,19 +458,24 @@ cmd_compare() {
       continue
     fi
 
-    local fixture_path normalized_fields
+    local fixture_path normalized_fields fixture_status
     fixture_path="$(jq -r --arg sid "$sid" '.fixtures[] | select(.scenario_id==$sid) | .fixture_path' "$selection")"
     normalized_fields="$(jq -c --arg sid "$sid" '.fixtures[] | select(.scenario_id==$sid) | .normalized_fields' "$selection")"
+    # Per templates/CONTRACT.md (c'): flows through from manifest.json's own
+    # fixture-entry status field, via selection.json, untouched by resolve.
+    # Absent on a manifest recorded before this field existed -> VERIFIABLE,
+    # never a stack- or plugin-version-specific special case.
+    fixture_status="$(jq -r --arg sid "$sid" '.fixtures[] | select(.scenario_id==$sid) | .status // "VERIFIABLE"' "$selection")"
 
     local full_fixture="${project_root}/${fixture_path}"
     local actual_file="${run_dir}/actual/${sid}.json"
 
     if [ ! -f "$actual_file" ]; then
-      results="$(jq --arg sid "$sid" '. + [{scenario_id: $sid, verdict: "ERROR", detail: "No actual-result file written — the generated test crashed or did not run to completion."}]' <<< "$results")"
+      results="$(jq --arg sid "$sid" --arg status "$fixture_status" '. + [{scenario_id: $sid, verdict: "ERROR", detail: "No actual-result file written — the generated test crashed or did not run to completion.", fixture_status: $status}]' <<< "$results")"
       continue
     fi
     if ! jq -e . "$actual_file" >/dev/null 2>&1; then
-      results="$(jq --arg sid "$sid" '. + [{scenario_id: $sid, verdict: "ERROR", detail: "actual-result file is not valid JSON."}]' <<< "$results")"
+      results="$(jq --arg sid "$sid" --arg status "$fixture_status" '. + [{scenario_id: $sid, verdict: "ERROR", detail: "actual-result file is not valid JSON.", fixture_status: $status}]' <<< "$results")"
       continue
     fi
 
@@ -480,20 +485,21 @@ cmd_compare() {
     diffs="$(compute_diffs "$expected_output" "$actual_output" "$normalized_fields")"
 
     if [ "$(jq 'length' <<< "$diffs")" = "0" ]; then
-      results="$(jq --arg sid "$sid" '. + [{scenario_id: $sid, verdict: "MATCH"}]' <<< "$results")"
+      results="$(jq --arg sid "$sid" --arg status "$fixture_status" '. + [{scenario_id: $sid, verdict: "MATCH", fixture_status: $status}]' <<< "$results")"
     else
-      results="$(jq --arg sid "$sid" --argjson d "$diffs" '. + [{scenario_id: $sid, verdict: "DIVERGES", diffs: $d}]' <<< "$results")"
+      results="$(jq --arg sid "$sid" --argjson d "$diffs" --arg status "$fixture_status" '. + [{scenario_id: $sid, verdict: "DIVERGES", diffs: $d, fixture_status: $status}]' <<< "$results")"
     fi
   done < <(jq -c '.[]' "$mapping")
 
   jq -n --argjson results "$results" '{results: $results}' > "$run_dir/compare.json"
 
-  local match_n diverge_n error_n nr_n
+  local match_n diverge_n error_n nr_n prov_n
   match_n=$(jq '[.results[] | select(.verdict=="MATCH")] | length' "$run_dir/compare.json")
   diverge_n=$(jq '[.results[] | select(.verdict=="DIVERGES")] | length' "$run_dir/compare.json")
   error_n=$(jq '[.results[] | select(.verdict=="ERROR")] | length' "$run_dir/compare.json")
   nr_n=$(jq '[.results[] | select(.verdict=="NOT REPLAYABLE")] | length' "$run_dir/compare.json")
-  echo "Compare complete: MATCH=${match_n} DIVERGES=${diverge_n} ERROR=${error_n} NOT_REPLAYABLE=${nr_n}"
+  prov_n=$(jq '[.results[] | select(.fixture_status=="PROVISIONAL")] | length' "$run_dir/compare.json")
+  echo "Compare complete: MATCH=${match_n} DIVERGES=${diverge_n} ERROR=${error_n} NOT_REPLAYABLE=${nr_n} (${prov_n} exercised fixture(s) PROVISIONAL — see render's overall verdict)"
 }
 
 # ─── Subcommand: sanction-check ──────────────────────────────────────────────
@@ -659,14 +665,16 @@ compute_verdict_summary() {
       sanctioned: ([$merged[] | select(.verdict=="DIVERGES" and .sanctioned==true)] | length),
       diverged: ([$merged[] | select(.verdict=="DIVERGES" and (.sanctioned!=true))] | length),
       error: ([$merged[] | select(.verdict=="ERROR")] | length),
-      not_replayable: ([$merged[] | select(.verdict=="NOT REPLAYABLE")] | length)
+      not_replayable: ([$merged[] | select(.verdict=="NOT REPLAYABLE")] | length),
+      provisional_exercised: ([$merged[] | select((.verdict=="MATCH" or .verdict=="DIVERGES" or .verdict=="ERROR") and .fixture_status=="PROVISIONAL")] | length)
     }
     | . + {
         overall: (if ($selected > 0 and .not_replayable == $selected) then "INCOMPLETE"
                   elif (.error > 0 or .diverged > 0) then "FAIL"
+                  elif (.provisional_exercised > 0) then "PASS-PENDING-DECISIONS"
                   else "PASS" end)
       }
-    | . + { exit_code: (if .overall == "INCOMPLETE" then 2 elif .overall == "FAIL" then 1 else 0 end) }
+    | . + { exit_code: (if .overall == "INCOMPLETE" then 2 elif (.overall == "FAIL" or .overall == "PASS-PENDING-DECISIONS") then 1 else 0 end) }
   '
 }
 
@@ -793,31 +801,61 @@ cmd_render() {
   local unsanctioned_diverges
   unsanctioned_diverges=$(jq '[.[] | select(.verdict=="DIVERGES" and (.sanctioned != true))] | length' <<< "$merged")
 
+  # Ask, Don't Guess soft-block: any EXERCISED (MATCH/DIVERGES/ERROR — never
+  # NOT REPLAYABLE, which was never actually run against the fixture)
+  # fixture still resting on an open pending question keeps the overall
+  # verdict off PASS, even when every comparison itself came back clean.
+  local exercised_provisional_n
+  exercised_provisional_n=$(jq '[.[] | select((.verdict=="MATCH" or .verdict=="DIVERGES" or .verdict=="ERROR") and .fixture_status=="PROVISIONAL")] | length' <<< "$merged")
+
   local overall exit_code
   if [ "$selected_count" -gt 0 ] && [ "$nr_n" -eq "$selected_count" ]; then
     overall="INCOMPLETE"; exit_code=2
   elif [ "$error_n" -gt 0 ] || [ "$unsanctioned_diverges" -gt 0 ]; then
     overall="FAIL"; exit_code=1
+  elif [ "$exercised_provisional_n" -gt 0 ]; then
+    overall="PASS-PENDING-DECISIONS"; exit_code=1
   else
     overall="PASS"; exit_code=0
   fi
 
   local table_rows
   table_rows=$(jq -r '
+    def provsuffix: if .fixture_status == "PROVISIONAL" then "-PROVISIONAL" else "" end;
     .[] |
     (if .verdict == "DIVERGES" then
-       "| " + .scenario_id + " | DIVERGES | " +
+       "| " + .scenario_id + " | DIVERGES" + provsuffix + " | " +
        (if .sanctioned == true then "SANCTIONED (" + (.cq_id // "?") + ")"
         else "UNSANCTIONED" end) + " | " +
        ((.diffs // []) | map(.field_path) | join("; ")) + " |"
      elif .verdict == "ERROR" then
-       "| " + .scenario_id + " | ERROR | — | " + (.detail // "") + " |"
+       "| " + .scenario_id + " | ERROR" + provsuffix + " | — | " + (.detail // "") + " |"
      elif .verdict == "NOT REPLAYABLE" then
        "| " + .scenario_id + " | NOT REPLAYABLE | — | " + (.reason // "") + " |"
      else
-       "| " + .scenario_id + " | MATCH | — | — |"
+       "| " + .scenario_id + " | MATCH" + provsuffix + " | — | — |"
      end)
   ' <<< "$merged")
+
+  # ── Open decisions blocking PASS — one line per exercised PROVISIONAL
+  # fixture, naming the PQ/CQ id(s) that block it (from selection.json's
+  # own provisional_ref, propagated from manifest.json — never re-derived
+  # here; compare.json only ever carries the boolean-shaped fixture_status,
+  # not the specific id, so this reads selection.json directly). ──────────
+  local open_decisions_blocking_pass
+  open_decisions_blocking_pass=$(jq -r --argjson merged "$merged" '
+    . as $sel
+    | [$merged[] | select((.verdict=="MATCH" or .verdict=="DIVERGES" or .verdict=="ERROR") and .fixture_status=="PROVISIONAL")] as $prov
+    | if ($prov | length) == 0 then
+        "_None — no exercised fixture in this run rests on an open pending question._"
+      else
+        [$prov[] | . as $row
+          | ($sel.fixtures[] | select(.scenario_id == $row.scenario_id) | .provisional_ref // "") as $ref
+          | "- **" + $row.scenario_id + "** (" + $row.verdict + "-PROVISIONAL) — blocked by " +
+            (if $ref == "" then "an open pending question (see scenarios.md)" else $ref end)
+        ] | join("\n")
+      end
+  ' "$selection")
 
   local not_replayable_list
   not_replayable_list=$(jq -r '
@@ -898,6 +936,7 @@ This package contains the generated tests (source), the actual outputs produced 
   content="$(fill_placeholder "$content" "{{overall_verdict}}" "$overall")"
   content="$(fill_placeholder "$content" "{{fixture_table_rows}}" "$table_rows")"
   content="$(fill_placeholder "$content" "{{not_replayable_list}}" "$not_replayable_list")"
+  content="$(fill_placeholder "$content" "{{open_decisions_blocking_pass}}" "$open_decisions_blocking_pass")"
   content="$(fill_placeholder "$content" "{{dr_uncovered_list}}" "$dr_uncovered_list")"
 
   local out_path

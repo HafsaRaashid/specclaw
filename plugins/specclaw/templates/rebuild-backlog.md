@@ -70,6 +70,19 @@
   e.g. a line reading "⟲ revised per CQ-005, 2026-08-01" placed right after
   the heading.
 
+  PROVISIONAL marker: an item touched by an open pending question — either
+  a direct DR-NNN/BL-NNN join to a CQ-NNN promoted from a PQ-NNN (bash-
+  computed), or a prose-level match the planner agent found and directed
+  via a PROVISIONAL: line (agent-judged, mechanically re-verified by bash
+  the same way an UNVERIFIABLE: directive is) — carries its own line right
+  after the heading: "⚠ PROVISIONAL — pending PQ-NNN/CQ-NNN (proposed
+  default: <x>)". This is soft-block: the item is still fully drafted,
+  sequenced, and gated/verified exactly as any other; the marker rides
+  alongside Gate/Verification, not instead of them, and both this line and
+  Gate/Verification are recomputed from scratch on every run — it clears
+  automatically once decisions.md answers the underlying question, no
+  manual cleanup.
+
   BL-NNN IDs are permanent identifiers, not position — assigned once in
   dependency order on the first-ever run and never renumbered afterward.
   A later /specclaw:bf-rebuild-plan --refresh may append a genuinely new item
