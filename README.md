@@ -89,6 +89,27 @@ When initialized in a project, SpecClaw creates:
         └── verify-report.md # Verification results
 ```
 
+Rebuilding an existing app additionally uses `.specclaw/analysis/` (the
+brownfield analysis documents), `.specclaw/baseline/` (golden-master seams,
+scenarios, fixtures, manifest) and — only when the UI fidelity policy is
+`FAITHFUL` or `THEME-ONLY` — `.specclaw/ui/`:
+
+```
+.specclaw/ui/
+├── ui-inventory.md          # One section per screen, permanent SCR-### ids
+├── design-tokens.json       # Colour/typography/spacing under permanent TK- ids
+├── screenshot-checklist.md  # The human capture work order
+├── screens/                 # Human-captured PNGs — never written or deleted
+│                            #   by any specclaw command
+├── ui-manifest.json         # sha256 + capture metadata per screenshot
+└── archive/                 # Prior versions of the three design documents
+```
+
+`SCR-###` (screens) and `TK-###` (design-token groups) join the permanent ID
+families — `DR-` rules, `GM-` scenarios, `BL-` backlog items,
+`CQ-`/`SQ-`/`UQ-` clarify questions, `PQ-` pending questions — never
+renumbered once assigned.
+
 ## Commands
 
 All commands are namespaced under `/specclaw:`. Most are model-invokable — Claude will route conversationally (e.g. "i have a proposal" fires `/specclaw:propose`). Auth setup commands (`/specclaw:auth-azdo`, `/specclaw:auth-jira`) are explicit-only because they handle credentials.
@@ -113,9 +134,10 @@ All commands are namespaced under `/specclaw:`. Most are model-invokable — Cla
 | `/specclaw:bf-analyze [path]` | Analyze an existing/legacy codebase and write `.specclaw/analysis/codebase-report.md` (read-only) |
 | `/specclaw:bf-architecture [path]` | Write a C4-model architecture view (L1→L4, Mermaid) of an existing/legacy codebase to `.specclaw/analysis/architecture.md` (read-only) |
 | `/specclaw:bf-domain [path]` | Write domain/functional documentation (entities, rules, capabilities, workflows, UI inventory) of an existing/legacy codebase to `.specclaw/analysis/domain-model.md` + `.specclaw/analysis/functional-spec.md` (read-only) |
-| `/specclaw:bf-rebuild-plan` | Read the four `.specclaw/analysis/*.md` documents and write an ordered, dependency-sequenced `.specclaw/analysis/rebuild-backlog.md` of individually-proposable features (read-only, calls no lifecycle command); marks an item `⚠ PROVISIONAL` when it rests on a still-open pending question |
+| `/specclaw:bf-rebuild-plan` | Read the four `.specclaw/analysis/*.md` documents and write an ordered, dependency-sequenced `.specclaw/analysis/rebuild-backlog.md` of individually-proposable features (read-only, calls no lifecycle command); marks an item `⚠ PROVISIONAL` when it rests on a still-open pending question. When the UI fidelity policy (`SQ-013`) is decided `FAITHFUL`/`THEME-ONLY`, also attaches each screen-bearing item's `SCR-###`/`TK-` grounding and a bash-computed UI Screen Coverage section — or, if the `/specclaw:bf-ui` artifacts are absent, one loud warning naming them and those items held at `OPEN QUESTIONS`, never a silent degradation |
 | `/specclaw:bf-clarify [--resolve]` | Turn the inferences/hedges/gaps/conflicts scattered through `.specclaw/analysis/*.md` into a numbered, classified question set (`clarifications.md`); `--resolve` promotes answered questions into a pinnable decision record (`decisions.md`) (read-only). Also ingests every OPEN entry in `pending-questions.md` — the ask-don't-guess buffer any analysis agent appends to instead of silently assuming an answer — typing each into a real `CQ-NNN` and rewriting its status to `PROMOTED → CQ-NNN` in place |
 | `/specclaw:bf-baseline [--harness\|--record]` | Design the golden-master harness that proves a rebuild matches the legacy app: seam ranking + determinism audit + scenarios (default), generate the runnable capture project (`--harness`), or validate a human-run capture into a manifest (`--record`) (read-only, never runs the legacy app or captures a fixture itself; dynamic multi-stack — the legacy repo's stack is identified per run, works with any language/framework, no fixed stack list). `--record` computes each fixture's `status` — `VERIFIABLE`, `PROVISIONAL` (blocked by an open pending question), or `SUPERSEDED` (the scenario's own definition changed since capture) |
+| `/specclaw:bf-ui [--record\|--checklist <change>]` | **Optional** UI-fidelity workstream. Default mode extracts the legacy app's UI from its source: `.specclaw/ui/ui-inventory.md` (one section per screen with a permanent `SCR-###` id — layout regions described neutrally, widget-by-widget composition cross-referenced against `domain-model.md`, navigation edges, evidenced states, every claim cited `file:line`), `design-tokens.json` (stack-neutral colour/typography/spacing tokens under permanent `TK-` group ids; an ungroundable token is omitted and raised as a pending question, never guessed), and `screenshot-checklist.md` — a **human** work order. `--record` hashes the human-captured PNGs under `.specclaw/ui/screens/` into `ui-manifest.json` (sha256 + capture metadata per `CONTRACT.md` (f)); missing captures are a normal reported state. `--checklist <change>` runs in the new repo and generates that change's `ui-review.md`: a per-screen sign-off table (legacy screenshot by hash, token values with a `file:line` to check in the new code, layout points under `FAITHFUL`) for a **named human** to sign and commit with the PR. Read-only; never runs the legacy app, never takes or simulates a screenshot, never declares a fidelity verdict. Stack-agnostic — the view technology is identified per run by reading the repo |
 | `/specclaw:bf-replay <change-name>\|--all` | Replay captured legacy fixtures against the new app's actual behaviour and report MATCH/DIVERGES/ERROR per fixture, checked against `decisions.md` for a sanctioning decision; retains a committable evidence package by default (read-only against app source, fixtures, and manifest; dynamic multi-stack — the rebuild repo's stack is identified per run, works with any legacy and any rebuild stack). A `PROVISIONAL` fixture reports with a `-PROVISIONAL` suffix and holds the overall verdict at `PASS-PENDING-DECISIONS` (exit code 1, gates CI/PR like FAIL) instead of `PASS` until a human decides the blocking question — soft-block, never a refusal to run |
 | `/specclaw:archive <change>` | Archive a completed change |
 | `/specclaw:auto` | Advance the queue of active changes autonomously |

@@ -115,3 +115,73 @@ Stubbed by `specclaw-bf-replay init-rundir`, completed by `bf-replay-mapper`:
 
 `specclaw-bf-replay run-tests` fails loudly if `test_command` is still `null`
 ("mapper never completed run-config.json") rather than guessing a default.
+
+## (f) `ui-manifest.json` schema
+
+Written by `specclaw-bf-ui record` (Mode B — pure bash, no agent) at
+`.specclaw/ui/ui-manifest.json`, from the human-captured PNGs under
+`.specclaw/ui/screens/`:
+
+```json
+{
+  "generated": "2026-08-10",
+  "legacy_commit_sha": "a1b2c3d",
+  "total_checklist_rows": 7,
+  "screenshots": [
+    {
+      "scr_id": "SCR-001",
+      "state": "default",
+      "screen": "Main Dashboard",
+      "file": ".specclaw/ui/screens/SCR-001.png",
+      "sha256": "sha256:<64 hex>",
+      "captured_at": "2026-08-10T09:12:00Z",
+      "legacy_commit_sha": "a1b2c3d"
+    }
+  ],
+  "missing": [
+    { "scr_id": "SCR-002", "state": "validation-error",
+      "expected_file": ".specclaw/ui/screens/SCR-002-validation-error.png" }
+  ],
+  "extra": [
+    { "file": ".specclaw/ui/screens/notes.txt",
+      "reason": "filename does not match the SCR-###[-state].png convention" }
+  ]
+}
+```
+
+- `scr_id` — the screen's permanent `SCR-NNN` id from `ui-inventory.md`.
+- `state` — the state captured, matching its `screenshot-checklist.md` row
+  (`default` for the plain view).
+- `file` — repo-relative path of the PNG. Filenames follow
+  `SCR-###.png` / `SCR-###-<state>.png`, validated mechanically; a file that
+  violates it is reported under `extra`, never silently accepted.
+- `sha256` — `sha256:<hex>` of the file's bytes, making the captured
+  evidence tamper-evident exactly as a fixture's `content_hash` does. Empty
+  only when the machine has no `sha256sum`/`shasum`, which `record` warns
+  about loudly rather than passing off as sealed evidence.
+- `captured_at` — ISO-8601 UTC **filesystem mtime of the PNG at record
+  time**. A PNG carries no trustworthy capture timestamp and nothing in
+  specclaw parses image internals, so this is a labelled proxy, not a
+  claim about when the human took the shot.
+- `legacy_commit_sha` — the legacy repo's HEAD **at record time**. Same
+  caveat: it dates the recording, not the capture.
+- `screen` — the human-readable screen name, carried through from the
+  checklist for readability. Convenience plumbing, the same tier as
+  `manifest.json`'s `provisional_ref` — a reader may use it, nothing
+  computes from it.
+- `missing` / `extra` — normal reported states, never errors. A checklist
+  row with no file is `missing`; a file matching no row is `extra`.
+
+`SCR-NNN` (screens) and `TK-NNN` (design-token groups) are permanent once
+assigned — never renumbered, never reformatted, across any regeneration or
+archive cycle — on exactly the same terms as the ID families in (c). A
+screen that no longer exists becomes a tombstone in `ui-inventory.md`; its
+id is never reused.
+
+Nothing in this section is a golden-master seam. UI stays excluded from the
+seam taxonomy (`templates/seams.md`'s "Excluded: UI Automation"), no
+`specclaw-bf-replay` verdict reads any field above, and a screenshot is
+never compared to anything by any specclaw command. Visual fidelity is
+established by a named human signing `ui-review.md` against these recorded,
+hashed captures — this manifest exists to make that evidence citable, not
+to automate the judgement.

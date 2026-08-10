@@ -131,6 +131,65 @@ unblocked or verifiable, what was struck/deferred/revised/added, and the
 single recommended next item to propose. `BL-###` item ids are permanent
 across every refresh, never renumbered.
 
+## Step 4b — Optional: UI fidelity capture
+
+**Skip this entire step unless the rebuilt interface has to resemble the
+legacy one.** `/specclaw:bf-clarify`'s standard bank asks the question either
+way — `SQ-013`, "UI fidelity policy for this rebuild?", with exactly three
+answers:
+
+| Answer | Means |
+|---|---|
+| `FAITHFUL` | Reproduce the legacy layout structure and colour theme exactly, within the target platform's own rendering norms. |
+| `THEME-ONLY` | Keep the colour palette / branding tokens; the layout is reinterpreted for the target platform. |
+| `REINTERPRET` | New design; the legacy UI is reference material only. |
+
+Answer `REINTERPRET` and you are done — nothing else in the pipeline changes,
+no UI requirement is attached to any backlog item, and no warning is emitted.
+The proposed default is `REINTERPRET` precisely *because* it is the
+least-work reading: it has to be chosen deliberately rather than assumed
+silently, which is what would otherwise let a rebuild quietly discard an
+interface its users know by heart.
+
+Answer `FAITHFUL` or `THEME-ONLY` and the workstream activates:
+
+```
+/specclaw:bf-ui                       # in the legacy repo, after bf-domain
+  → .specclaw/ui/ui-inventory.md          one section per screen, permanent SCR-###
+  → .specclaw/ui/design-tokens.json       colour/typography/spacing, permanent TK-
+  → .specclaw/ui/screenshot-checklist.md  a human work order
+
+  ... a human runs the legacy app and captures the PNGs into
+      .specclaw/ui/screens/, per the checklist's exact filenames ...
+
+/specclaw:bf-ui --record              # hashes them into ui-manifest.json
+/specclaw:bf-rebuild-plan --refresh   # attaches SCR/TK grounding to items
+```
+
+Then, once a change is built in the new repo:
+
+```
+/specclaw:bf-ui --checklist <change-name>
+  → .specclaw/changes/<change>/ui-review.md
+```
+
+A named human fills in that file's rows and commits it with the PR, next to
+the replay evidence package. Together they are the change's complete fidelity
+record: mechanical proof for behaviour, signed human review for appearance.
+
+**No specclaw command ever runs the legacy app, takes a screenshot, or judges
+whether two screens look the same** — the same boundary `/specclaw:bf-baseline`
+draws around fixture capture, for the same reason. And UI is never a
+golden-master seam: `/specclaw:bf-replay` compares no screenshot and its
+verdict says nothing about appearance (it gains one informational footer line
+saying so). Do not read `.specclaw/ui/` as a promise of pixel-identity; read
+it as the reference a human checks against, on the record.
+
+If the policy is decided but the `.specclaw/ui/` artifacts don't exist,
+`/specclaw:bf-rebuild-plan` says so loudly — one warning naming every missing
+artifact, with every screen-bearing item held at `OPEN QUESTIONS`. It will not
+quietly proceed as though the UI requirement had been dropped.
+
 ## Step 5 — Propose each backlog item yourself
 
 `/specclaw:bf-rebuild-plan` does not, and will not, auto-invoke
@@ -146,6 +205,42 @@ Because the analysis documents are already pinned (Step 3), the resulting
 `/specclaw:plan` for each item is grounded in the same functional-spec
 capability and domain-model rules the backlog item cited — no need to
 re-paste analysis content into the conversation.
+
+## Step 6 — What to copy into the new repo (the Phase B copy set)
+
+Steps 1–4b all run in the **legacy** repo (Phase A). `/specclaw:bf-replay` and
+`/specclaw:bf-ui --checklist` run in the **new** repo (Phase B), and they need
+the Phase A artifacts to be present there — they resolve a change to its
+backlog item, its fixtures, and its screens by reading these files:
+
+```
+.specclaw/analysis/rebuild-backlog.md        # change → BL item → DR rules / SCR screens
+.specclaw/analysis/domain-model.md           # DR rules, for coverage reporting
+.specclaw/analysis/decisions.md              # sanctioning CQs; the SQ-013 UI policy
+.specclaw/baseline/scenarios.md              # GM scenario definitions
+.specclaw/baseline/seams.md                  # seam recommendations cited in remediations
+.specclaw/baseline/manifest.json             # fixture roster + content hashes  ┐ always
+.specclaw/baseline/fixtures/                 # the captured fixtures           ┘ together
+.specclaw/ui/ui-inventory.md                 # SCR entries (FAITHFUL/THEME-ONLY only)
+.specclaw/ui/design-tokens.json              # TK groups          (same)
+.specclaw/ui/screenshot-checklist.md         # states + setup notes (same)
+.specclaw/ui/screens/                        # captured PNGs      ┐ always
+.specclaw/ui/ui-manifest.json                # their hashes       ┘ together
+```
+
+**The paired lines are paired for one reason: a hash without the file it
+hashes, or a file without its recorded hash, proves nothing.**
+`/specclaw:bf-replay resolve` already enforces this for fixtures — it refuses
+to run if a selected fixture's recomputed sha256 doesn't match
+`manifest.json`, because comparing against a half-copied or edited baseline is
+worse than not comparing at all. `screens/` and `ui-manifest.json` follow the
+same rule: copy them together, or the sha256 a reviewer is asked to confirm
+in `ui-review.md` refers to nothing.
+
+Re-copy after any Phase A re-run that changes them. The `.specclaw/ui/` lines
+are needed only when the UI fidelity policy is `FAITHFUL` or `THEME-ONLY`;
+under `REINTERPRET` the copy set is just the first seven lines, exactly as it
+was before the UI workstream existed.
 
 ## Fidelity limitation
 

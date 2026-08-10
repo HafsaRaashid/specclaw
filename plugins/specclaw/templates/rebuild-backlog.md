@@ -53,6 +53,25 @@
     fixture yet: <GM-NNN, ...> | UNVERIFIABLE — acceptance must come from a
     stakeholder decision, not fixture comparison (see CQ-NNN) | NO BASELINE
     DATA — baseline not run (or not designed) for these rules>
+  **UI fidelity:** <bash-computed, and present ONLY when this item renders a
+    screen AND the UI fidelity policy (SQ-013, read mechanically from
+    decisions.md) is decided FAITHFUL/THEME-ONLY or is undecided. Renders as:
+    FAITHFUL — reproduce the layout structure and token values of: <SCR-###,
+    ...>; token groups: <TK-###, ...> | THEME-ONLY — reproduce the token
+    values of: <TK-###, ...>; screens for reference only: <SCR-###, ...> |
+    ⚠ UI GROUNDING MISSING — <the decided policy, plus which .specclaw/ui/
+    artifacts are absent, or the fact that this item cites no SCR-### at all>
+    | UNDECIDED — <SQ-013 has no recorded decision>. The last two also
+    contribute an OPEN QUESTIONS state to the Gate line above, naming SQ-013.
+    Under a decided REINTERPRET policy this field never appears on any item
+    and no warning is emitted anywhere — the zero-extra-work path for a
+    project that does not need visual fidelity. Which items render a screen
+    is the planner agent's judgment, delivered as a SCREEN-BEARING: directive
+    and applied mechanically here; SCR-###/TK-### content itself belongs to
+    /specclaw:bf-ui, never to this document. A cited SCR-### never implies
+    visual equivalence has been proven — that is established by a named human
+    signing ui-review.md against recorded screenshots, never by this backlog
+    and never by fixture replay.>
   **Settled constraints (from decisions):** <optional — only present when a
     mechanical-adopt decision applies to this item; omit the field entirely
     otherwise, never render it empty>

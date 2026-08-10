@@ -317,6 +317,77 @@ ids_to_json_array() {
   printf '%s' "$out"
 }
 
+# ─── UI fidelity inputs (the optional /specclaw:bf-ui workstream) ───────────
+#
+# Everything here is inert unless SQ-013 (UI fidelity policy) has actually
+# been decided FAITHFUL or THEME-ONLY. A project that answered REINTERPRET —
+# or hasn't answered at all — gets no UI line on any item, no UI coverage
+# section, and no warning: the whole workstream costs it nothing.
+#
+# The policy is read MECHANICALLY from decisions.md's literal structure, the
+# same discipline specclaw-bf-replay's sanction-check uses: a decision is
+# proved by a literal "### SQ-013 —" heading (headings only ever appear under
+# "## Decisions" in that document's real structure, never under "##
+# Outstanding Questions") plus one of the three literal policy tokens inside
+# that block. Anything else is UNDECIDED — never inferred, and never
+# defaulted to the least-work option.
+
+FIDELITY_SQ_ID="SQ-013"
+
+read_fidelity_policy() {
+  local decisions_file="$1"
+  [ -f "$decisions_file" ] || { printf 'UNDECIDED'; return 0; }
+  local block
+  block="$(awk -v id="$FIDELITY_SQ_ID" '
+    $0 ~ ("^### " id "[[:space:]]") { cap=1; next }
+    cap && /^### / { cap=0 }
+    cap { print }
+  ' "$decisions_file" 2>/dev/null || true)"
+  [ -n "$block" ] || { printf 'UNDECIDED'; return 0; }
+  local decision
+  decision="$(printf '%s\n' "$block" | grep -m1 -- '^- \*\*Decision:\*\*' | sed -E 's/^- \*\*Decision:\*\* *//' || true)"
+  [ -n "$decision" ] || { printf 'UNDECIDED'; return 0; }
+  case "$decision" in
+    *THEME-ONLY*)  printf 'THEME-ONLY' ;;
+    *FAITHFUL*)    printf 'FAITHFUL' ;;
+    *REINTERPRET*) printf 'REINTERPRET' ;;
+    *)             printf 'UNDECIDED' ;;
+  esac
+}
+
+# Every screen in ui-inventory.md, as "SCR-NNN<TAB><title>". A REMOVED
+# tombstone entry is skipped — it is not a screen anyone can be held to.
+ui_scr_entries() {
+  local inventory="$1"
+  [ -f "$inventory" ] || return 0
+  local line id title
+  while IFS= read -r line; do
+    [ -z "$line" ] && continue
+    id="$(printf '%s' "$line" | grep -oE 'SCR-[0-9]+' | head -1 || true)"
+    [ -n "$id" ] || continue
+    title="$(printf '%s' "$line" | sed -E 's/^### SCR-[0-9]+[[:space:]]*(—|-)[[:space:]]*//')"
+    case "$title" in REMOVED*) continue ;; esac
+    printf '%s\t%s\n' "$id" "$title"
+  done < <(grep -E '^### SCR-[0-9]+' "$inventory" 2>/dev/null || true)
+}
+
+# Every token group in design-tokens.json, as "TK-NNN<TAB><name><TAB><scope>".
+ui_tk_entries() {
+  local tokens_file="$1"
+  [ -f "$tokens_file" ] || return 0
+  if command -v jq &>/dev/null && jq -e . "$tokens_file" >/dev/null 2>&1; then
+    jq -r '.token_groups[]? | [.tk_id, (.name // ""), (.scope // "global")] | @tsv' "$tokens_file" 2>/dev/null | tr -d '\r' || true
+  else
+    warn "jq not found (or design-tokens.json is not valid JSON) — token-group scopes cannot be read; every group will be treated as global"
+    grep -oE '"tk_id"[[:space:]]*:[[:space:]]*"TK-[0-9]+"' "$tokens_file" 2>/dev/null \
+      | grep -oE 'TK-[0-9]+' | awk '{print $0"\t\tglobal"}' || true
+  fi
+}
+
+extract_scr_ids() {
+  { grep -oE 'SCR-[0-9]{3}' "$1" 2>/dev/null | awk '!seen[$0]++'; } || true
+}
+
 # ─── Known analysis documents (unchanged hard prerequisite) ─────────────────
 
 DOC_SPECS=(
@@ -499,6 +570,37 @@ EOF
   fi
   local next_bl_id; next_bl_id="$(printf 'BL-%03d' "$next_num")"
 
+  # ── UI fidelity inputs (optional; inert unless SQ-013 is decided
+  # FAITHFUL/THEME-ONLY — see the helpers above) ──────────────────────────
+  local ui_dir="$specclaw_dir_abs/ui"
+  local ui_inventory="$ui_dir/ui-inventory.md"
+  local ui_tokens="$ui_dir/design-tokens.json"
+  local ui_manifest="$ui_dir/ui-manifest.json"
+  local ui_inv_present=false ui_tok_present=false ui_man_present=false ui_screens_present=false
+  [ -f "$ui_inventory" ] && ui_inv_present=true
+  [ -f "$ui_tokens" ] && ui_tok_present=true
+  [ -f "$ui_manifest" ] && ui_man_present=true
+  [ -d "$ui_dir/screens" ] && ui_screens_present=true
+
+  local fidelity_policy
+  fidelity_policy="$(read_fidelity_policy "$decisions_path")"
+
+  local ui_screens_json="" uifirst=true scr_id scr_title
+  while IFS=$'\t' read -r scr_id scr_title; do
+    [ -z "$scr_id" ] && continue
+    if $uifirst; then uifirst=false; else ui_screens_json="${ui_screens_json},"; fi
+    ui_screens_json="${ui_screens_json}
+    {\"scr_id\": \"$(json_escape "$scr_id")\", \"title\": \"$(json_escape "$scr_title")\"}"
+  done < <(ui_scr_entries "$ui_inventory")
+
+  local ui_tokens_json="" utfirst=true tk_id tk_name tk_scope
+  while IFS=$'\t' read -r tk_id tk_name tk_scope; do
+    [ -z "$tk_id" ] && continue
+    if $utfirst; then utfirst=false; else ui_tokens_json="${ui_tokens_json},"; fi
+    ui_tokens_json="${ui_tokens_json}
+    {\"tk_id\": \"$(json_escape "$tk_id")\", \"name\": \"$(json_escape "$tk_name")\", \"scope\": \"$(json_escape "${tk_scope:-global}")\"}"
+  done < <(ui_tk_entries "$ui_tokens")
+
   local output
   output=$(cat <<ENDJSON
 {
@@ -520,6 +622,21 @@ EOF
   "fixtures": [${fixtures_json}
   ],
   "no_legacy_behaviour_present": ${no_legacy_present},
+  "ui_fidelity": {
+    "policy": "${fidelity_policy}",
+    "policy_source": ".specclaw/analysis/decisions.md (${FIDELITY_SQ_ID})",
+    "grounding_required": $(case "$fidelity_policy" in FAITHFUL|THEME-ONLY) printf 'true' ;; *) printf 'false' ;; esac),
+    "inputs": {
+      "ui_inventory_md": {"present": ${ui_inv_present}, "path": ".specclaw/ui/ui-inventory.md"},
+      "design_tokens_json": {"present": ${ui_tok_present}, "path": ".specclaw/ui/design-tokens.json"},
+      "screens_dir": {"present": ${ui_screens_present}, "path": ".specclaw/ui/screens"},
+      "ui_manifest_json": {"present": ${ui_man_present}, "path": ".specclaw/ui/ui-manifest.json"}
+    },
+    "screens": [${ui_screens_json}
+    ],
+    "token_groups": [${ui_tokens_json}
+    ]
+  },
   "existing_items": [${existing_json}
   ],
   "next_bl_id": "$(json_escape "$next_bl_id")"
@@ -596,6 +713,22 @@ cmd_render() {
   # next time the planner agent doesn't re-issue the directive.
   grep -E '^PROVISIONAL:' "$draft_file" 2>/dev/null | sed -E 's/^PROVISIONAL:[[:space:]]*//' | \
     awk -F'\\|' '{gsub(/^[ \t]+|[ \t]+$/,"",$1); gsub(/^[ \t]+|[ \t]+$/,"",$2); gsub(/^[ \t]+|[ \t]+$/,"",$3); print $1"\t"$2"\t"$3}' >> "$provisional_file" || true
+  # SCREEN-BEARING: BL-NNN | SCR-NNN,... (or "none") | <reason> — the
+  # semantic half of the UI fidelity wiring. Bash cannot tell on its own
+  # whether an item renders a screen: when /specclaw:bf-ui has never run
+  # there is no SCR-### token anywhere to join on, so the judgment has to
+  # come from the planner agent reading functional-spec.md, and is then
+  # applied mechanically here. Same tier as UNVERIFIABLE:/PROVISIONAL: —
+  # re-derived fresh every run, never persisted from a prior refresh.
+  # SCR-OUT-OF-SCOPE: SCR-NNN | <reason> — an explicit, reasoned exclusion
+  # of a screen from the backlog, so the coverage check can distinguish
+  # "deliberately not rebuilt" from "silently dropped".
+  local screenbearing_file="$workdir/screenbearing.tsv" scrscope_file="$workdir/scr-out-of-scope.tsv"
+  : > "$screenbearing_file"; : > "$scrscope_file"
+  grep -E '^SCREEN-BEARING:' "$draft_file" 2>/dev/null | sed -E 's/^SCREEN-BEARING:[[:space:]]*//' | \
+    awk -F'\\|' '{gsub(/^[ \t]+|[ \t]+$/,"",$1); gsub(/^[ \t]+|[ \t]+$/,"",$2); gsub(/^[ \t]+|[ \t]+$/,"",$3); print $1"\t"$2"\t"$3}' >> "$screenbearing_file" || true
+  grep -E '^SCR-OUT-OF-SCOPE:' "$draft_file" 2>/dev/null | sed -E 's/^SCR-OUT-OF-SCOPE:[[:space:]]*//' | \
+    awk -F'\\|' '{gsub(/^[ \t]+|[ \t]+$/,"",$1); gsub(/^[ \t]+|[ \t]+$/,"",$2); print $1"\t"$2}' >> "$scrscope_file" || true
 
   split_blocks "$draft_file" "$workdir/items" "BL"
 
@@ -647,6 +780,7 @@ cmd_render() {
       EXIST_STATIC[$id]="$(tail -n +2 "$f" | awk '
         /^\*\*Gate:\*\*/ { skip=1; next }
         /^\*\*Verification:\*\*/ { skip=1; next }
+        /^\*\*UI fidelity:\*\*/ { skip=1; next }
         /^\*\*Status:\*\* Deferred/ { skip=1; next }
         /^\*\*Status notes \(human-added\):\*\*/ { intail=1; next }
         intail { next }
@@ -722,6 +856,67 @@ cmd_render() {
   elif [ -f "$manifest_file" ]; then
     warn "jq not found — treating manifest.json as present but unreadable; Verification will fall back to scenarios.md's roster (PENDING CAPTURE, not VERIFIABLE)"
   fi
+
+  # ── UI fidelity inputs (fresh every run, like everything else bash
+  # computes here). All of this stays inert unless SQ-013 is decided
+  # FAITHFUL or THEME-ONLY. ───────────────────────────────────────────────
+  local ui_dir="$specclaw_dir_abs/ui"
+  local ui_inventory="$ui_dir/ui-inventory.md"
+  local ui_tokens_file="$ui_dir/design-tokens.json"
+  local ui_manifest_file="$ui_dir/ui-manifest.json"
+  local fidelity_policy
+  fidelity_policy="$(read_fidelity_policy "$decisions_file")"
+  local ui_grounding_required=false
+  case "$fidelity_policy" in FAITHFUL|THEME-ONLY) ui_grounding_required=true ;; esac
+
+  declare -A SCR_TITLE TK_FOR_SCR
+  SCR_TITLE[__init__]=1; unset 'SCR_TITLE[__init__]'
+  TK_FOR_SCR[__init__]=1; unset 'TK_FOR_SCR[__init__]'
+  local scr_all="" sid stitle
+  while IFS=$'\t' read -r sid stitle; do
+    [ -z "$sid" ] && continue
+    SCR_TITLE[$sid]="$stitle"
+    scr_all="${scr_all} ${sid}"
+  done < <(ui_scr_entries "$ui_inventory")
+
+  # The group's human-readable name is not read here — only its id and scope
+  # matter for the per-item join; the name is for a human reading
+  # design-tokens.json itself.
+  local tk_global="" tkid tkscope
+  while IFS=$'\t' read -r tkid _ tkscope; do
+    [ -z "$tkid" ] && continue
+    case "${tkscope:-global}" in
+      global|"") tk_global="${tk_global}${tk_global:+, }${tkid}" ;;
+      *) TK_FOR_SCR[$tkscope]="${TK_FOR_SCR[$tkscope]:+${TK_FOR_SCR[$tkscope]}, }${tkid}" ;;
+    esac
+  done < <(ui_tk_entries "$ui_tokens_file")
+
+  # Which artifacts the decided policy needs and this repo doesn't have.
+  # Named individually — a warning that says "UI artifacts are missing"
+  # without saying which is a warning nobody can act on.
+  local ui_missing=""
+  if $ui_grounding_required; then
+    [ -f "$ui_inventory" ]     || ui_missing="${ui_missing}${ui_missing:+, }.specclaw/ui/ui-inventory.md"
+    [ -f "$ui_tokens_file" ]   || ui_missing="${ui_missing}${ui_missing:+, }.specclaw/ui/design-tokens.json"
+    [ -d "$ui_dir/screens" ]   || ui_missing="${ui_missing}${ui_missing:+, }.specclaw/ui/screens/"
+    [ -f "$ui_manifest_file" ] || ui_missing="${ui_missing}${ui_missing:+, }.specclaw/ui/ui-manifest.json"
+  fi
+
+  # ── Screen-bearing / out-of-scope directives from the draft ─────────────
+  declare -A SB_SCRS SB_REASON SCR_OOS
+  SB_SCRS[__init__]=1; unset 'SB_SCRS[__init__]'
+  SB_REASON[__init__]=1; unset 'SB_REASON[__init__]'
+  SCR_OOS[__init__]=1; unset 'SCR_OOS[__init__]'
+  local sb_id sb_scrs sb_reason
+  while IFS=$'\t' read -r sb_id sb_scrs sb_reason; do
+    [ -z "$sb_id" ] && continue
+    SB_SCRS[$sb_id]="$sb_scrs"
+    SB_REASON[$sb_id]="$sb_reason"
+  done < "$screenbearing_file"
+  while IFS=$'\t' read -r sid sb_reason; do
+    [ -z "$sid" ] && continue
+    SCR_OOS[$sid]="$sb_reason"
+  done < "$scrscope_file"
 
   # ── Unverifiable overrides from the draft ───────────────────────────────
   declare -A UNVERIF_CQ UNVERIF_REASON
@@ -802,11 +997,25 @@ cmd_render() {
   done
 
   # ── Per-item rules[] / depends_on[] extracted from the final body ──────
-  declare -A ITEM_RULES ITEM_DEPS
+  declare -A ITEM_RULES ITEM_DEPS ITEM_SCRS
+  ITEM_SCRS[__init__]=1; unset 'ITEM_SCRS[__init__]'
   for id in $active_ids; do
     printf '%s\n' "${FINAL_BODY[$id]}" > "$workdir/body.tmp"
     ITEM_RULES[$id]="$(extract_dr_ids "$workdir/body.tmp" | paste -sd, - 2>/dev/null || true)"
     ITEM_DEPS[$id]="$(depends_on_ids "$(block_single_field "$workdir/body.tmp" "Depends on")")"
+    # SCR citations the item's own acceptance basis carries, unioned with
+    # this run's SCREEN-BEARING directive. The textual citation in the body
+    # is the join key /specclaw:bf-ui --checklist keys against later, the
+    # same way DR-NNN is the join key for Gate/Verification — so a citation
+    # that exists only in a directive is not enough on its own to ground an
+    # item, and the coverage check below reports that gap.
+    ITEM_SCRS[$id]="$(extract_scr_ids "$workdir/body.tmp" | paste -sd, - 2>/dev/null || true)"
+    local dscr
+    for dscr in $(printf '%s' "${SB_SCRS[$id]:-}" | tr ',' ' '); do
+      case "$dscr" in SCR-[0-9][0-9][0-9]) ;; *) continue ;; esac
+      [[ ",${ITEM_SCRS[$id]}," == *",${dscr},"* ]] || \
+        ITEM_SCRS[$id]="${ITEM_SCRS[$id]:+${ITEM_SCRS[$id]},}${dscr}"
+    done
   done
   rm -f "$workdir/body.tmp"
 
@@ -832,7 +1041,8 @@ cmd_render() {
   done
 
   # ── Gate + Verification per active item ─────────────────────────────────
-  declare -A GATE VERIF GATE_RANK VERIF_RANK PROVISIONAL
+  declare -A GATE VERIF GATE_RANK VERIF_RANK PROVISIONAL UI_FIDELITY
+  UI_FIDELITY[__init__]=1; unset 'UI_FIDELITY[__init__]'
   for id in $active_ids; do
     local blocked_by="" open_qs="" cid
     for cid in $cq_ids; do
@@ -844,9 +1054,50 @@ cmd_render() {
         open_qs="${open_qs}${open_qs:+, }${cid}"
       fi
     done
+
+    # ── UI fidelity per item. Three inputs, all mechanical: the decided
+    # policy, whether this item renders a screen (its own SCR citations, or
+    # this run's SCREEN-BEARING directive), and whether the bf-ui artifacts
+    # the policy needs actually exist. A REINTERPRET or undecided policy on
+    # an item that renders nothing produces no line and no gate effect at
+    # all — the zero-extra-work path. ─────────────────────────────────────
+    local ui_open="" item_scrs="${ITEM_SCRS[$id]:-}" screen_bearing=false
+    { [ -n "$item_scrs" ] || [ -n "${SB_REASON[$id]:-}" ]; } && screen_bearing=true
+    if $screen_bearing; then
+      if $ui_grounding_required; then
+        if [ -n "$ui_missing" ]; then
+          UI_FIDELITY[$id]="⚠ UI GROUNDING MISSING — ${fidelity_policy} decided (${FIDELITY_SQ_ID}) but these artifacts are absent: ${ui_missing} — run /specclaw:bf-ui"
+          ui_open="${FIDELITY_SQ_ID} decided ${fidelity_policy}, required artifacts missing"
+        elif [ -z "$item_scrs" ]; then
+          UI_FIDELITY[$id]="⚠ UI GROUNDING MISSING — ${fidelity_policy} decided (${FIDELITY_SQ_ID}) and this item renders a screen, but its acceptance basis cites no SCR-### entry from ui-inventory.md"
+          ui_open="${FIDELITY_SQ_ID} decided ${fidelity_policy}, no SCR-### cited by this item"
+        else
+          local tks="$tk_global" s
+          for s in ${item_scrs//,/ }; do
+            [ -n "${TK_FOR_SCR[$s]:-}" ] && tks="${tks}${tks:+, }${TK_FOR_SCR[$s]}"
+          done
+          [ -n "$tks" ] || tks="none recorded in design-tokens.json"
+          if [ "$fidelity_policy" = "FAITHFUL" ]; then
+            UI_FIDELITY[$id]="FAITHFUL — reproduce the layout structure and token values of: ${item_scrs//,/, } (ui-inventory.md); token groups: ${tks}"
+          else
+            UI_FIDELITY[$id]="THEME-ONLY — reproduce the token values of: ${tks}; screens for reference only: ${item_scrs//,/, } (layout reinterpreted for the target platform)"
+          fi
+        fi
+      elif [ "$fidelity_policy" = "UNDECIDED" ]; then
+        UI_FIDELITY[$id]="UNDECIDED — this item renders a screen and ${FIDELITY_SQ_ID} (UI fidelity policy) has no recorded decision; acceptance cannot state how closely the legacy UI must be reproduced"
+        ui_open="${FIDELITY_SQ_ID} (UI fidelity policy) undecided"
+      fi
+    fi
+
     if [ -n "$blocked_by" ]; then
       GATE[$id]="BLOCKED — blocked by ${blocked_by}"
       GATE_RANK[$id]=3
+    elif [ -n "$open_qs" ] && [ -n "$ui_open" ]; then
+      GATE[$id]="OPEN QUESTIONS — risk from unanswered, non-blocking: ${open_qs}; UI fidelity: ${ui_open}"
+      GATE_RANK[$id]=2
+    elif [ -n "$ui_open" ]; then
+      GATE[$id]="OPEN QUESTIONS — UI fidelity: ${ui_open}"
+      GATE_RANK[$id]=2
     elif [ -n "$open_qs" ]; then
       GATE[$id]="OPEN QUESTIONS — risk from unanswered, non-blocking: ${open_qs}"
       GATE_RANK[$id]=2
@@ -945,6 +1196,10 @@ ${provisional_block}
 ${FINAL_BODY[$id]}
 **Gate:** ${GATE[$id]}
 **Verification:** ${VERIF[$id]}"
+    if [ -n "${UI_FIDELITY[$id]:-}" ]; then
+      entry="${entry}
+**UI fidelity:** ${UI_FIDELITY[$id]}"
+    fi
     if [ -n "${FINAL_TAIL[$id]}" ]; then
       entry="${entry}
 
@@ -1019,6 +1274,42 @@ ${body}"
   missing_note_manifest="present"; [ -f "$manifest_file" ] || missing_note_manifest="missing — run /specclaw:bf-baseline --record"
   missing_note_scenarios="present"; [ -f "$scenarios_file" ] || missing_note_scenarios="missing — run /specclaw:bf-baseline"
 
+  # ── UI fidelity status block. One line when the workstream is inactive
+  # (so a reader can see it was considered and costs nothing), and a loud,
+  # artifact-naming warning when a decided policy has nothing to stand on. ─
+  local n_screen_bearing=0 n_ui_gap=0
+  for id in $active_ids; do
+    [ -n "${UI_FIDELITY[$id]:-}" ] && n_screen_bearing=$((n_screen_bearing+1))
+    case "${UI_FIDELITY[$id]:-}" in ⚠*|UNDECIDED*) n_ui_gap=$((n_ui_gap+1)) ;; esac
+  done
+  local ui_status_block="**UI fidelity policy:** ${fidelity_policy} (${FIDELITY_SQ_ID})"
+  case "$fidelity_policy" in
+    REINTERPRET)
+      ui_status_block="${ui_status_block} — the legacy UI is reference material only; no UI requirement is attached to any item, and /specclaw:bf-ui is not needed."
+      ;;
+    UNDECIDED)
+      if [ "$n_screen_bearing" -gt 0 ]; then
+        ui_status_block="${ui_status_block} — no recorded decision, and ${n_screen_bearing} item(s) render a screen; those items sit at OPEN QUESTIONS until a human answers ${FIDELITY_SQ_ID} in clarifications.md."
+      else
+        ui_status_block="${ui_status_block} — no recorded decision; no item is marked as rendering a screen, so nothing is gated on it."
+      fi
+      ;;
+    *)
+      ui_status_block="${ui_status_block}
+- .specclaw/ui/ui-inventory.md: $([ -f "$ui_inventory" ] && echo present || echo 'missing — run /specclaw:bf-ui')
+- .specclaw/ui/design-tokens.json: $([ -f "$ui_tokens_file" ] && echo present || echo 'missing — run /specclaw:bf-ui')
+- .specclaw/ui/screens/: $([ -d "$ui_dir/screens" ] && echo present || echo 'missing — a human must capture screenshots per screenshot-checklist.md')
+- .specclaw/ui/ui-manifest.json: $([ -f "$ui_manifest_file" ] && echo present || echo 'missing — run /specclaw:bf-ui --record')
+- Screen-bearing items: ${n_screen_bearing}, of which ${n_ui_gap} lack UI grounding"
+      if [ -n "$ui_missing" ]; then
+        ui_status_block="${ui_status_block}
+
+> ⚠ **WARNING — UI fidelity policy ${fidelity_policy} is decided, but the artifacts it requires do not exist:** ${ui_missing}. Every screen-bearing item above is held at OPEN QUESTIONS as a result. Run \`/specclaw:bf-ui\` (and \`--record\`, after a human captures the screenshots) — this backlog cannot state a UI acceptance basis without them, and it will not pretend to."
+        warn "UI fidelity policy ${fidelity_policy} is decided but these artifacts are missing: ${ui_missing} — ${n_screen_bearing} screen-bearing item(s) held at OPEN QUESTIONS. Run /specclaw:bf-ui."
+      fi
+      ;;
+  esac
+
   local status_header
   status_header="**Date:** $(date +%Y-%m-%d)
 **Inputs consumed:**
@@ -1026,6 +1317,8 @@ ${body}"
 - clarifications.md: ${missing_note_clar}
 - baseline/manifest.json: ${missing_note_manifest}
 - baseline/scenarios.md: ${missing_note_scenarios}
+
+${ui_status_block}
 
 **Gate counts:** CLEAR: ${n_clear}, OPEN QUESTIONS: ${n_open}, BLOCKED: ${n_blocked} (of $(echo "$active_ids" | wc -w | tr -d ' ') active items; ${#STRIKE_REASON[@]} struck, ${#DEFER_REASON[@]} deferred)
 **Verification counts:** VERIFIABLE: ${n_verifiable}, PENDING CAPTURE: ${n_pending}, UNVERIFIABLE: ${n_unverif}, NO BASELINE DATA: ${n_nobaseline}
@@ -1070,6 +1363,52 @@ ${body}"
   if $is_refresh; then
     sequencing_rationale="$(awk '/^## Sequencing Rationale/{flag=1;next}/^## /{flag=0}flag' "$backlog_file" | sed '/./,$!d')"
     coverage_check="$(awk '/^## Coverage Check/{flag=1;next}/^## /{flag=0}flag' "$backlog_file" | sed '/./,$!d')"
+    # Drop any prior run's UI Screen Coverage subsection — it is bash-
+    # computed and re-derived below, so carrying the old one forward would
+    # render two, one of them stale.
+    coverage_check="$(printf '%s\n' "$coverage_check" | awk '/^### UI Screen Coverage \(SCR\)/{stop=1} !stop' | strip_trailing_separator)"
+  fi
+
+  # ── UI Screen Coverage (bash-computed, appended to the Coverage Check).
+  # Bullet-granularity, same principle as the capability coverage above: a
+  # screen is either cited by at least one active backlog item, or
+  # explicitly excluded with a stated reason. Silence is a defect, and it is
+  # reported as one rather than left for a reader to notice. Only rendered
+  # when a decided FAITHFUL/THEME-ONLY policy makes screens part of the
+  # acceptance basis and ui-inventory.md actually exists. ─────────────────
+  if $ui_grounding_required && [ -f "$ui_inventory" ]; then
+    local scr_cov="" unmapped="" scr_count=0
+    for sid in $scr_all; do
+      scr_count=$((scr_count+1))
+      local citing=""
+      for id in $ordered_ids; do
+        [[ ",${ITEM_SCRS[$id]:-}," == *",${sid},"* ]] && citing="${citing}${citing:+, }${id}"
+      done
+      if [ -n "$citing" ]; then
+        scr_cov="${scr_cov}- **${sid}** — ${SCR_TITLE[$sid]:-} → ${citing}
+"
+      elif [ -n "${SCR_OOS[$sid]:-}" ]; then
+        scr_cov="${scr_cov}- **${sid}** — ${SCR_TITLE[$sid]:-} → out of scope: ${SCR_OOS[$sid]}
+"
+      else
+        scr_cov="${scr_cov}- **${sid}** — ${SCR_TITLE[$sid]:-} → ⚠ not cited by any active backlog item, and not listed as out of scope
+"
+        unmapped="${unmapped}${unmapped:+, }${sid}"
+      fi
+    done
+    [ -n "$scr_cov" ] || scr_cov="_No SCR-### entries found in ui-inventory.md._
+"
+    coverage_check="${coverage_check}
+
+### UI Screen Coverage (SCR)
+
+_Bash-computed from .specclaw/ui/ui-inventory.md against every active item's own SCR-### citations (plus this run's SCR-OUT-OF-SCOPE directives). ${scr_count} screen(s) under UI fidelity policy ${fidelity_policy}._
+
+${scr_cov}
+**Unmapped:** ${unmapped:-none}"
+    if [ -n "$unmapped" ]; then
+      warn "UI screen coverage gap — no active backlog item cites: ${unmapped} (and no SCR-OUT-OF-SCOPE reason was given for them)"
+    fi
   fi
 
   # ── Archive prior file, render, write ────────────────────────────────────

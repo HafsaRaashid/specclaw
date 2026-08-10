@@ -196,3 +196,16 @@
   3. No blanket default — decide case by case as each CQ/DEFECT question arises.
 - **Proposed default:** 1 (adopt as-is by default — the safer default for a fidelity-focused rebuild; a specific DEFECT/CQ can always override it for one behaviour at a time).
 - **Applicability:** Always applicable — this is a general policy default, useful regardless of what the extraction sweep did or didn't find.
+
+## SQ-013 — UI fidelity policy
+
+- **Type:** DECISION
+- **Blocking:** yes — every backlog item that renders a screen
+- **Question:** UI fidelity policy for this rebuild — how closely must the rebuilt interface reproduce the legacy one?
+- **Options:**
+  1. FAITHFUL — reproduce the legacy layout structure and colour theme exactly (within the target platform's own rendering norms).
+  2. THEME-ONLY — keep the colour palette / branding tokens; layout is reinterpreted for the target platform.
+  3. REINTERPRET — new design; the legacy UI is reference material only.
+- **Proposed default:** 3 (REINTERPRET — the least-work interpretation, and precisely why it must never be assumed silently: answer this one explicitly rather than letting a rebuild quietly discard a UI the users know).
+- **Applicability:** Applicable whenever the rebuild has any UI layer at all — inapplicable only for a pure backend/API/library rebuild with no UI of its own (the same condition as SQ-006). This is a different question from SQ-006, which picks the *framework*; this one sets how much of the legacy *appearance* the rebuild is held to. Answering FAITHFUL or THEME-ONLY activates the optional UI-fidelity workstream (`/specclaw:bf-ui`, and the SCR/TK grounding `/specclaw:bf-rebuild-plan` then requires); answering REINTERPRET costs nothing further anywhere in the pipeline. Either way the answer is verified by a named human signing a checklist, never by fixture replay — UI stays excluded from the golden-master seam taxonomy.
+
