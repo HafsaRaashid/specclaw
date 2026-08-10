@@ -23,17 +23,19 @@ Subcommands:
                 item. Writes the selection JSON and prints a one-line summary.
 
   init-rundir   <specclaw_dir> <run_dir>
-                Scaffolds the throwaway test project: copies the fixed
-                Capture.cs/ResultWriter.cs harness files, resolves the new
-                repo's own Core/domain project (or config.yaml's
-                replay.core_project override), and writes ReplayHarness.csproj.
+                Creates the run directory and writes a run-config.json stub
+                ({stack, build_command, test_command, results_dir,
+                evidence_exclusions} per CONTRACT.md — all null/empty) for
+                the replay-mapper agent to complete. Copies nothing.
 
-  run-tests     <run_dir>
-                Runs `dotnet build` then `dotnet test` inside the run
-                directory (respecting config.yaml's replay.dotnet_command
-                override, persisted by init-rundir). Does not itself decide
-                MATCH/DIVERGES — only reports build/test pass-fail and how
-                many actual-<GM-ID>.json files were written.
+  run-tests     <specclaw_dir> <run_dir>
+                Reads run-config.json; fails loudly if test_command is still
+                null (the replay-mapper agent never completed it). Otherwise
+                runs build_command (if non-null) then test_command verbatim,
+                from the project root — this stack's own build/test tooling,
+                named by the agent, never assumed here. Does not itself
+                decide MATCH/DIVERGES — only reports pass-fail and how many
+                actual-<GM-ID>.json files were written.
 
   compare       <specclaw_dir> <run_dir>
                 Deterministic field-by-field diff of every REPLAYABLE
@@ -59,8 +61,10 @@ Subcommands:
 
   finalize      <specclaw_dir> <change_name|--all> <run_dir> [--keep|--discard]
                 Retention is the default: curates the run directory's
-                generated tests (source only — never bin/obj) + actual
-                results + a fixture-manifest excerpt + run-metadata.json
+                generated tests (source only — excludes whatever
+                run-config.json's evidence_exclusions names as this stack's
+                own build/dependency output) + actual results + a
+                fixture-manifest excerpt + run-metadata.json
                 into .specclaw/changes/<name>/replay-evidence/run-<id>/ (or
                 .specclaw/replay/evidence/run-<id>/ for --all), regenerates
                 evidence-summary.md, warns if .gitignore would swallow the
@@ -88,19 +92,6 @@ require_jq() {
     || die "jq is required by specclaw-bf-replay (nested manifest/fixture JSON parsing) but was not found on PATH."
 }
 
-# MSYS2/Git-Bash paths (/c/...) are not understood by MSBuild when baked into
-# a .csproj's XML content (unlike command-line arguments to a native exe,
-# file contents are never auto-translated) — convert via cygpath when
-# available; pass through unchanged on non-Windows toolchains.
-to_native_path() {
-  local p="$1"
-  if command -v cygpath >/dev/null 2>&1; then
-    cygpath -w "$p" 2>/dev/null || printf '%s' "$p"
-  else
-    printf '%s' "$p"
-  fi
-}
-
 # JSON-escape a string (used only for hand-built markdown-derived text, never
 # for anything already flowing through jq).
 json_escape() {
@@ -111,21 +102,6 @@ json_escape() {
   s="${s//$'\r'/\\r}"
   s="${s//$'\t'/\\t}"
   printf '%s' "$s"
-}
-
-# Read a YAML value (simple single-line scalar) from config.yaml.
-# Usage: yaml_val <file> <dotted.key> — matches on the *last* segment's field
-# name only (same tolerant convention as this plugin's other bins).
-yaml_val() {
-  local file="$1" key="$2"
-  local field="${key##*.}"
-  local val
-  val=$(grep -E "^[[:space:]]*${field}:" "$file" 2>/dev/null | head -1 \
-        | sed -E 's/^[^:]*:[[:space:]]*//' \
-        | sed -E 's/[[:space:]]+#.*$//' \
-        | sed -E 's/[[:space:]]+$//' \
-        | sed 's/^"//' | sed 's/"$//' | sed "s/^'//" | sed "s/'\$//") || true
-  printf '%s' "$val"
 }
 
 # Safe placeholder substitution — never bash's ${var/pat/rep} or sed's s///,
@@ -351,82 +327,60 @@ ${joined}"
 
 cmd_init_rundir() {
   local specclaw_dir="$1" run_dir="$2"
-  local specclaw_dir_abs project_root
-  specclaw_dir_abs="$(cd "$specclaw_dir" && pwd)"
-  project_root="$(cd "$specclaw_dir_abs/.." && pwd)"
-
-  local harness_tpl="$PLUGIN_ROOT/templates/replay-harness"
-  [ -d "$harness_tpl" ] || die "Template directory missing: ${harness_tpl}"
+  [ -d "$specclaw_dir" ] || die "specclaw directory not found: $specclaw_dir"
 
   mkdir -p "$run_dir/actual"
-  cp "$harness_tpl/Capture.cs" "$run_dir/Capture.cs"
-  cp "$harness_tpl/ResultWriter.cs" "$run_dir/ResultWriter.cs"
-  cp "$harness_tpl/Paths.cs" "$run_dir/Paths.cs"
-  cp "$harness_tpl/TestDbContextFactory.cs" "$run_dir/TestDbContextFactory.cs"
 
-  local config_file="$specclaw_dir_abs/config.yaml"
-  local core_override="" dotnet_override=""
-  if [ -f "$config_file" ]; then
-    core_override="$(yaml_val "$config_file" "replay.core_project")"
-    dotnet_override="$(yaml_val "$config_file" "replay.dotnet_command")"
-  fi
-  printf '%s' "${dotnet_override:-dotnet}" > "$run_dir/.dotnet-cmd"
-
-  local core_csproj=""
-  if [ -n "$core_override" ]; then
-    core_csproj="${project_root}/${core_override}"
-    [ -f "$core_csproj" ] || die "config.yaml's replay.core_project ('${core_override}') does not resolve to an existing file at ${core_csproj}."
-  else
-    local candidates=()
-    while IFS= read -r f; do
-      candidates+=("$f")
-    done < <(find "$project_root/src" -iname "*core*.csproj" 2>/dev/null)
-
-    case "${#candidates[@]}" in
-      0) die "No *.csproj matching '*Core*' found under ${project_root}/src — cannot resolve the new repo's own domain project. Set 'replay.core_project' in config.yaml to disambiguate." ;;
-      1) core_csproj="${candidates[0]}" ;;
-      *) die "Multiple candidate Core projects found — refusing to guess: ${candidates[*]}. Set 'replay.core_project' in config.yaml to disambiguate." ;;
-    esac
-  fi
-
-  local target_framework
-  target_framework="$(grep -oE '<TargetFramework>[^<]+' "$core_csproj" 2>/dev/null | head -1 | sed 's/<TargetFramework>//')"
-  [ -n "$target_framework" ] || die "Could not read <TargetFramework> from ${core_csproj}."
-
-  local core_csproj_native
-  core_csproj_native="$(to_native_path "$core_csproj")"
-
-  local tpl_content
-  tpl_content="$(cat "$harness_tpl/ReplayHarness.csproj.template")"
-  tpl_content="$(fill_placeholder "$tpl_content" "{{target_framework}}" "$target_framework")"
-  tpl_content="$(fill_placeholder "$tpl_content" "{{core_project_reference}}" "$core_csproj_native")"
-  printf '%s\n' "$tpl_content" > "$run_dir/ReplayHarness.csproj"
+  # Stub per CONTRACT.md — the replay-mapper agent identifies the rebuild's
+  # own stack and completes every field itself; this script never guesses a
+  # build/test command or a project layout for any stack.
+  cat > "$run_dir/run-config.json" <<'ENDJSON'
+{
+  "stack": null,
+  "build_command": null,
+  "test_command": null,
+  "results_dir": "actual",
+  "evidence_exclusions": []
+}
+ENDJSON
 
   echo "Initialized run directory: ${run_dir}"
-  echo "Core project reference: ${core_csproj_native} (TargetFramework: ${target_framework})"
+  echo "Wrote run-config.json (stub) — the replay-mapper agent must complete stack/build_command/test_command/evidence_exclusions per CONTRACT.md before 'run-tests' can proceed."
 }
 
 # ─── Subcommand: run-tests ───────────────────────────────────────────────────
 
 cmd_run_tests() {
-  local run_dir="$1"
+  require_jq
+  local specclaw_dir="$1" run_dir="$2"
   [ -d "$run_dir" ] || die "Run directory not found: ${run_dir}"
 
-  local dotnet_cmd="dotnet"
-  [ -f "$run_dir/.dotnet-cmd" ] && dotnet_cmd="$(cat "$run_dir/.dotnet-cmd")"
+  local project_root
+  project_root="$(cd "$specclaw_dir/.." && pwd)"
 
-  local build_log="$run_dir/dotnet-build.log"
-  local test_log="$run_dir/dotnet-test.log"
+  local config_file="$run_dir/run-config.json"
+  [ -f "$config_file" ] || die "run-config.json not found in ${run_dir} — run 'init-rundir' first."
+  jq -e . "$config_file" >/dev/null 2>&1 || die "run-config.json in ${run_dir} is not valid JSON."
 
-  echo "Building ${run_dir} ..."
-  if ! ( cd "$run_dir" && "$dotnet_cmd" build ) > "$build_log" 2>&1; then
-    tail -100 "$build_log" >&2
-    die "dotnet build failed in ${run_dir} — see ${build_log}. No fixtures can be replayed until this is fixed."
+  local build_command test_command
+  build_command="$(jq -r '.build_command // empty' "$config_file")"
+  test_command="$(jq -r '.test_command // empty' "$config_file")"
+  [ -n "$test_command" ] || die "run-config.json's test_command is still null — the replay-mapper agent never completed run-config.json."
+
+  local build_log="$run_dir/build.log"
+  local test_log="$run_dir/test.log"
+
+  if [ -n "$build_command" ]; then
+    echo "Building (${build_command}) ..."
+    if ! ( cd "$project_root" && eval "$build_command" ) > "$build_log" 2>&1; then
+      tail -100 "$build_log" >&2
+      die "Build command failed — see ${build_log}. No fixtures can be replayed until this is fixed."
+    fi
   fi
 
-  echo "Running tests in ${run_dir} ..."
+  echo "Running tests (${test_command}) ..."
   local test_rc=0
-  ( cd "$run_dir" && "$dotnet_cmd" test --logger "console;verbosity=normal" ) > "$test_log" 2>&1 || test_rc=$?
+  ( cd "$project_root" && eval "$test_command" ) > "$test_log" 2>&1 || test_rc=$?
 
   local total_lines
   total_lines=$(wc -l < "$test_log")
@@ -437,9 +391,11 @@ cmd_run_tests() {
     cat "$test_log"
   fi
 
-  local actual_count
-  actual_count=$(find "$run_dir/actual" -name "*.json" 2>/dev/null | wc -l)
-  echo "dotnet test exit code: ${test_rc}. Actual-result files written: ${actual_count}."
+  local results_dir actual_dir actual_count
+  results_dir="$(jq -r '.results_dir // "actual"' "$config_file")"
+  actual_dir="$run_dir/$results_dir"
+  actual_count=$(find "$actual_dir" -name "*.json" 2>/dev/null | wc -l)
+  echo "Test command exit code: ${test_rc}. Actual-result files written: ${actual_count}."
 }
 
 # ─── Subcommand: compare ─────────────────────────────────────────────────────
@@ -450,8 +406,11 @@ compute_diffs() {
   jq -n --argjson expected "$expected_json" --argjson actual "$actual_json" --argjson normalized "$normalized_json" '
     def scalars: select(type != "array" and type != "object");
     def pathstr: map(if type == "number" then "[\(.)]" else . end) | join(".");
+    # Per CONTRACT.md: the canonical ExceptionType/InnerExceptionType fields
+    # are compared by the identifier after the last ".", "::", or "/" —
+    # whichever qualified-name convention the producing stack used.
     def shortname:
-      if type == "string" then (split(".") | last) else . end;
+      if type == "string" then (split("\\.|::|/"; "") | last) else . end;
 
     (($normalized // []) | map(sub("^output\\."; ""))) as $norm
     | {value: ($expected // null)} as $ewrap
@@ -711,22 +670,31 @@ compute_verdict_summary() {
   '
 }
 
-# Evidence copy of the generated test project — SOURCE ONLY. Explicit
-# exclusion list enforced in the copy step itself (never bin/, obj/, the
-# run's own pipeline-bookkeeping JSON, or its logs) — not left to hoping a
-# `dotnet clean` ran first.
+# Evidence copy of the generated test project — SOURCE ONLY. Always excludes
+# the run's own pipeline-bookkeeping JSON/logs; additionally excludes
+# whatever run-config.json's evidence_exclusions names as this stack's own
+# build/dependency output (e.g. bin/, obj/ or node_modules/, dist/) — never
+# a hardcoded stack assumption, and never left to hoping a clean ran first.
 copy_test_source() {
-  local run_dir="$1" dest_dir="$2"
+  local run_dir="$1" dest_dir="$2"; shift 2
+  local -a exclusions=("$@")
   mkdir -p "$dest_dir"
-  local f rel
+  local f rel excluded pat
   while IFS= read -r f; do
     rel="${f#"$run_dir"/}"
     case "$rel" in
-      bin/*|*/bin/*|obj/*|*/obj/*) continue ;;
       actual/*) continue ;;
-      selection.json|mapping.json|compare.json|sanction.json|sanction-verified.json) continue ;;
-      dotnet-build.log|dotnet-test.log|.dotnet-cmd) continue ;;
+      run-config.json|selection.json|mapping.json|compare.json|sanction.json|sanction-verified.json) continue ;;
+      build.log|test.log) continue ;;
     esac
+    excluded=false
+    for pat in ${exclusions[@]+"${exclusions[@]}"}; do
+      [ -z "$pat" ] && continue
+      case "$rel" in
+        "${pat}"*|*"/${pat}"*) excluded=true; break ;;
+      esac
+    done
+    $excluded && continue
     mkdir -p "$dest_dir/$(dirname "$rel")"
     cp "$f" "$dest_dir/$rel"
   done < <(find "$run_dir" -type f)
@@ -891,6 +859,12 @@ cmd_render() {
   local today
   today=$(date +%Y-%m-%d)
 
+  # Identified stack — read unconditionally (run-config.json is present in
+  # run_dir regardless of --discard; only finalize's later curation step
+  # depends on that flag) so the report header can always state it.
+  local stack_r
+  stack_r="$(jq -r '.stack // "unknown"' "$run_dir/run-config.json" 2>/dev/null || echo "unknown")"
+
   # ── Evidence pointer block. Retention is the default — `--discard` opts
   # a single run out of the evidence package, but the report itself is
   # always written either way, so it must say plainly which case this is. ─
@@ -899,14 +873,11 @@ cmd_render() {
   if [ "$discard_flag" = "--discard" ]; then
     evidence_block="**Evidence package:** discarded (\`--discard\` was passed) — no retained proof package exists for this run; the verdicts above are not independently reviewable evidence."
   else
-    local evidence_rel new_repo_sha plugin_version dotnet_cmd_r dotnet_version
+    local evidence_rel new_repo_sha plugin_version
     evidence_rel="$(evidence_dir_rel "$target" "$evidence_run_id")"
     new_repo_sha="$(git -C "$(cd "${specclaw_dir_abs}/.." && pwd)" rev-parse --short HEAD 2>/dev/null || echo "unknown")"
     plugin_version="$(jq -r '.version // "unknown"' "$PLUGIN_ROOT/.claude-plugin/plugin.json" 2>/dev/null || echo "unknown")"
-    dotnet_cmd_r="dotnet"
-    [ -f "$run_dir/.dotnet-cmd" ] && dotnet_cmd_r="$(cat "$run_dir/.dotnet-cmd")"
-    dotnet_version="$("$dotnet_cmd_r" --version 2>/dev/null || echo "unknown")"
-    evidence_block="**Evidence package:** \`${evidence_rel}/\` (new-repo commit \`${new_repo_sha}\`, dotnet \`${dotnet_version}\`, specclaw v${plugin_version})
+    evidence_block="**Evidence package:** \`${evidence_rel}/\` (new-repo commit \`${new_repo_sha}\`, stack \`${stack_r}\`, specclaw v${plugin_version})
 
 This package contains the generated tests (source), the actual outputs produced by the rebuilt application, references (fixture IDs + hashes) to the sealed legacy fixtures they were compared against, and the per-fixture verdicts below — together, mechanical proof that the rebuilt application's behaviour was compared against the original application's recorded behaviour."
   fi
@@ -915,6 +886,7 @@ This package contains the generated tests (source), the actual outputs produced 
   content="$(cat "$template")"
   content="$(fill_placeholder "$content" "{{target}}" "$target")"
   content="$(fill_placeholder "$content" "{{date}}" "$today")"
+  content="$(fill_placeholder "$content" "{{stack}}" "$stack_r")"
   content="$(fill_placeholder "$content" "{{legacy_commit_sha}}" "$legacy_sha")"
   content="$(fill_placeholder "$content" "{{bl_item}}" "$bl_item")"
   content="$(fill_placeholder "$content" "{{selected_count}}" "$selected_count")"
@@ -988,7 +960,13 @@ cmd_finalize() {
   [ -f "$report_src" ] || die "Report not found at ${report_src} — run 'render' before 'finalize'."
   cp "$report_src" "$evidence_dir/report.md"
 
-  copy_test_source "$run_dir" "$evidence_dir/tests"
+  local -a evidence_exclusions=()
+  if [ -f "$run_dir/run-config.json" ]; then
+    while IFS= read -r pat; do
+      evidence_exclusions+=("$pat")
+    done < <(jq -r '.evidence_exclusions[]? // empty' "$run_dir/run-config.json" 2>/dev/null)
+  fi
+  copy_test_source "$run_dir" "$evidence_dir/tests" ${evidence_exclusions[@]+"${evidence_exclusions[@]}"}
 
   if [ -d "$run_dir/actual" ]; then
     local af
@@ -1011,12 +989,10 @@ cmd_finalize() {
   bl_item=$(jq -c '.bl_item // null' "$selection" 2>/dev/null || echo null)
   selected_count=$(jq -r '.selected_count // 0' "$selection" 2>/dev/null || echo 0)
 
-  local new_repo_sha plugin_version dotnet_cmd dotnet_version
+  local new_repo_sha plugin_version stack
   new_repo_sha="$(git -C "$project_root" rev-parse --short HEAD 2>/dev/null || echo "unknown")"
   plugin_version="$(jq -r '.version // "unknown"' "$PLUGIN_ROOT/.claude-plugin/plugin.json" 2>/dev/null || echo "unknown")"
-  dotnet_cmd="dotnet"
-  [ -f "$run_dir/.dotnet-cmd" ] && dotnet_cmd="$(cat "$run_dir/.dotnet-cmd")"
-  dotnet_version="$("$dotnet_cmd" --version 2>/dev/null || echo "unknown")"
+  stack="$(jq -r '.stack // "unknown"' "$run_dir/run-config.json" 2>/dev/null || echo "unknown")"
 
   local counts today
   counts="$(compute_verdict_summary "$run_dir/compare.json" "$run_dir/sanction-verified.json" "$selected_count")"
@@ -1030,7 +1006,7 @@ cmd_finalize() {
     --arg legacy_sha "$legacy_sha" \
     --arg new_repo_sha "$new_repo_sha" \
     --arg plugin_version "$plugin_version" \
-    --arg dotnet_version "$dotnet_version" \
+    --arg stack "$stack" \
     --argjson selected_count "$selected_count" \
     --argjson counts "$counts" \
     '{
@@ -1041,7 +1017,7 @@ cmd_finalize() {
       legacy_commit_sha: $legacy_sha,
       new_repo_commit_sha: $new_repo_sha,
       plugin_version: $plugin_version,
-      dotnet_version: $dotnet_version,
+      stack: $stack,
       selected_count: $selected_count,
       counts: ($counts | del(.overall, .exit_code)),
       overall_verdict: $counts.overall
@@ -1129,8 +1105,8 @@ case "${1:-}" in
     cmd_init_rundir "$2" "$3"
     ;;
   run-tests)
-    [ $# -ge 2 ] || die "Usage: specclaw-bf-replay run-tests <run_dir>"
-    cmd_run_tests "$2"
+    [ $# -ge 3 ] || die "Usage: specclaw-bf-replay run-tests <specclaw_dir> <run_dir>"
+    cmd_run_tests "$2" "$3"
     ;;
   compare)
     [ $# -ge 3 ] || die "Usage: specclaw-bf-replay compare <specclaw_dir> <run_dir>"
