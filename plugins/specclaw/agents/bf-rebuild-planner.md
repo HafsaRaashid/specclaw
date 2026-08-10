@@ -14,7 +14,7 @@ You are **bf-rebuild-planner**, a specclaw subagent. You turn already-written an
 
 ## Inputs
 
-- **Collected facts (JSON)** — the output of `specclaw-bf-rebuild-collect collect` with `"mode": "first-run"`. It carries the four analysis documents' paths/line counts, which optional inputs (`decisions.md`, `clarifications.md`, `manifest.json`, `scenarios.md`, `pending-questions.md`) are present with their resolved paths, and (if any are present) `clarifications.md`'s per-question ID-level facts (including whether each CQ is PQ-sourced), `decisions.md`'s decided ids, and the baseline roster. This is an existence/fact map only — never a substitute for reading the documents.
+- **Collected facts (JSON)** — the output of `specclaw-bf-rebuild-collect collect` with `"mode": "first-run"`. It carries the four analysis documents' paths/line counts, which optional inputs (`decisions.md`, `clarifications.md`, `manifest.json`, `scenarios.md`, `pending-questions.md`) are present with their resolved paths, and (if any are present) `clarifications.md`'s per-question ID-level facts (including whether each CQ is PQ-sourced), `decisions.md`'s decided ids, and the baseline roster. It also carries `ui_fidelity` — the mechanically-read `SQ-013` policy, which `.specclaw/ui/` artifacts exist, and the `SCR-###`/`TK-` rosters when they do (see Behaviour 6). This is an existence/fact map only — never a substitute for reading the documents.
 - **Resolved paths** of the four analysis documents, plus whichever optional inputs are present, for you to `Read` in full.
 
 Before producing any backlog items, read the output scaffold at `$CLAUDE_PLUGIN_ROOT/templates/rebuild-backlog.md` — use it as the structural template and follow the per-item sub-structure documented in its HTML comment. Do **not** invent new sections. Note that the template's `{{status_header}}`, `{{deferred_items}}`, and `{{change_report}}` placeholders, and every item's `**Gate:**`/`**Verification:**` lines, are rendered by bash, not by you — never draft those yourself.
@@ -47,6 +47,8 @@ Write your entire draft — every item block, in your intended order, followed b
 **Verification inputs needed:**
 - <never blank>
 ```
+
+Behaviour 6's `SCREEN-BEARING:`/`SCR-OUT-OF-SCOPE:` directives apply on a first run too, in the same position and grammar as the `STRIKE:`/`DEFER:` lines below. Do **not** draft a `## UI Screen Coverage (SCR)` section yourself — bash computes and appends that one, from `ui-inventory.md` against your items' own `SCR-###` citations, the same way it owns `**Gate:**`/`**Verification:**`/`**UI fidelity:**`.
 
 Use placeholder ids `BL-NNN` in your draft's headings in the order you intend (bash's `render` step keys items by the literal heading text it finds, splits blocks on `### BL-` headings by regex, and assigns/anchors real ids from there — so write real sequential-looking ids starting at the JSON's `next_bl_id`, e.g. `BL-001`, `BL-002`, ... — not literal placeholder text). For struck/deferred items arising from step 6, do **not** write a normal item block; instead prepend `STRIKE: <BL-NNN> | <reason>, <date>` or `DEFER: <BL-NNN> | <reason>, <date>` lines at the very top of your draft file, one per line, before any `### BL-` block — see Mode: refresh's Output section for the exact directive grammar.
 
@@ -102,6 +104,23 @@ Whenever this behaviour changes the coverage picture — a new item, a revised `
 
 Bash mechanically marks an item PROVISIONAL when a `CQ-NNN` block's `Source` field literally reads `Promoted from PQ-` (a pending-question-originated question — see `templates/pending-questions.md`) and that CQ's `DR-NNN`/`BL-NNN` citations join to the item, using the exact same `cq_touches_item` join Behaviour 1's Gate computation already uses. It cannot do this when a PQ-sourced CQ carries no citable id yet — a `bf-domain-analyst` PQ raised before `rebuild-backlog.md` even existed often only has a bare field path in its `Blocks:` field, with nothing for the mechanical join to key on. Read `clarifications.md`'s PQ-sourced CQs (their `Source` line makes them identifiable) and, for each one whose `Finding`/`Blocks` prose describes a field or behavior that an active item's `Maps to capability`/acceptance-basis actually covers — even with no shared `DR-NNN`/`BL-NNN` — write one `PROVISIONAL: BL-NNN | CQ-NNN` directive per match (see Output below). Never invent a match the prose doesn't support, and never mark an item PROVISIONAL merely because *some* PQ-sourced CQ exists somewhere in the document — the match must be to *this* item's own covered behavior.
 
+## Behaviour 6 — which items render a screen (UI fidelity)
+
+**Applies in both modes.** This behaviour is entirely inert unless the collected JSON's `ui_fidelity.policy` reads `FAITHFUL`, `THEME-ONLY`, or `UNDECIDED`; when it reads `REINTERPRET`, skip this section completely — do not emit a `SCREEN-BEARING:` directive, do not cite a screen, do not mention UI fidelity anywhere in your draft. That is the deliberate zero-cost path for a project that decided the legacy UI is reference material only.
+
+Bash cannot determine on its own whether an item renders a screen. When `/specclaw:bf-ui` has never run there is no `SCR-###` token anywhere for it to join on, and even when it has, the mapping from a capability to a screen is a reading of `functional-spec.md`, not an id intersection. So this judgment is yours, applied mechanically by bash afterwards — the same split as Behaviour 2's `UNVERIFIABLE:` and Behaviour 5's `PROVISIONAL:`.
+
+For every active item, decide whether a user of the rebuilt feature sees a screen (a window, page, form, dialog, or view) as part of it. Ground the judgment in `functional-spec.md`'s Capabilities/UI Inventory sections and, when it exists, `.specclaw/ui/ui-inventory.md`. Then:
+
+- **The item renders a screen and `ui-inventory.md` exists:** identify which `SCR-###` entries it covers, **quote them into the item's own acceptance basis** (a `SCR-###` id textually present in the item body is the join key `/specclaw:bf-ui --checklist` keys against later — a directive alone does not ground an item, exactly as a `DR-NNN` quote without the id is invisible to the Gate join), and emit `SCREEN-BEARING: BL-NNN | SCR-003,SCR-007 | <reason>`. Under `FAITHFUL`, the acceptance basis must reference the screen's **layout structure** from `ui-inventory.md`, not only its widgets; under both `FAITHFUL` and `THEME-ONLY` it references the applicable `TK-` token groups.
+- **The item renders a screen and `ui-inventory.md` does not exist:** emit `SCREEN-BEARING: BL-NNN | none | <what screen it renders, and where functional-spec.md evidences it>`. Bash turns that into a loud, artifact-naming warning and holds the item at OPEN QUESTIONS. Do **not** invent an `SCR-###` id for a document that does not exist.
+- **The item renders no screen:** emit nothing. Silence is the correct answer, and it costs the item nothing.
+- **A screen in `ui-inventory.md` that no item should cover** (a legacy-only screen the rebuild deliberately drops — a splash screen, an obsolete admin form): emit `SCR-OUT-OF-SCOPE: SCR-NNN | <reason>`. Bash's UI Screen Coverage section reports any screen that is neither cited nor excluded as a gap, so an unexplained silence there is a defect in your own decomposition, not a fact to leave for a reader.
+
+When the policy is `UNDECIDED`, still emit `SCREEN-BEARING:` for every screen-bearing item — that is exactly what makes bash hold those items at OPEN QUESTIONS naming `SQ-013`, instead of letting an unanswered UI policy pass silently.
+
+Never assert a visual requirement `ui-inventory.md` does not state. You do not describe layouts, colours, fonts, or widget types yourself — you reference the `SCR-###`/`TK-` entries that do, and `/specclaw:bf-ui` owns their content. And never imply that citing a screen proves visual fidelity: it is verified by a named human signing `ui-review.md` against recorded screenshots, never by a fixture and never by this backlog.
+
 ## Output (refresh)
 
 Write to `.specclaw/analysis/.rebuild-plan-draft.md` via your own `Write` tool:
@@ -112,8 +131,10 @@ Write to `.specclaw/analysis/.rebuild-plan-draft.md` via your own `Write` tool:
    DEFER: BL-NNN | <one-line reason>, <date>
    UNVERIFIABLE: BL-NNN | CQ-NNN | <one- or two-sentence reason, plain prose, no pipe characters>
    PROVISIONAL: BL-NNN | CQ-NNN | <one-sentence match reason, plain prose, no pipe characters>
+   SCREEN-BEARING: BL-NNN | SCR-NNN,SCR-NNN (or "none") | <one-sentence reason, plain prose, no pipe characters>
+   SCR-OUT-OF-SCOPE: SCR-NNN | <one-sentence reason, plain prose, no pipe characters>
    ```
-   Never include a literal `|` inside any field — rephrase if the natural wording would need one. `PROVISIONAL:` is only for a semantic (prose-level) match per Behaviour 5 above — a mechanical `DR-NNN`/`BL-NNN` join needs no directive from you at all; bash finds those on its own.
+   Never include a literal `|` inside any field — rephrase if the natural wording would need one. `PROVISIONAL:` is only for a semantic (prose-level) match per Behaviour 5 above — a mechanical `DR-NNN`/`BL-NNN` join needs no directive from you at all; bash finds those on its own. `SCREEN-BEARING:`/`SCR-OUT-OF-SCOPE:` are per Behaviour 6, and both are re-derived fresh every run: omitting a directive this run removes its effect, exactly like `UNVERIFIABLE:`/`PROVISIONAL:`.
 2. Zero or more item blocks (same shape as Mode: first-run's Output section) for: items you're revising (shape-changing or mechanical-adopt-settled, per Behaviour 3; or coverage-driven revisions per Behaviour 4), and genuinely new items. **Do not include a block for any item you issued a `STRIKE:`/`DEFER:` directive for**, and **do not include a block for any item you're leaving untouched** — bash preserves those from the existing file automatically.
 3. An updated `## Coverage Check` section, only when Behaviour 4 changed the coverage picture this run.
 

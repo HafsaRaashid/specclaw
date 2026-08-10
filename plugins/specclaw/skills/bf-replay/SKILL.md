@@ -154,6 +154,8 @@ Pass `--discard` only if that flag was on the original invocation — it tells `
 - **FAIL** — any ERROR, or any DIVERGES that is not SANCTIONED.
 - **INCOMPLETE** — the selected set was non-empty but every fixture in it came back NOT REPLAYABLE (nothing was actually exercised).
 
+When `decisions.md` records a UI fidelity policy (`SQ-013`) of `FAITHFUL` or `THEME-ONLY`, the report also carries one **informational footer line**: _"UI fidelity is verified by human checklist (`ui-review.md`), not by fixture replay."_ That is its entire effect — no verdict logic, no fixture status, no exit code, and no fixture selection changes because of it, and the line is absent altogether under `REINTERPRET` or an undecided policy. UI remains excluded from the seam taxonomy (`templates/seams.md`'s "Excluded: UI Automation"); the footer exists so a reader of a PASS report never mistakes it for a statement about how the rebuilt interface looks.
+
 Writes the report to `.specclaw/changes/<change>/replay-report.md` (named change) or `.specclaw/replay/report-<run_id>.md` (`--all`), and exits `0`/`1`/`2`/`1` for PASS/FAIL/INCOMPLETE/PASS-PENDING-DECISIONS respectively — **PASS-PENDING-DECISIONS gates CI/PR exactly like FAIL** (same exit code 1), by design: analysis and build keep moving under a soft block, but the proof gate holds the line until a named human decides the question. This computation is untouched by evidence retention; the same inputs produce the same verdict and exit code as before.
 
 ## Step 9 — Retain evidence (or discard, if asked)

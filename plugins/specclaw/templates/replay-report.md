@@ -64,3 +64,5 @@ _Business rules from domain-model.md not exercised by any REPLAYABLE fixture in 
 - **PASS-PENDING-DECISIONS** — same as PASS, except at least one exercised fixture is still PROVISIONAL — see Open Decisions Blocking PASS above. Gates CI/PR exactly like FAIL (exit code 1); analysis and build keep moving, but this run is not yet citable as final proof.
 - **FAIL** — at least one ERROR, or at least one DIVERGES with no sanctioning decided CQ. "Looks more correct" is never a sanction.
 - **INCOMPLETE** — the selected fixture set was non-empty but nothing in it was actually replayable this run.
+
+{{ui_fidelity_footer}}

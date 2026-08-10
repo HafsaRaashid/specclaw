@@ -119,6 +119,35 @@ fill_placeholder() {
   printf '%s' "${result}${remaining}"
 }
 
+# UI fidelity policy — read mechanically from decisions.md's literal
+# structure, the same discipline sanction-check uses for a CQ citation.
+# Used for ONE thing only: an informational footer line in the rendered
+# report. It touches no verdict, no fixture status, no exit code — UI is
+# excluded from the golden-master seam taxonomy and nothing here changes
+# that. (Copied rather than shared, per repo convention.)
+FIDELITY_SQ_ID="SQ-013"
+
+read_fidelity_policy() {
+  local decisions_file="$1"
+  [ -f "$decisions_file" ] || { printf 'UNDECIDED'; return 0; }
+  local block
+  block="$(awk -v id="$FIDELITY_SQ_ID" '
+    $0 ~ ("^### " id "[[:space:]]") { cap=1; next }
+    cap && /^### / { cap=0 }
+    cap { print }
+  ' "$decisions_file" 2>/dev/null || true)"
+  [ -n "$block" ] || { printf 'UNDECIDED'; return 0; }
+  local decision
+  decision="$(printf '%s\n' "$block" | grep -m1 -- '^- \*\*Decision:\*\*' | sed -E 's/^- \*\*Decision:\*\* *//' || true)"
+  [ -n "$decision" ] || { printf 'UNDECIDED'; return 0; }
+  case "$decision" in
+    *THEME-ONLY*)  printf 'THEME-ONLY' ;;
+    *FAITHFUL*)    printf 'FAITHFUL' ;;
+    *REINTERPRET*) printf 'REINTERPRET' ;;
+    *)             printf 'UNDECIDED' ;;
+  esac
+}
+
 # Extract the markdown block under a "### <heading_id> —" heading, up to (not
 # including) the next "### " heading. Used for both decisions.md (CQ-###) and
 # rebuild-backlog.md (BL-###) — same heading shape in both real documents.
@@ -938,6 +967,18 @@ This package contains the generated tests (source), the actual outputs produced 
   content="$(fill_placeholder "$content" "{{not_replayable_list}}" "$not_replayable_list")"
   content="$(fill_placeholder "$content" "{{open_decisions_blocking_pass}}" "$open_decisions_blocking_pass")"
   content="$(fill_placeholder "$content" "{{dr_uncovered_list}}" "$dr_uncovered_list")"
+
+  # ── Informational footer only. Purely additive: the verdict above and the
+  # exit code below are computed exactly as before, and a project whose UI
+  # fidelity policy is REINTERPRET or undecided sees no footer at all. ────
+  local ui_policy ui_footer=""
+  ui_policy="$(read_fidelity_policy "${specclaw_dir_abs}/analysis/decisions.md")"
+  case "$ui_policy" in
+    FAITHFUL|THEME-ONLY)
+      ui_footer="_UI fidelity is verified by human checklist (\`ui-review.md\`), not by fixture replay. This report's verdict says nothing about the rebuilt interface's appearance — UI fidelity policy is ${ui_policy} (${FIDELITY_SQ_ID}); see \`/specclaw:bf-ui --checklist\`._"
+      ;;
+  esac
+  content="$(fill_placeholder "$content" "{{ui_fidelity_footer}}" "$ui_footer")"
 
   local out_path
   if [ "$target" = "--all" ]; then
