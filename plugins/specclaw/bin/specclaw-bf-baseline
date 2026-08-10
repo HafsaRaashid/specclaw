@@ -148,6 +148,17 @@ scenario_block_field() {
     | sed -E "s/^- \*\*${label}:\*\* *//" | sed -E 's/[[:space:]]+$//'
 }
 
+# Fingerprint of a scenario's own defining content — used only to detect
+# SUPERSEDED (a re-run of design mode changed what this GM-ID means while a
+# captured fixture from the OLD definition still sits on disk; fixture
+# files are additive and never deleted by any specclaw command, but a
+# scenario's own text is free to change under the same ID on a fresh Mode A
+# run). Hashing the whole block, not just the rule citation, means any
+# textual change to the scenario is caught, never only a rule-number change.
+scenario_block_hash() {
+  sha256sum "$1" 2>/dev/null | awk '{print $1}'
+}
+
 # ─── Fixture JSON field extraction (jq-based, per CONTRACT.md) ──────────────
 # Fixtures are produced by whichever stack bf-baseline-designer generated the
 # capture harness in this run (per CONTRACT.md — never assumed to be any
@@ -200,6 +211,10 @@ cmd_collect() {
   docs_present_json="$(printf '%s\n' "${docs_present[@]}" | json_array_from_lines)"
   docs_missing_json="$(printf '%s\n' "${docs_missing[@]}" | json_array_from_lines)"
 
+  local clar_present=false pq_present=false
+  [ -f "$analysis_dir/clarifications.md" ] && clar_present=true
+  [ -f "$analysis_dir/pending-questions.md" ] && pq_present=true
+
   local output
   output=$(cat <<ENDJSON
 {
@@ -208,7 +223,9 @@ cmd_collect() {
   "supplementary_docs_present": [${docs_present_json}
   ],
   "supplementary_docs_missing": [${docs_missing_json}
-  ]
+  ],
+  "clarifications_md": {"present": ${clar_present}, "path": ".specclaw/analysis/clarifications.md"},
+  "pending_questions_md": {"present": ${pq_present}, "path": ".specclaw/analysis/pending-questions.md"}
 }
 ENDJSON
 )
@@ -291,6 +308,19 @@ cmd_record() {
   local manifest_file="$baseline_dir/manifest.json"
   local archive_dir="$baseline_dir/archive"
 
+  # Prior manifest's per-scenario content hash, read BEFORE archiving —
+  # the only way to detect SUPERSEDED (see scenario_block_hash above).
+  # Absent for a scenario's first-ever record (nothing to compare against
+  # yet), which is correctly treated as "not superseded" below.
+  local -A prior_scenario_hash=()
+  if [ -f "$manifest_file" ] && jq -e . "$manifest_file" >/dev/null 2>&1; then
+    local psid pshash
+    while IFS=$'\t' read -r psid pshash; do
+      [ -z "$psid" ] && continue
+      prior_scenario_hash["$psid"]="$pshash"
+    done < <(jq -r '.fixtures[]? | [.scenario_id, (.scenario_content_hash // "")] | @tsv' "$manifest_file" 2>/dev/null || true)
+  fi
+
   local workdir; workdir="$(mktemp -d)"
   split_scenario_blocks "$scenarios_file" "$workdir"
 
@@ -301,9 +331,10 @@ cmd_record() {
   [ "${#block_files[@]}" -gt 0 ] || { rm -rf "$workdir"; die "no GM-NNN scenarios found in .specclaw/baseline/scenarios.md — nothing to record against."; }
 
   local fixtures_json="" missing_json="" ffirst=true mfirst=true
-  local f id seam rules backlog_item fixture_path content_hash
+  local f id seam rules backlog_item fixture_path content_hash scenario_hash status
   local captured_at anchor_date commit_sha runtime_version normalized_fields
   local captured_count=0 missing_count=0
+  local verifiable_count=0 provisional_count=0 superseded_count=0
 
   for f in "${block_files[@]}"; do
     id="$(scenario_block_id "$f")"
@@ -311,9 +342,31 @@ cmd_record() {
     rules="$(scenario_block_field "$f" "Business rules pinned")"
     backlog_item="$(scenario_block_field "$f" "Verifies backlog item")"
     fixture_path="$fixtures_dir/${id}.json"
+    scenario_hash="sha256:$(scenario_block_hash "$f")"
+
+    # Status per templates/CONTRACT.md (c') — computed mechanically from
+    # this scenario's own text, same discipline as sanction-check's literal
+    # heading grep: never an agent's word for it.
+    local provisional_ref=""
+    if [ -n "${prior_scenario_hash[$id]:-}" ] && [ "${prior_scenario_hash[$id]}" != "$scenario_hash" ]; then
+      status="SUPERSEDED"
+    elif grep -qF '⚠ PROVISIONAL' "$f" 2>/dev/null; then
+      status="PROVISIONAL"
+      # Not part of CONTRACT.md's documented enum — internal plumbing, same
+      # tier as content_hash, so specclaw-bf-replay's report can name which
+      # PQ/CQ blocks this fixture instead of only stating that one does.
+      provisional_ref="$(grep -oE 'PQ-[0-9]+|CQ-[0-9]+' "$f" 2>/dev/null | awk '!seen[$0]++' | paste -sd, - 2>/dev/null || true)"
+    else
+      status="VERIFIABLE"
+    fi
 
     if [ -f "$fixture_path" ]; then
       captured_count=$((captured_count + 1))
+      case "$status" in
+        VERIFIABLE) verifiable_count=$((verifiable_count + 1)) ;;
+        PROVISIONAL) provisional_count=$((provisional_count + 1)) ;;
+        SUPERSEDED) superseded_count=$((superseded_count + 1)) ;;
+      esac
       content_hash="sha256:$(sha256sum "$fixture_path" 2>/dev/null | awk '{print $1}')"
       if jq -e . "$fixture_path" >/dev/null 2>&1; then
         captured_at="$(fixture_field "$fixture_path" "captured_at")"
@@ -335,6 +388,9 @@ cmd_record() {
       \"verifies_backlog_item\": \"$(json_escape "$backlog_item")\",
       \"fixture_path\": \"$(json_escape ".specclaw/baseline/fixtures/${id}.json")\",
       \"content_hash\": \"$(json_escape "$content_hash")\",
+      \"scenario_content_hash\": \"$(json_escape "$scenario_hash")\",
+      \"status\": \"$(json_escape "$status")\",
+      \"provisional_ref\": \"$(json_escape "$provisional_ref")\",
       \"captured_at\": \"$(json_escape "$captured_at")\",
       \"anchor_date\": \"$(json_escape "$anchor_date")\",
       \"legacy_commit_sha\": \"$(json_escape "$commit_sha")\",
@@ -371,7 +427,7 @@ ENDJSON
   printf '%s\n' "$output" > "$manifest_file"
   emit_json "$output"
 
-  echo "Wrote $manifest_file (${captured_count}/${total} scenarios captured, ${missing_count} missing)" >&2
+  echo "Wrote $manifest_file (${captured_count}/${total} scenarios captured, ${missing_count} missing; of captured: ${verifiable_count} VERIFIABLE, ${provisional_count} PROVISIONAL, ${superseded_count} SUPERSEDED — recapture a SUPERSEDED fixture, its scenario definition changed since capture)" >&2
 }
 
 # ─── Main ─────────────────────────────────────────────────────────────────────

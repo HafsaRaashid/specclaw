@@ -27,7 +27,7 @@ This command does **not** run the legacy app and does **not** capture fixtures i
    Skip each `mv` independently if that specific file doesn't exist yet. This is `/specclaw:bf-baseline`'s own archive directory (`.specclaw/baseline/archive/`) — a separate document family from `.specclaw/analysis/archive/`, but the same convention: archive-then-replace, never silently overwrite.
 
 3. **Spawn the design agent:** `Agent` tool, `subagent_type: "bf-baseline-designer"`, on the model from `config.yaml` `models.review` (default: `anthropic/claude-sonnet-4-5`) — same routing as the sibling read-only analysis agents, since this is still read-only design work, not spec/design authoring for a change. Pass as context:
-   - The collected JSON (stdout of Step 1).
+   - The collected JSON (stdout of Step 1) — now including `clarifications_md`/`pending_questions_md` presence + resolved paths.
    - The resolved path of `.specclaw/analysis/domain-model.md`, plus the resolved paths of whichever supplementary documents are present, for the agent to `Read` directly.
    - **Tell the agent explicitly it is running in design mode.**
 
@@ -67,9 +67,9 @@ Fully deterministic — no agent involved. Run this after a human has actually e
    ```bash
    specclaw-bf-baseline record .specclaw
    ```
-   Requires `.specclaw/baseline/scenarios.md` to exist. **If it exits non-zero, surface its stderr message verbatim and stop.** For every `GM-NNN` scenario, checks for a `.specclaw/baseline/fixtures/<id>.json` file; if present, hashes it (sha256) and extracts its capture metadata (`captured_at`, `anchor_date`, `legacy_commit_sha`, `runtime_version`, `normalized_fields`) alongside `scenarios.md`'s own seam/rule/backlog-item fields for that ID. Archives any prior `manifest.json` before writing the new one.
+   Requires `.specclaw/baseline/scenarios.md` to exist. **If it exits non-zero, surface its stderr message verbatim and stop.** For every `GM-NNN` scenario, checks for a `.specclaw/baseline/fixtures/<id>.json` file; if present, hashes it (sha256) and extracts its capture metadata (`captured_at`, `anchor_date`, `legacy_commit_sha`, `runtime_version`, `normalized_fields`) alongside `scenarios.md`'s own seam/rule/backlog-item fields for that ID. Also computes each captured fixture's `status` (`VERIFIABLE` | `PROVISIONAL` | `SUPERSEDED`, per `templates/CONTRACT.md`) mechanically: `PROVISIONAL` when the scenario's own text carries the `⚠ PROVISIONAL` marker (an open pending question still blocks the rule it pins); `SUPERSEDED` when a fixture already exists but the current scenario's own text hash no longer matches what the prior manifest recorded for that ID (the scenario's definition changed under the same `GM-NNN` since capture — recapture it); otherwise `VERIFIABLE`. Archives any prior `manifest.json` before writing the new one.
 
-2. **Present a short summary:** how many of the total scenarios have a captured fixture and how many are still missing (naming them), plus the manifest's location.
+2. **Present a short summary:** how many of the total scenarios have a captured fixture and how many are still missing (naming them), the status breakdown (VERIFIABLE/PROVISIONAL/SUPERSEDED — name which fixtures are SUPERSEDED, since those need a human to recapture, not just wait on a decision), plus the manifest's location.
 
 ## What this command does not do
 

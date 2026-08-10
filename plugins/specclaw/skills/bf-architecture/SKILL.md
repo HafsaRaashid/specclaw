@@ -24,6 +24,7 @@ Analyze an existing codebase's architecture and write `.specclaw/analysis/archit
 3. **Spawn the analysis agent:** `Agent` tool, `subagent_type: "bf-architecture-analyst"`, on the model from `config.yaml` `models.review` (default: `anthropic/claude-sonnet-4-5`). Pass as context:
    - The collected JSON (stdout of Step 1, which now includes `dependency_graph`).
    - The resolved target path.
+   - Whether `.specclaw/analysis/pending-questions.md` and `.specclaw/analysis/clarifications.md` exist (simple `[ -f ... ]` checks — this command has no dedicated collector to add the fields to, unlike `bf-domain`) and their resolved paths if so, for the agent's own Ask, Don't Guess de-duplication.
 
 4. The agent writes `.specclaw/analysis/architecture.md` itself, per its own Output section — this skill does not write the file.
 

@@ -23,7 +23,7 @@ Analyze an existing codebase's business domain and user-facing functionality, wr
    Skip each `mv` independently if that specific file doesn't exist yet — one may exist without the other on an unusual prior run. This is the same shared archive directory `analyze`/`architecture` already use — all document types land in `.specclaw/analysis/archive/`, distinguished by filename.
 
 3. **Spawn the analysis agent:** `Agent` tool, `subagent_type: "bf-domain-analyst"`, on the model from `config.yaml` `models.review` (default: `anthropic/claude-sonnet-4-5`). Pass as context:
-   - The collected JSON (stdout of Step 1).
+   - The collected JSON (stdout of Step 1) — now including `pending_questions`/`clarifications` presence + resolved paths, for the agent's own Ask, Don't Guess de-duplication.
    - The resolved target path.
 
 4. The agent writes `.specclaw/analysis/domain-model.md` and `.specclaw/analysis/functional-spec.md` itself, per its own Output section — this skill does not write either file.

@@ -64,6 +64,19 @@ specially: it compares them by the identifier **after the last `.`, `::`, or
 field is compared for exact equality, except any path listed in the fixture's
 own `normalized_fields`.
 
+## (c') Manifest entry status
+
+Each entry in `.specclaw/baseline/manifest.json`'s `fixtures[]` array (bash-derived from
+scenarios.md and the fixture files, per (a) above — never agent-authored, so
+this is the one manifest-level field this contract documents) also carries
+a `status` field: `VERIFIABLE | PROVISIONAL | SUPERSEDED`. `PROVISIONAL`
+means the fixture's underlying scenario traces to a business rule still
+blocked by an open pending question (see `templates/pending-questions.md`)
+— captured and replayable, but not yet a settled proof. `SUPERSEDED` means
+the scenario's own definition changed since this fixture was captured
+against it. `specclaw-bf-replay` propagates both into its verdict and
+overall-PASS computation; never a stack-specific concern.
+
 ## (c) ID permanence
 
 `GM-NNN` (scenarios), `DR-NNN` (business rules), `CQ-NNN`/`SQ-NNN`/`UQ-NNN`

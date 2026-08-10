@@ -26,6 +26,18 @@
   that state) does not belong here — list it under "No Legacy Behaviour
   Exists" instead, since there is no legacy behaviour to pin as a golden
   master.
+
+  PROVISIONAL marker: when a scenario's pinned business rule is itself
+  provisional (domain-model.md already marks it, or a clarifications.md CQ
+  promoted from a PQ touches it), append
+  `⚠ PROVISIONAL — pending PQ-NNN/CQ-NNN (proposed default: <x>)` to that
+  scenario's own "Business rules pinned" line. This is soft-block — the
+  scenario is still fully designed, just like any other; the Rule Coverage
+  Check below groups these under their own "Provisional pending decision"
+  heading. `specclaw-bf-baseline record` detects this literal marker text
+  mechanically to set the matching manifest.json fixture entry's `status`
+  to `PROVISIONAL` (see templates/CONTRACT.md) — never rename or reformat
+  the marker string, or that detection silently stops working.
 -->
 
 ## Scenarios

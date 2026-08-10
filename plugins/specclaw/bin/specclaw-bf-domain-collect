@@ -761,10 +761,20 @@ cmd_collect() {
   rm -f "$tmp_all" "$tmp_scoped" "$handler_names_tmp" "$handler_names_sorted"
 
   # Step 5: assemble — delegated_body's fields plus the new ones, one flat object.
+  local pq_present=false pq_path="" clar_present=false clar_path=""
+  if [ -f "$specclaw_dir_abs/analysis/pending-questions.md" ]; then
+    pq_present=true; pq_path=".specclaw/analysis/pending-questions.md"
+  fi
+  if [ -f "$specclaw_dir_abs/analysis/clarifications.md" ]; then
+    clar_present=true; clar_path=".specclaw/analysis/clarifications.md"
+  fi
+
   local output
   output=$(cat <<ENDJSON
 {
   ${delegated_body},
+  "pending_questions": {"present": ${pq_present}, "path": "$(json_escape "$pq_path")"},
+  "clarifications": {"present": ${clar_present}, "path": "$(json_escape "$clar_path")"},
   "forms": [${forms_json}
   ],
   "xaml_forms": [${xaml_json}

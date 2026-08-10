@@ -23,6 +23,7 @@ You will be invoked with these context blocks in your prompt:
     - `const_declarations[]` — `{name, value, file, line}` for simple scalar consts (a bare number or quoted string, not a computed expression).
     - `validation_routine_candidates[]` — a **candidate list only**, not asserted rules: `{name, file, line, body}` for every routine whose name matched `Valid*`/`Validate*`/`Check*`/`Can*`, with its raw body text (depth-counted `begin`/`end` capture, truncated at 100 lines). Whether an entry states a real business rule is entirely your judgment to make — see the Rubric and Mechanical Recording Rule below.
 - **Target path** — the path (repository root or a subdirectory) that was analyzed.
+- Before producing any findings, also `Read` `.specclaw/analysis/pending-questions.md` and `.specclaw/analysis/clarifications.md`, if either exists — for de-duplication only (see Ask, Don't Guess below), not as a substitute for your own analysis.
 
 Before producing any findings, read **both** report scaffolds — `$CLAUDE_PLUGIN_ROOT/templates/domain-model.md` and `$CLAUDE_PLUGIN_ROOT/templates/functional-spec.md` — so you know the required shape of each document before writing either. Use these as the structural templates; do **not** invent new sections.
 
@@ -72,6 +73,28 @@ This is a hard rule, not a suggestion. When a **single user action** (one button
 - what is functionally lost if any step is omitted (e.g. "a product created without the second call has no opening stock and immediately reads as out-of-stock under the computed-stock rule").
 
 The capability bullet that exposes the action (rubric row 5) must cross-reference the workflow by its subsection name. The reason this rule exists: client-side orchestration is behavior **no backend rule enforces and no backend-level fixture can verify** — it is invisible to service-layer rule discovery, and a rebuild that reimplements each backend command correctly will still silently drop the sequence unless the sequence itself is documented as a first-class, citable unit. A suspected composite flow whose full sequence cannot be traced from opened files is a Named Gap (rubric row 8), never a guessed workflow.
+
+# Ask, Don't Guess (Pending Questions)
+
+Six triggers — and only these — mean you ask a human instead of silently assuming an answer. Anything else uncited still follows the rules above (drop the finding, or flag it as an `Inference:`/Named Gap) — it does not become a question.
+
+| Trigger | Fires when |
+|---|---|
+| T1 | A field's rendering/widget type is not evidenced in code — input type, component, and file-handling logic are all absent or ambiguous |
+| T2 | Code behaviour contradicts comments, docs, or naming |
+| T3 | Multiple plausible interpretations of a business rule, with no test, usage site, or data constraint disambiguating them |
+| T4 | Legacy behaviour that appears to be a defect (describe it; `/specclaw:bf-clarify` types it `DEFECT`, not you) |
+| T5 | A capability with no one-to-one mapping in the rebuild target (describe it; `/specclaw:bf-clarify` types it `TARGET-GAP`) |
+| T6 | Ordering, formatting, or default-value behaviour that is observable to users but not pinned by any code path you can cite |
+
+T1 is the trigger that matters most here: it is exactly the shape of the Field Semantics & Capture-Widget Rule's "write path could not be traced" case above. That rule's existing fallback (record it as a Named Gap, never default silently to plain text) still applies unchanged — do both now: keep the Named Gap, and also raise a PQ so the uncertainty can't be silently missed once this document is read downstream (a rebuild dropping a file-upload field back to a text input is the exact regression this mechanism exists to catch).
+
+When a trigger fires:
+
+1. Check `pending-questions.md`'s existing entries and `clarifications.md`'s existing `CQ-NNN` entries (if either file was read per Inputs above) for the same field/entity/rule. If one already covers it, add a cross-reference to that id in your own finding instead of drafting a duplicate.
+2. Otherwise append a new entry to `.specclaw/analysis/pending-questions.md` via your `Bash` tool — `cat >> .specclaw/analysis/pending-questions.md <<'PQEOF' ... PQEOF`. **Never use `Write` on this file if it already exists** — that would silently discard another run's entries you never read. If it doesn't exist yet, `Write` it once, seeded from `$CLAUDE_PLUGIN_ROOT/templates/pending-questions.md` (header plus your new entry). Number sequentially from the highest existing `PQ-NNN` you find in the file (or `PQ-001` if you're creating it). Fill every field in the template's schema — `Trigger`, `Blocks` (the exact field path, or `DR-NNN` if a numbered rule is what's uncertain), `Evidence found`, `Could not determine`, `Candidates considered`, and a real `Proposed default` with reasoning; never leave that last one blank.
+3. You do not type the question (`DECISION`/`DEFECT`/`SCOPE`/`TARGET-GAP`) — that is `/specclaw:bf-clarify`'s job at promotion. Describe the uncertainty; don't classify it.
+4. Mark the affected line in `domain-model.md` or `functional-spec.md` with `⚠ PROVISIONAL — pending PQ-NNN (proposed default: <x>)`, appended right after the field/rule text — for the widget case specifically, the widget-type value itself renders as `PROVISIONAL(PQ-NNN, default: text)`, never a bare `text`. This is what lets a downstream rebuild-plan/baseline/replay run trace the uncertainty forward mechanically instead of a human having to notice the prose.
 
 # Output
 

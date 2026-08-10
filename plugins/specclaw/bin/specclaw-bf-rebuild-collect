@@ -581,13 +581,21 @@ cmd_render() {
 
   # ── Parse the agent's draft: directives + item blocks ──────────────────
   local strike_file="$workdir/strike.tsv" defer_file="$workdir/defer.tsv" unverif_file="$workdir/unverifiable.tsv"
-  : > "$strike_file"; : > "$defer_file"; : > "$unverif_file"
+  local provisional_file="$workdir/provisional.tsv"
+  : > "$strike_file"; : > "$defer_file"; : > "$unverif_file"; : > "$provisional_file"
   grep -E '^STRIKE:' "$draft_file" 2>/dev/null | sed -E 's/^STRIKE:[[:space:]]*//' | \
     awk -F'\\|' '{gsub(/^[ \t]+|[ \t]+$/,"",$1); gsub(/^[ \t]+|[ \t]+$/,"",$2); print $1"\t"$2}' >> "$strike_file" || true
   grep -E '^DEFER:' "$draft_file" 2>/dev/null | sed -E 's/^DEFER:[[:space:]]*//' | \
     awk -F'\\|' '{gsub(/^[ \t]+|[ \t]+$/,"",$1); gsub(/^[ \t]+|[ \t]+$/,"",$2); print $1"\t"$2}' >> "$defer_file" || true
   grep -E '^UNVERIFIABLE:' "$draft_file" 2>/dev/null | sed -E 's/^UNVERIFIABLE:[[:space:]]*//' | \
     awk -F'\\|' '{gsub(/^[ \t]+|[ \t]+$/,"",$1); gsub(/^[ \t]+|[ \t]+$/,"",$2); gsub(/^[ \t]+|[ \t]+$/,"",$3); print $1"\t"$2"\t"$3}' >> "$unverif_file" || true
+  # PROVISIONAL: BL-NNN | CQ-NNN | <reason> — the semantic half of Ask,
+  # Don't Guess soft-blocking (Behaviour 5). Re-derived fresh every run,
+  # like UNVERIFIABLE — never persisted from a prior refresh's own file, so
+  # a question's answer under decisions.md clears it automatically the
+  # next time the planner agent doesn't re-issue the directive.
+  grep -E '^PROVISIONAL:' "$draft_file" 2>/dev/null | sed -E 's/^PROVISIONAL:[[:space:]]*//' | \
+    awk -F'\\|' '{gsub(/^[ \t]+|[ \t]+$/,"",$1); gsub(/^[ \t]+|[ \t]+$/,"",$2); gsub(/^[ \t]+|[ \t]+$/,"",$3); print $1"\t"$2"\t"$3}' >> "$provisional_file" || true
 
   split_blocks "$draft_file" "$workdir/items" "BL"
 
@@ -654,7 +662,7 @@ cmd_render() {
   fi
 
   # ── Parse clarifications.md (fresh) ─────────────────────────────────────
-  declare -A CQ_BLOCKING CQ_ANSWERED CQ_RULES CQ_ITEMS CQ_TITLE
+  declare -A CQ_BLOCKING CQ_ANSWERED CQ_RULES CQ_ITEMS CQ_TITLE CQ_PQ_SOURCED
   local cq_ids=""
   if [ -f "$clar_file" ]; then
     split_blocks "$clar_file" "$workdir/cqs" "CQ"
@@ -675,6 +683,14 @@ cmd_render() {
       if [ -n "$answer_txt" ]; then CQ_ANSWERED[$id]=1; else CQ_ANSWERED[$id]=0; fi
       CQ_RULES[$id]="$(extract_dr_ids "$f" | paste -sd, - 2>/dev/null || true)"
       CQ_ITEMS[$id]="$(extract_bl_ids "$f" | paste -sd, - 2>/dev/null || true)"
+      # Mechanical half of Ask, Don't Guess: a pending-question-originated
+      # CQ is identifiable purely by this literal string in its own Source
+      # field — see agents/bf-clarify-extractor.md's Mode: ingest.
+      if grep -qF 'Promoted from PQ-' "$f" 2>/dev/null; then
+        CQ_PQ_SOURCED[$id]=1
+      else
+        CQ_PQ_SOURCED[$id]=0
+      fi
     done
   fi
 
@@ -714,6 +730,14 @@ cmd_render() {
     UNVERIF_CQ[$iid]="$cqid"
     UNVERIF_REASON[$iid]="$reason"
   done < "$unverif_file"
+
+  # ── Semantic PROVISIONAL overrides from the draft (Behaviour 5) — an
+  # item can have more than one; accumulate CQ ids comma-joined. ─────────
+  declare -A PROVISIONAL_SEMANTIC_CQS
+  while IFS=$'\t' read -r iid cqid _reason; do
+    [ -z "$iid" ] && continue
+    PROVISIONAL_SEMANTIC_CQS[$iid]="${PROVISIONAL_SEMANTIC_CQS[$iid]:+${PROVISIONAL_SEMANTIC_CQS[$iid]},}${cqid}"
+  done < "$provisional_file"
 
   # ── Struck / deferred sets (draft directives ∪ items already marked so
   # in the existing file, so a status set on a prior refresh persists even
@@ -808,7 +832,7 @@ cmd_render() {
   done
 
   # ── Gate + Verification per active item ─────────────────────────────────
-  declare -A GATE VERIF GATE_RANK VERIF_RANK
+  declare -A GATE VERIF GATE_RANK VERIF_RANK PROVISIONAL
   for id in $active_ids; do
     local blocked_by="" open_qs="" cid
     for cid in $cq_ids; do
@@ -829,6 +853,32 @@ cmd_render() {
     else
       GATE[$id]="CLEAR"
       GATE_RANK[$id]=0
+    fi
+
+    # ── PROVISIONAL (Ask, Don't Guess soft-block) — recomputed fresh every
+    # run, never persisted from a prior refresh: mechanical half (an
+    # unanswered PQ-sourced CQ joins to this item, same join Gate just
+    # used above) union the semantic half (this run's own PROVISIONAL:
+    # directive from the planner agent's Behaviour 5). Independent of
+    # Gate/Verification — an item can be CLEAR/VERIFIABLE and still
+    # PROVISIONAL, or BLOCKED and PROVISIONAL for an unrelated reason. ────
+    local prov_cqs=""
+    for cid in $cq_ids; do
+      cq_touches_item "${CQ_RULES[$cid]}" "${CQ_ITEMS[$cid]}" "$id" "${ITEM_RULES[$id]}" || continue
+      [ "${CQ_ANSWERED[$cid]}" -eq 1 ] && continue
+      [ "${CQ_PQ_SOURCED[$cid]:-0}" -eq 1 ] || continue
+      prov_cqs="${prov_cqs}${prov_cqs:+,}${cid}"
+    done
+    if [ -n "${PROVISIONAL_SEMANTIC_CQS[$id]:-}" ]; then
+      local scid
+      IFS=',' read -ra _scids <<< "${PROVISIONAL_SEMANTIC_CQS[$id]}"
+      for scid in "${_scids[@]}"; do
+        [ -z "$scid" ] && continue
+        [[ ",${prov_cqs}," == *",${scid},"* ]] || prov_cqs="${prov_cqs}${prov_cqs:+,}${scid}"
+      done
+    fi
+    if [ -n "$prov_cqs" ]; then
+      PROVISIONAL[$id]="⚠ PROVISIONAL — pending ${prov_cqs//,/, }"
     fi
 
     if [ -n "${UNVERIF_CQ[$id]:-}" ]; then
@@ -884,9 +934,14 @@ cmd_render() {
   # ── Render each active item ──────────────────────────────────────────────
   local backlog_body="" bfirst=true
   for id in $ordered_ids; do
-    local entry
+    local entry provisional_block=""
+    if [ -n "${PROVISIONAL[$id]:-}" ]; then
+      provisional_block="
+${PROVISIONAL[$id]}
+"
+    fi
     entry="### ${id} — ${FINAL_TITLE[$id]}
-
+${provisional_block}
 ${FINAL_BODY[$id]}
 **Gate:** ${GATE[$id]}
 **Verification:** ${VERIF[$id]}"
@@ -935,7 +990,7 @@ ${body}"
   [ -z "$deferred_body" ] && deferred_body="None."
 
   # ── Status header + counts ───────────────────────────────────────────────
-  local n_clear=0 n_open=0 n_blocked=0 n_verifiable=0 n_pending=0 n_unverif=0 n_nobaseline=0
+  local n_clear=0 n_open=0 n_blocked=0 n_verifiable=0 n_pending=0 n_unverif=0 n_nobaseline=0 n_provisional=0
   for id in $active_ids; do
     case "${GATE[$id]}" in
       CLEAR) n_clear=$((n_clear+1)) ;;
@@ -948,6 +1003,7 @@ ${body}"
       UNVERIFIABLE*) n_unverif=$((n_unverif+1)) ;;
       NO\ BASELINE\ DATA*) n_nobaseline=$((n_nobaseline+1)) ;;
     esac
+    [ -n "${PROVISIONAL[$id]:-}" ] && n_provisional=$((n_provisional+1))
   done
   local recommended="None — every item is BLOCKED or no active items remain."
   for id in $ordered_ids; do
@@ -973,6 +1029,7 @@ ${body}"
 
 **Gate counts:** CLEAR: ${n_clear}, OPEN QUESTIONS: ${n_open}, BLOCKED: ${n_blocked} (of $(echo "$active_ids" | wc -w | tr -d ' ') active items; ${#STRIKE_REASON[@]} struck, ${#DEFER_REASON[@]} deferred)
 **Verification counts:** VERIFIABLE: ${n_verifiable}, PENDING CAPTURE: ${n_pending}, UNVERIFIABLE: ${n_unverif}, NO BASELINE DATA: ${n_nobaseline}
+**Provisional (pending a decision):** ${n_provisional} item(s) — independent of Gate/Verification; see each item's own marker
 
 **Recommended next item to propose:** ${recommended}"
 
