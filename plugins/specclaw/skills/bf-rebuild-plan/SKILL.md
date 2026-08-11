@@ -1,5 +1,5 @@
 ---
-description: Read the four .specclaw/analysis/*.md documents (codebase-report, architecture, domain-model, functional-spec) — plus, when present, decisions.md, clarifications.md, and .specclaw/baseline/manifest.json/scenarios.md — and write or refresh an ordered .specclaw/analysis/rebuild-backlog.md: the application decomposed into individually-proposable features, sequenced by dependency and readiness, each carrying its acceptance basis, a computed Gate (blocked/open-questions/clear against unanswered clarify questions) and Verification state (verifiable/pending-capture/unverifiable/no-baseline-data against baseline fixtures), and a "what a human still needs to supply" callout. First-ever run generates from scratch; every subsequent run requires `--refresh`, which recomputes Gate/Verification for every item, applies new decisions, and never renumbers, deletes, or disturbs a human-added status note. Read-only: no TTY or credential prompts, no lifecycle gate, creates nothing in changes/, calls no lifecycle command. Use after running /specclaw:bf-analyze, /specclaw:bf-architecture, and /specclaw:bf-domain — and, ideally, /specclaw:bf-clarify and /specclaw:bf-baseline — when you want an ordered, decision-aware list of what to /specclaw:propose to rebuild an existing (possibly legacy) app in a new stack.
+description: Read the five .specclaw/analysis/*.md documents (codebase-report, architecture, domain-model, functional-spec, module-map) — plus, when present, decisions.md, clarifications.md, and .specclaw/baseline/manifest.json/scenarios.md — and write or refresh an ordered .specclaw/analysis/rebuild-backlog.md: the application decomposed into individually-proposable features, grouped under the MOD-### migration modules from module-map.md in the map's own dependency order (foundations first) and sequenced by dependency and readiness within each, each item declaring its module and carrying its acceptance basis, a computed Gate (blocked/open-questions/clear against unanswered clarify questions) and Verification state (verifiable/pending-capture/unverifiable/no-baseline-data against baseline fixtures), and a "what a human still needs to supply" callout. Adds a bash-computed per-module coverage rollup and a recommended next module to build, stated with its reasons. `--module MOD-###` (re)plans one module, leaving every other module's items untouched in the merged output. First-ever run generates from scratch; every subsequent run requires `--refresh`, which recomputes Gate/Verification for every item, applies new decisions, and never renumbers, deletes, or disturbs a human-added status note. Read-only: no TTY or credential prompts, no lifecycle gate, creates nothing in changes/, calls no lifecycle command. Use after running /specclaw:bf-analyze, /specclaw:bf-architecture, and /specclaw:bf-domain — and, ideally, /specclaw:bf-clarify and /specclaw:bf-baseline — when you want an ordered, decision-aware list of what to /specclaw:propose to rebuild an existing (possibly legacy) app in a new stack.
 ---
 
 # specclaw bf-rebuild-plan
@@ -8,27 +8,29 @@ description: Read the four .specclaw/analysis/*.md documents (codebase-report, a
 
 Turn the four analysis documents — plus, when present, `decisions.md`, `clarifications.md`, and the baseline outputs (`manifest.json`/`scenarios.md`) — into a living, ID-stable rebuild backlog. Read-only side-command — no `specclaw-validate-change` call, no `<change>` involved, matching the `analyze`/`architecture`/`domain`/`clarify`/`baseline` pattern.
 
-Determine the invocation mode from the user's message: **refresh mode** if it contains `--refresh`, **default mode** otherwise.
+Determine the invocation mode from the user's message: **refresh mode** if it contains `--refresh`, **default mode** otherwise. Additionally, if the message contains `--module MOD-###`, this is a **module-scoped run**: pass that flag through to both `collect` and `render`, unchanged.
 
 ## Step 1 — Collect
 
 ```bash
-specclaw-bf-rebuild-collect collect .specclaw [--refresh]
+specclaw-bf-rebuild-collect collect .specclaw [--refresh] [--module MOD-###]
 ```
 
-Pass `--refresh` only in refresh mode. This single step:
+Pass `--refresh` only in refresh mode, and `--module MOD-###` only if the user named a module. This single step:
 
-- Checks that all four `.specclaw/analysis/*.md` documents exist. **If it exits non-zero for this reason, surface its stderr message to the user verbatim and stop** — it names exactly which document(s) are missing and which command produces each. Don't retry, don't attempt a partial backlog from partial input.
+- Checks that all five `.specclaw/analysis/*.md` documents exist — the four analysis documents plus `module-map.md`, which declares the `MOD-###` modules every backlog item is grouped under. **If it exits non-zero for this reason, surface its stderr message to the user verbatim and stop** — it names exactly which document(s) are missing and which command produces each (`module-map.md` comes from `/specclaw:bf-domain`). Don't retry, don't attempt a partial backlog from partial input, and never invent a grouping to work around a missing map.
+- **Fails if `--module` names no active module in the map**, listing the ones that do exist. A withdrawn module cannot be planned — its id stays claimed as a tombstone.
 - **If `.specclaw/analysis/rebuild-backlog.md` already exists and `--refresh` was not passed, it exits non-zero with a refusal message** — surface that message verbatim and stop. Do not delete or archive the file yourself; tell the user to re-run with `--refresh`, or to archive/delete it manually first if they genuinely want a from-scratch run.
-- Otherwise emits one JSON object to stdout: the four documents' paths/line counts; which optional inputs are present (`decisions.md`, `clarifications.md`, `.specclaw/baseline/manifest.json`, `.specclaw/baseline/scenarios.md`) with their resolved paths; every `clarifications.md` question's `id`/`type`/`blocking`/`answered`/`rules`/`items` (ID-level facts only, no prose); which `CQ-###` ids have a recorded decision; the `scenarios.md` roster and `manifest.json` fixtures (`id`/`rules`/`item`); whether a "No Legacy Behaviour Exists" section is present; and — in refresh mode — every existing `BL-###` item's `id`/`title`/`depends_on`/`rules`/`status`/prior Gate/Verification. It also reports the next free `BL-###` id.
+- Otherwise emits one JSON object to stdout: the module roster from `module-map.md` (each module's id, name, active/withdrawn status, `DR-###` rules, and dependencies) together with the map's own `PROPOSED`/`CONFIRMED` status and this run's `module_scope`; the five documents' paths/line counts; which optional inputs are present (`decisions.md`, `clarifications.md`, `.specclaw/baseline/manifest.json`, `.specclaw/baseline/scenarios.md`) with their resolved paths; every `clarifications.md` question's `id`/`type`/`blocking`/`answered`/`rules`/`items` (ID-level facts only, no prose); which `CQ-###` ids have a recorded decision; the `scenarios.md` roster and `manifest.json` fixtures (`id`/`rules`/`item`); whether a "No Legacy Behaviour Exists" section is present; and — in refresh mode — every existing `BL-###` item's `id`/`title`/`depends_on`/`rules`/`status`/prior Gate/Verification. It also reports the next free `BL-###` id.
 
 ## Step 2 — Spawn the planning agent
 
 `Agent` tool, `subagent_type: "bf-rebuild-planner"`, on the model from `config.yaml` `models.review` (default: `anthropic/claude-sonnet-4-5`) — same model family as its sibling analysis agents, since this is still read-only analysis of already-written documents, not spec/design authoring for a change. Pass as context:
 
 - The collected JSON from Step 1.
-- The resolved paths of the four analysis documents, plus whichever optional inputs are present (from `optional_inputs` in the JSON), for the agent to `Read` directly.
+- The resolved paths of the five analysis documents, plus whichever optional inputs are present (from `optional_inputs` in the JSON), for the agent to `Read` directly.
 - **Tell the agent explicitly which mode it is running**: `first-run` (the JSON's `mode` field will read `"first-run"`) or `refresh` (`"refresh"`).
+- **Tell it explicitly whether this run is module-scoped**, and to which `MOD-###` (the JSON's `module_scope`). In a scoped run the agent drafts only that module's items, directives, and coverage lines — see its own Behaviour 7.
 - In refresh mode, also pass the resolved path of the *existing* `.specclaw/analysis/rebuild-backlog.md`, so the agent can read what's already there and avoid re-drafting anything it doesn't need to touch.
 
 The agent writes **a draft file**, `.specclaw/analysis/.rebuild-plan-draft.md` — never the final `rebuild-backlog.md` itself. See `agents/bf-rebuild-planner.md` for exactly what belongs in it.
@@ -36,8 +38,10 @@ The agent writes **a draft file**, `.specclaw/analysis/.rebuild-plan-draft.md` �
 ## Step 3 — Render
 
 ```bash
-specclaw-bf-rebuild-collect render .specclaw .specclaw/analysis/.rebuild-plan-draft.md
+specclaw-bf-rebuild-collect render .specclaw .specclaw/analysis/.rebuild-plan-draft.md [--module MOD-###]
 ```
+
+Pass the **same** `--module MOD-###` Step 1 was given, or the draft's Coverage Check will replace the whole section instead of only that module's lines — silently deleting the coverage record of every module the run never looked at.
 
 Archives the prior `rebuild-backlog.md` (if any — same `.specclaw/analysis/archive/` directory `analyze`/`architecture`/`domain`/`clarify` already use), merges the draft with every preserved existing item, computes Gate and Verification for every active item from scratch (never trusting a stale value), computes **PROVISIONAL** status for every active item from scratch too — mechanically, by joining against any unanswered `CQ-NNN` whose `Source` field reads `Promoted from PQ-` (a pending-question-originated question — see `templates/pending-questions.md`), unioned with any `PROVISIONAL: BL-NNN | CQ-NNN | <reason>` directive the planner agent issued this run for a match its own semantic reading caught (Behaviour 5) that the mechanical join couldn't reach — computes dependency-rank-then-readiness ordering, renders struck items as one-line tombstones and deferred items into their own section, computes the refresh change report by diffing against the prior file's own stored Gate/Verification lines, and writes `.specclaw/analysis/rebuild-backlog.md`. Deletes the draft file on success. **If it exits non-zero, surface its stderr message to the user verbatim and stop.**
 
@@ -52,9 +56,25 @@ This never makes UI a golden-master seam. A cited `SCR-###` is an acceptance ref
 
 PROVISIONAL is soft-block and independent of Gate/Verification — an item can be `CLEAR`/`VERIFIABLE` and still carry the `⚠ PROVISIONAL — pending CQ-NNN` marker right after its heading. Unlike Gate/Verification (which react to any answered/unanswered CQ), PROVISIONAL is recomputed fresh from nothing every run: it never persists from a prior refresh's own rendered marker, so a question answered under `decisions.md`'s `## Decisions` clears it automatically the moment its `CQ-NNN` stops being unanswered — no manual cleanup, and no directive needed to *remove* a marker, only to add one.
 
-## Step 4 — Present a summary
+## Step 4 — Regenerate the module status view
+
+```bash
+specclaw-bf-rebuild-collect module-status .specclaw
+```
+
+Deterministic, read-only, cheap. Writes `.specclaw/analysis/module-status.md`: one row per module — backlog items planned/total, baseline scenarios captured/designed, the latest module-scoped replay verdict with its date, and the count of open questions naming that module. Run it here because this is the moment its inputs are freshest; an operator can also run it any time on its own.
+
+It is a **status view, not evidence**: regenerated in full every invocation and deliberately exempt from archive-then-replace, because every number in it is recomputed from documents whose own history is already archived. Nothing reads it and nothing computes from it.
+
+**If it exits non-zero, surface the message and continue** — the only failure is a missing `module-map.md`, which Step 1 would already have caught, and a missing status view never invalidates the backlog this run just wrote.
+
+## Step 5 — Present a summary
 
 - **First run:** backlog item count, a one-line note on the sequencing rationale, any Coverage Check exclusions, and the status header's counts (Gate/Verification/Provisional) and recommended next item.
+- **Either mode — the module picture, always:** the module count and per-module item counts from `render`'s own summary line; the **recommended next module to build** together with the reasons the status header states for it, never a bare name; and the per-module lines from the Coverage Check's `### Module Coverage Rollup`. If the rollup reads "not computable", say so plainly rather than omitting it — it means the coverage lines are not in the countable form and the numbers genuinely aren't known.
+  - **Surface `render`'s module warnings verbatim.** There are four, and each one means the backlog is describing something a human needs to fix: `module-map.md` is not `CONFIRMED`; a module dependency **cycle** (in which case there is no recommended next module, and the reason is the cycle rather than any module being unready); items left **unassigned** because they declare no `**Module:**` field; and items declaring a `MOD-###` the map does not define. Name the affected items and modules directly — burying these in the file defeats the point of computing them.
+  - If the map is unconfirmed, repeat the one-sentence reason: this backlog's grouping and sequencing rest on a proposal no human has signed off, and confirming it is an edit to `module-map.md`'s own `**Status:**` line.
+- **Module-scoped run (`--module`):** say explicitly which module was re-planned and that every other module's items, coverage lines, and human-added status notes were preserved untouched. If the agent reported a new item belonging to a *different* module, relay that — it was deliberately not drafted this run, and it needs its own scoped run.
 - **Either mode, if the UI fidelity workstream is active:** relay the status header's UI fidelity block. If `render` emitted the missing-artifacts warning, **surface it verbatim and name the affected items** — that warning is the whole reason the check exists, and burying it in the file defeats it. Name any unmapped `SCR-###` from the UI Screen Coverage subsection too. Say nothing about UI when the policy is `REINTERPRET`.
 - **Refresh:** the rendered Change Report section verbatim — items newly unblocked, newly verifiable, struck/deferred/revised/added, and the recommended next item. Name any currently-`PROVISIONAL` item directly (from the status header's count and the Coverage Check's "Open Questions Blocking Readiness" subsection) — don't make the user go find it in the rendered file themselves.
 
@@ -67,3 +87,5 @@ PROVISIONAL is soft-block and independent of Gate/Verification — an item can b
 The backlog is an acceptance basis plus a computed Gate/Verification state — it does not, and cannot, replace golden-master outputs or human-supplied external-format/DLL/COM semantics for verifying a truly faithful rebuild. A `VERIFIABLE` item has a matching captured fixture; it does not mean the fixture's assertions were exhaustive. See each item's "Verification inputs needed" field, its computed `**Verification:**` line, and `docs/rebuild-workflow.md`'s Fidelity limitation section.
 
 `/specclaw:bf-rebuild-plan` never regenerates an existing backlog from scratch on a bare re-run, never renumbers a `BL-###` id, never deletes a struck or deferred item, and never touches a `**Status notes (human-added):**` block a human wrote into an item — those are the one hard invariant this command protects across every `--refresh`.
+
+It never **derives** an item's module from that item's rules. A module is declared by the planner agent in the item's own `**Module:**` field and read mechanically from there; an item with no usable declaration is rendered under `## Unassigned` with a warning, never quietly filed into whichever module happens to own its rules. It never collapses a module into a single backlog item — a module groups items that already exist at capability-bullet granularity, and item granularity rules are untouched by this hierarchy. It never orders modules by anything but the map's own `Depends on` fields, and when those describe a cycle it says so and recommends no module rather than printing a rank the iteration cap happened to stop at. It never writes into `module-map.md`: confirming, renaming, or regrouping a module is `/specclaw:bf-domain`'s job and a human's decision, and a `--module` run against an unconfirmed map still runs — it just says, on the backlog's own face, that the grouping is unconfirmed.

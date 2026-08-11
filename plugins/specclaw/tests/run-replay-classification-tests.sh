@@ -180,7 +180,11 @@ R="$WORK/rec"
 seed_baseline "$R"
 out="$(bash "$BASELINE_BIN" record "$R/.specclaw" 2>&1)"; rc=$?
 assert_eq "a valid baseline records cleanly" "0" "$rc"
-assert_eq "manifest stamps the schema version" "2" \
+# Schema 3 is the first to carry per-fixture module_ids. Note MANIFEST_SCHEMA_MIN
+# in specclaw-bf-replay deliberately stays at 2: a change-scoped or --all run
+# still reads a schema-2 manifest, so adopting modules forces no re-record. Only
+# a --module run, which is a join on that field, requires 3.
+assert_eq "manifest stamps the schema version" "3" \
   "$(jq -r '.manifest_schema' "$R/.specclaw/baseline/manifest.json" | tr -d '\r')"
 assert_eq "manifest stamps the recording plugin version" "true" \
   "$(jq -r '(.plugin_version // "") != ""' "$R/.specclaw/baseline/manifest.json" | tr -d '\r')"
@@ -260,7 +264,7 @@ P="$WORK/rep"
 seed_replay "$P"
 out="$(bash "$REPLAY_BIN" resolve "$P/.specclaw" thing "$P/.specclaw/replay/run-X/selection.json" 2>&1)"; rc=$?
 assert_eq "resolve accepts a current manifest" "0" "$rc"
-assert_eq "selection carries the manifest schema through" "2" \
+assert_eq "selection carries the manifest schema through" "3" \
   "$(jq -r '.manifest_schema' "$P/.specclaw/replay/run-X/selection.json" | tr -d '\r')"
 
 seed_replay "$P"
@@ -377,6 +381,117 @@ for artefact in pipeline/mapping.json pipeline/compare.json pipeline/sanction-ve
 done
 assert_eq "run-metadata records the manifest's own plugin version" "true" \
   "$(jq -r '(.manifest_plugin_version // "") != ""' "$EV/run-metadata.json" | tr -d '\r')"
+
+# ─────────────────────────────────────────────────────────────────────────────
+echo "== module selection (CONTRACT.md (l)) =="
+
+# GM-001 belongs to MOD-001 only; GM-002 pins rules owned by BOTH modules, so it
+# is the cross-module fixture — the case the honesty rule exists for.
+seed_modules() {
+  local root="$1"
+  seed_replay "$root"
+  cat > "$root/.specclaw/analysis/module-map.md" <<'MAPEOF'
+# Module Map: t
+
+**Status:** CONFIRMED by tester, 2026-08-11
+
+## Modules
+
+### MOD-001 — alpha
+
+- **Owns (entities):** A
+- **Business rules:** DR-001
+- **Depends on:** None
+
+### MOD-002 — beta
+
+- **Owns (entities):** B
+- **Business rules:** DR-002
+- **Depends on:** MOD-001
+MAPEOF
+  # Written wholesale rather than sed-patched onto seed_baseline's copy: a
+  # multi-line sed replacement is exactly the kind of quoting that breaks
+  # silently and leaves the field absent, which is what this suite is for.
+  cat > "$root/.specclaw/baseline/scenarios.md" <<'SCENEOF'
+### GM-001 — ok
+
+- **Seam:** Svc.Do
+- **Seam layer:** service
+- **Modules:** MOD-001
+- **Business rules pinned:** DR-001
+- **Verifies backlog item:** BL-002 — thing
+
+### GM-002 — rejected
+
+- **Seam:** Svc.Do
+- **Seam layer:** service
+- **Modules:** MOD-001, MOD-002
+- **Business rules pinned:** DR-002
+- **Verifies backlog item:** BL-002 — thing
+SCENEOF
+  bash "$BASELINE_BIN" record "$root/.specclaw" >/dev/null 2>&1
+}
+
+M="$WORK/mod"
+seed_modules "$M"
+MF="$M/.specclaw/baseline/manifest.json"
+assert_eq "record carries a single module into the manifest" "MOD-001"   "$(jq -r '.fixtures[] | select(.scenario_id=="GM-001") | .module_ids | join(",")' "$MF" | tr -d '')"
+assert_eq "record carries BOTH modules of a cross-module scenario" "MOD-001,MOD-002"   "$(jq -r '.fixtures[] | select(.scenario_id=="GM-002") | .module_ids | join(",")' "$MF" | tr -d '')"
+
+# A module tag naming nothing in the map selects nothing, silently — so it is a
+# hard record error, on the same grounds as an unmapped error code.
+seed_modules "$M"
+sed -i 's/^- \*\*Modules:\*\* MOD-001$/- **Modules:** MOD-404/' "$M/.specclaw/baseline/scenarios.md"
+out="$(bash "$BASELINE_BIN" record "$M/.specclaw" 2>&1)"; rc=$?
+assert_eq "a module tag absent from module-map.md fails the record" "1" "$rc"
+assert_contains "that error names the missing module heading" "$out" "has no '### MOD-404' heading"
+
+# A WITHDRAWN tombstone is an id kept claimed, not a scenario: it declares no
+# seam layer and must not fail the record on that account.
+seed_modules "$M"
+printf '
+### GM-009 — WITHDRAWN 2026-08-11, dropped
+
+- **Modules:** MOD-002
+'   >> "$M/.specclaw/baseline/scenarios.md"
+out="$(bash "$BASELINE_BIN" record "$M/.specclaw" 2>&1)"; rc=$?
+assert_eq "a WITHDRAWN tombstone does not fail the record" "0" "$rc"
+assert_eq "a tombstone is not counted as a scenario" "2"   "$(jq -r '.total_scenarios' "$MF" | tr -d '')"
+
+# ANY-of selection: the cross-module fixture is selected by BOTH modules.
+seed_modules "$M"
+out="$(bash "$REPLAY_BIN" resolve "$M/.specclaw" MOD-002 "$M/.specclaw/replay/run-M/selection.json" 2>&1)"; rc=$?
+assert_eq "resolve accepts a MOD-### target" "0" "$rc"
+assert_eq "MOD-002 selects only its own fixtures" "GM-002"   "$(jq -r '[.fixtures[].scenario_id] | join(",")' "$M/.specclaw/replay/run-M/selection.json" | tr -d '')"
+assert_eq "selection records the module and its scope" "module MOD-002"   "$(jq -r '.target_kind + " " + .module' "$M/.specclaw/replay/run-M/selection.json" | tr -d '')"
+assert_contains "the summary reports shared cross-module fixtures" "$out" "also belong to another module"
+
+out="$(bash "$REPLAY_BIN" resolve "$M/.specclaw" MOD-001 "$M/.specclaw/replay/run-M/selection.json" 2>&1)"
+assert_eq "MOD-001 selects its own fixture AND the shared one" "GM-001,GM-002"   "$(jq -r '[.fixtures[].scenario_id] | join(",")' "$M/.specclaw/replay/run-M/selection.json" | tr -d '')"
+assert_eq "selection carries per-module manifest totals for partial-view marking" "2"   "$(jq -r '.module_totals["MOD-001"]' "$M/.specclaw/replay/run-M/selection.json" | tr -d '')"
+
+out="$(bash "$REPLAY_BIN" resolve "$M/.specclaw" MOD-404 "$M/.specclaw/replay/run-M/selection.json" 2>&1)"; rc=$?
+assert_eq "an unknown module fails rather than selecting nothing" "1" "$rc"
+assert_contains "that error lists the modules that do exist" "$out" "MOD-001, MOD-002"
+
+# The module field must never force a re-record on a project that ignores it:
+# a schema-2 manifest still serves change-scoped and --all runs unchanged.
+seed_modules "$M"
+jq 'del(.fixtures[].module_ids) | .manifest_schema = 2' "$MF" > "$M/m" && mv "$M/m" "$MF"
+out="$(bash "$REPLAY_BIN" resolve "$M/.specclaw" --all "$M/.specclaw/replay/run-M/selection.json" 2>&1)"; rc=$?
+assert_eq "--all still resolves against a pre-module manifest" "0" "$rc"
+out="$(bash "$REPLAY_BIN" resolve "$M/.specclaw" thing "$M/.specclaw/replay/run-M/selection.json" 2>&1)"; rc=$?
+assert_eq "a change-scoped run still resolves against a pre-module manifest" "0" "$rc"
+out="$(bash "$REPLAY_BIN" resolve "$M/.specclaw" MOD-001 "$M/.specclaw/replay/run-M/selection.json" 2>&1)"; rc=$?
+assert_eq "but --module refuses a pre-module manifest" "1" "$rc"
+assert_contains "that refusal names the re-record fix" "$out" "re-run /specclaw:bf-baseline --record"
+
+# Schema is current but nothing is tagged: a DIFFERENT fix (design, then record).
+seed_modules "$M"
+jq '.fixtures = [.fixtures[] | .module_ids = []]' "$MF" > "$M/m" && mv "$M/m" "$MF"
+out="$(bash "$REPLAY_BIN" resolve "$M/.specclaw" MOD-001 "$M/.specclaw/replay/run-M/selection.json" 2>&1)"; rc=$?
+assert_eq "an untagged current manifest also refuses a --module run" "1" "$rc"
+assert_contains "that refusal points at design mode, not just record" "$out" "design mode"
 
 # ─────────────────────────────────────────────────────────────────────────────
 echo

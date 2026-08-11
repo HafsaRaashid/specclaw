@@ -36,6 +36,17 @@ Subcommands:
                 Application.CreateForm call. Outputs one JSON object to
                 stdout.
 
+                Also reports the module map (.specclaw/analysis/
+                module-map.md): whether it exists, its Status line, and —
+                read BEFORE /specclaw:bf-domain's own archive step — a
+                roster of every existing MOD-### module's id, name, owned
+                entities, rules, and active/withdrawn status, plus the next
+                free MOD id. That roster is what lets the analyst agent
+                carry surviving MOD ids forward on a regeneration instead
+                of renumbering them; unlike scenarios.md, this document is
+                reconciled, not freshly generated. ID-level facts only —
+                no prose, no evidence text.
+
 Options:
   -h, --help    Show this help message
 EOF
@@ -55,6 +66,103 @@ json_escape() {
   s="${s//$'\r'/\\r}"
   s="${s//$'\t'/\\t}"
   printf '%s' "$s"
+}
+
+# ─── Module map (.specclaw/analysis/module-map.md) ───────────────────────────
+#
+# Read here, in collect, for one reason: /specclaw:bf-domain archives the
+# prior analysis documents BEFORE spawning the analyst agent, so by the time
+# the agent runs, the live module map has already moved into
+# .specclaw/analysis/archive/. MOD-### ids are permanent and must survive a
+# regeneration (templates/module-map.md's reconciliation rules), which is
+# impossible if the only copy of the prior roster is behind a timestamped
+# archive filename the agent would have to guess at. So bash reads it while
+# it is still at the known path and hands the agent ID-level facts —
+# id/name/owned-entities/rules/status — exactly the "bash collects, agent
+# interprets" split every sibling collector already follows. No prose and no
+# evidence text crosses this boundary.
+
+# One block per "### MOD-NNN" heading, written to <outdir>/MOD-NNN.md. Stops
+# capturing at the next "## " section heading, not only at the next MOD
+# heading — module-map.md has several "## " sections after "## Modules", and
+# without that stop the last module block silently swallows all of them
+# (the same trap specclaw-bf-rebuild-collect's split_blocks documents).
+split_mod_blocks() {
+  local file="$1" outdir="$2"
+  [ -f "$file" ] || return 0
+  awk -v dir="$outdir" '
+    /^### MOD-[0-9]+/ {
+      match($0, /MOD-[0-9]+/)
+      id = substr($0, RSTART, RLENGTH)
+      outfile = dir "/" id ".md"
+    }
+    /^## / && !/^### MOD-[0-9]+/ { id = "" }
+    id != "" { print $0 >> outfile }
+  ' "$file"
+}
+
+# A "- **Label:**" (or bare "**Label:**") single-line field's value.
+#
+# Matched with awk's index(), which is LITERAL — never a regex. Two of this
+# document's own field labels contain parentheses ("Owns (entities)",
+# "References (not owned)"), and under `sed -E` those parse as a capture
+# group: the pattern then matches "Owns entities:" instead of the real label,
+# the strip silently does nothing, and the field's value reads back with its
+# own label still glued to the front. index() has no metacharacters to get
+# wrong. Anchored at position 1 (after an optional "- ") so the same text
+# appearing inside an Evidence bullet is never mistaken for the field.
+mod_block_field() {
+  local file="$1" label="$2"
+  awk -v lbl="**${label}:**" '
+    {
+      s = $0
+      sub(/^- /, "", s)
+      if (index(s, lbl) == 1) {
+        v = substr(s, length(lbl) + 1)
+        gsub(/^[[:space:]]+|[[:space:]]+$/, "", v)
+        print v
+        exit
+      }
+    }
+  ' "$file" 2>/dev/null || true
+}
+
+# Heading text after the id and its separating em dash / hyphen. The
+# separator alternation is deliberately NOT a bracket expression — under a
+# byte-oriented sed build a POSIX bracket class eats only the first byte of a
+# multi-byte em dash and corrupts every name after it (same guard
+# specclaw-bf-rebuild-collect's block_title_after_dash carries).
+mod_block_name() {
+  head -1 "$1" | sed -E 's/^### MOD-[0-9]+[[:space:]]*(—|-)[[:space:]]*//'
+}
+
+# Comma-separated field value -> JSON array body. Each element is trimmed;
+# a literal "None"/"none" (the documented empty value) yields no elements, so
+# a module that owns nothing reads back as [] rather than as ["None"].
+mod_csv_to_json_array() {
+  local raw="$1" out="" first=true item
+  local -a _items=()
+  IFS=',' read -ra _items <<< "$raw"
+  for item in ${_items[@]+"${_items[@]}"}; do
+    item="${item#"${item%%[![:space:]]*}"}"
+    item="${item%"${item##*[![:space:]]}"}"
+    [ -z "$item" ] && continue
+    case "$item" in None|none|NONE) continue ;; esac
+    if $first; then first=false; else out="${out}, "; fi
+    out="${out}\"$(json_escape "$item")\""
+  done
+  printf '%s' "$out"
+}
+
+# The map's own Status line: "PROPOSED" (awaiting human confirmation) or
+# "CONFIRMED by <name>, <date>". Reported verbatim so downstream commands can
+# say plainly which one they grouped by; never normalized or defaulted to the
+# more convenient answer.
+mod_map_status() {
+  local file="$1"
+  [ -f "$file" ] || { printf ''; return 0; }
+  { grep -m1 -- '^\*\*Status:\*\*' "$file" 2>/dev/null \
+    | sed -E 's/^\*\*Status:\*\* *//' | sed -E 's/[[:space:]]+$//'; } || true
 }
 
 # ─── .dfm extraction (first-class) — gather_dfm_forms ────────────────────────
@@ -769,12 +877,65 @@ cmd_collect() {
     clar_present=true; clar_path=".specclaw/analysis/clarifications.md"
   fi
 
+  # architecture.md is a soft input reported for one purpose: it is the only
+  # document that evidences dependency DIRECTION between modules. When it is
+  # absent the agent derives dependencies from entity/service references
+  # instead and says so — it never asserts a direction it cannot cite.
+  local arch_present=false arch_path=""
+  if [ -f "$specclaw_dir_abs/analysis/architecture.md" ]; then
+    arch_present=true; arch_path=".specclaw/analysis/architecture.md"
+  fi
+
+  # ── Prior module roster, for MOD-### reconciliation ────────────────────
+  local map_file="$specclaw_dir_abs/analysis/module-map.md"
+  local map_present=false map_status="" modules_json="" next_mod_num=1
+  if [ -f "$map_file" ]; then
+    map_present=true
+    map_status="$(mod_map_status "$map_file")"
+    local modworkdir; modworkdir="$(mktemp -d)"
+    split_mod_blocks "$map_file" "$modworkdir"
+    local mfirst=true mf mid mname mstatus mowned mrules mnum
+    for mf in "$modworkdir"/MOD-*.md; do
+      [ -f "$mf" ] || continue
+      mid="$(basename "$mf" .md)"
+      mnum="${mid#MOD-}"; mnum=$((10#$mnum))
+      [ "$mnum" -ge "$next_mod_num" ] && next_mod_num=$((mnum + 1))
+      mname="$(mod_block_name "$mf")"
+      # A withdrawn module is reported, never omitted — its id must stay
+      # claimed so it is never reused, and it must never be matched as a
+      # reconciliation candidate and silently revived.
+      case "$mname" in WITHDRAWN*) mstatus="withdrawn" ;; *) mstatus="active" ;; esac
+      mowned="$(mod_csv_to_json_array "$(mod_block_field "$mf" "Owns (entities)")")"
+      mrules="$({ grep -oE 'DR-[0-9]{3}' "$mf" 2>/dev/null | awk '!seen[$0]++'; } || true)"
+      local mrules_json="" rfirst=true r
+      while IFS= read -r r; do
+        [ -z "$r" ] && continue
+        if $rfirst; then rfirst=false; else mrules_json="${mrules_json}, "; fi
+        mrules_json="${mrules_json}\"$(json_escape "$r")\""
+      done <<< "$mrules"
+      if $mfirst; then mfirst=false; else modules_json="${modules_json},"; fi
+      modules_json="${modules_json}
+    {\"mod_id\": \"$(json_escape "$mid")\", \"name\": \"$(json_escape "$mname")\", \"status\": \"${mstatus}\", \"owned_entities\": [${mowned}], \"dr_rules\": [${mrules_json}]}"
+    done
+    rm -rf "$modworkdir"
+  fi
+  local next_mod_id; next_mod_id="$(printf 'MOD-%03d' "$next_mod_num")"
+
   local output
   output=$(cat <<ENDJSON
 {
   ${delegated_body},
   "pending_questions": {"present": ${pq_present}, "path": "$(json_escape "$pq_path")"},
   "clarifications": {"present": ${clar_present}, "path": "$(json_escape "$clar_path")"},
+  "architecture_md": {"present": ${arch_present}, "path": "$(json_escape "$arch_path")"},
+  "module_map": {
+    "present": ${map_present},
+    "path": ".specclaw/analysis/module-map.md",
+    "status": "$(json_escape "$map_status")",
+    "next_mod_id": "$(json_escape "$next_mod_id")",
+    "prior_modules": [${modules_json}
+    ]
+  },
   "forms": [${forms_json}
   ],
   "xaml_forms": [${xaml_json}

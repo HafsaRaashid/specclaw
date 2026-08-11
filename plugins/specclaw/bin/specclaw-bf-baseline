@@ -25,7 +25,7 @@ usage() {
 Usage: specclaw-bf-baseline <subcommand> [options]
 
 Subcommands:
-  collect          <specclaw_dir>
+  collect          <specclaw_dir> [--module MOD-###]
                    Design-mode (Mode A) pre-agent step. Requires
                    .specclaw/analysis/domain-model.md to exist —
                    /specclaw:bf-baseline derives scenarios from its numbered
@@ -37,7 +37,46 @@ Subcommands:
                    Exits non-zero, naming /specclaw:bf-domain, if
                    domain-model.md is missing.
 
-  harness-collect  <specclaw_dir>
+                   Also reports the module map (soft input): its
+                   PROPOSED/CONFIRMED status and every module's id, name and
+                   owned DR rules, so each scenario can declare the
+                   module(s) its pinned rules belong to. When the map is
+                   absent, scenarios simply declare no module — the same way
+                   they declare no backlog item when rebuild-backlog.md does
+                   not exist yet.
+
+                   Also reports the PRIOR scenario roster (gm_id, title,
+                   rules, modules, seam layer, active/withdrawn) and the next
+                   free GM id, read BEFORE /specclaw:bf-baseline's own
+                   archive step. GM-NNN ids are permanent (CONTRACT.md (c)),
+                   and once a fixture and a module tag hang off one, a
+                   re-design that renumbered them would silently re-point
+                   both — so surviving ids are carried forward, not
+                   regenerated.
+
+                   --module MOD-### scopes design to one module's rules.
+                   Requires module-map.md. The agent drafts only that
+                   module's scenarios, and `merge-scenarios` (below) folds
+                   them into the existing scenarios.md without disturbing
+                   any other module's blocks.
+
+  merge-scenarios  <specclaw_dir> <draft_file> <MOD-###>
+                   Module-scoped design merge — fully deterministic, no
+                   agent. Requires an existing scenarios.md. Archives it,
+                   then rebuilds it: every GM-NNN block the draft supplies
+                   replaces its namesake, every block belonging to another
+                   module is preserved byte-for-byte, and a block of the
+                   scoped module that the draft omits becomes a WITHDRAWN
+                   tombstone rather than vanishing — its id stays claimed
+                   forever, exactly like a DR-NNN or BL-NNN tombstone.
+
+                   The "No Legacy Behaviour Exists" and "Rule Coverage
+                   Check" sections are whole-corpus findings; a module-scoped
+                   run does not re-derive them, so they are preserved
+                   verbatim with a dated note saying so. Never a silent
+                   claim that a corpus-wide check was re-run.
+
+  harness-collect  <specclaw_dir> [--module MOD-###]
                    Harness-mode (--harness) pre-agent step. Requires
                    .specclaw/baseline/seams.md and scenarios.md to already
                    exist (Mode A must run first). Archives any prior
@@ -47,6 +86,13 @@ Subcommands:
                    scenarios.md — a deterministic checklist the agent must
                    implement one-for-one, not re-derive by reading prose.
                    Outputs one JSON object to stdout.
+
+                   With --module MOD-###, the harness directory is NOT
+                   archived and NOT emptied: it emits only that module's
+                   scenario IDs plus an inventory of the harness files that
+                   already exist, and the agent adds or replaces only those
+                   tests. Wiping the harness for a one-module run would
+                   delete every other module's generated tests.
 
   record           <specclaw_dir>
                    Record-mode (--record) step — fully deterministic, no
@@ -76,6 +122,17 @@ Subcommands:
                        legal when its scenario is marked PROVISIONAL
                      - every non-null error_code has a matching heading in
                        .specclaw/baseline/error-map.md (CONTRACT.md (h))
+                     - every MOD-### a scenario declares has a matching
+                       heading in .specclaw/analysis/module-map.md, when
+                       that document exists — a module tag naming nothing
+                       selects nothing in /specclaw:bf-replay --module,
+                       silently
+
+                   WARNS (never blocks the manifest) when a fixture's
+                   declared module disagrees with the module its own BL item
+                   is filed under in rebuild-backlog.md — naming both, since
+                   one of the two documents is wrong and bash cannot know
+                   which.
 
 Options:
   -h, --help    Show this help message
@@ -145,6 +202,15 @@ SUPP_DOCS=(codebase-report.md architecture.md functional-spec.md rebuild-backlog
 # checklist harness-collect hands the agent, and the seam/rule/backlog-item
 # metadata record cross-references against each fixture.
 
+# A block runs from its "### GM-NNN" heading to the next such heading OR the
+# next "## " section heading, whichever comes first. Without that second stop
+# condition the LAST scenario in the document silently swallows every trailing
+# section ("## No Legacy Behaviour Exists", "## Rule Coverage Check") into its
+# own block — which put that unrelated prose inside the scenario's
+# scenario_content_hash (so an edit to the coverage check marked the last
+# fixture SUPERSEDED) and let a MOD-### mentioned in the coverage check read
+# back as that scenario's own declared module. Same stop condition
+# specclaw-bf-rebuild-collect's split_blocks already carries.
 split_scenario_blocks() {
   local file="$1" outdir="$2"
   [ -f "$file" ] || return 0
@@ -154,6 +220,7 @@ split_scenario_blocks() {
       id = substr($0, RSTART, RLENGTH)
       outfile = dir "/" id ".md"
     }
+    /^## / && !/^### GM-[0-9]+/ { id = "" }
     id != "" { print $0 >> outfile }
   ' "$file"
 }
@@ -162,8 +229,17 @@ scenario_block_id() {
   basename "$1" .md
 }
 
+# NB: the separator alternation must NOT be a bracket expression ([—-]).
+# Under a byte-oriented locale/sed build (observed on this toolchain even with
+# LC_CTYPE=C.UTF-8) a POSIX bracket class treats the multi-byte em dash as its
+# individual raw bytes and strips only the first one, leaving the other two
+# glued to the front of the title. That is invisible in most uses, but it made
+# every `case "$(scenario_block_title …)" in WITHDRAWN*)` test silently fail —
+# so a tombstone was processed as a real scenario and failed the seam-layer
+# check. Same guard specclaw-bf-rebuild-collect's block_title_after_dash
+# already carries.
 scenario_block_title() {
-  head -1 "$1" | sed -E 's/^### GM-[0-9]+[[:space:]]*[—-][[:space:]]*//'
+  head -1 "$1" | sed -E 's/^### GM-[0-9]+[[:space:]]*(—|-)[[:space:]]*//'
 }
 
 # Extract a single-line "- **<Label>:** value" field (Seam, Business rules
@@ -172,6 +248,47 @@ scenario_block_field() {
   local file="$1" label="$2"
   grep -m1 -- "^- \*\*${label}:\*\*" "$file" 2>/dev/null \
     | sed -E "s/^- \*\*${label}:\*\* *//" | sed -E 's/[[:space:]]+$//'
+}
+
+# Every MOD-### token in a scenario's own "- **Modules:**" field, comma-
+# joined. Declared once by the design agent (from the module map's own DR
+# ownership) and copied verbatim from here on — never re-derived from this
+# scenario's prose, and never inferred from its rules at record time, exactly
+# like `seam_layer`. An empty value is legal and means the project has no
+# module map yet.
+#
+# The field is named `Modules`, not `Module(s)`, deliberately: several field
+# readers in this plugin interpolate the label into an ERE, where `(s)` parses
+# as a capture group and the strip silently fails, leaving the label glued to
+# the value. A paren-free label cannot be got wrong by any of them.
+scenario_block_modules() {
+  local file="$1"
+  { scenario_block_field "$file" "Modules" \
+    | grep -oE 'MOD-[0-9]{3}' | awk '!seen[$0]++' | paste -sd, -; } || true
+}
+
+# Comma-joined id list -> JSON array body.
+csv_to_json_array() {
+  local raw="$1" out="" first=true item
+  local -a _items=()
+  IFS=',' read -ra _items <<< "$raw"
+  for item in ${_items[@]+"${_items[@]}"}; do
+    item="${item#"${item%%[![:space:]]*}"}"
+    item="${item%"${item##*[![:space:]]}"}"
+    [ -z "$item" ] && continue
+    if $first; then first=false; else out="${out}, "; fi
+    out="${out}\"$(json_escape "$item")\""
+  done
+  printf '%s' "$out"
+}
+
+# The module map's own Status line, verbatim ("PROPOSED — ..." or
+# "CONFIRMED by <name>, <date>"). Reported, never normalized.
+read_module_map_status() {
+  local map_file="$1"
+  [ -f "$map_file" ] || { printf ''; return 0; }
+  { grep -m1 -- '^\*\*Status:\*\*' "$map_file" 2>/dev/null \
+    | sed -E 's/^\*\*Status:\*\* *//' | sed -E 's/[[:space:]]+$//'; } || true
 }
 
 # Fingerprint of a scenario's own defining content — used only to detect
@@ -241,13 +358,31 @@ fixture_array_field() {
 # ─── Subcommand: collect (design mode, pre-agent) ────────────────────────────
 
 cmd_collect() {
-  local specclaw_dir="$1"
+  local specclaw_dir="$1"; shift
+  local module_scope=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --module)
+        shift
+        [ $# -gt 0 ] || die "--module requires a MOD-### id (e.g. --module MOD-002)."
+        module_scope="$1"
+        ;;
+      --module=*) module_scope="${1#--module=}" ;;
+      *) die "Unknown option for collect: $1" ;;
+    esac
+    shift
+  done
+  if [ -n "$module_scope" ] && ! [[ "$module_scope" =~ ^MOD-[0-9]{3}$ ]]; then
+    die "--module expects a MOD-### id (three digits, e.g. MOD-002); got '${module_scope}'."
+  fi
+
   [ -d "$specclaw_dir" ] || die "specclaw directory not found: $specclaw_dir"
 
-  local specclaw_dir_abs project_root analysis_dir
+  local specclaw_dir_abs project_root analysis_dir baseline_dir
   specclaw_dir_abs="$(cd "$specclaw_dir" && pwd)"
   project_root="$(cd "$specclaw_dir_abs/.." && pwd)"
   analysis_dir="$specclaw_dir_abs/analysis"
+  baseline_dir="$specclaw_dir_abs/baseline"
 
   local domain_model="$analysis_dir/domain-model.md"
   [ -f "$domain_model" ] || die "No .specclaw/analysis/domain-model.md found — /specclaw:bf-baseline derives its scenarios from that document's numbered business rules and cannot proceed without it. Run /specclaw:bf-domain first."
@@ -270,11 +405,97 @@ cmd_collect() {
   [ -f "$analysis_dir/clarifications.md" ] && clar_present=true
   [ -f "$analysis_dir/pending-questions.md" ] && pq_present=true
 
+  # ── Module map (soft input) ──────────────────────────────────────────────
+  # Present: every scenario declares the module(s) owning the rules it pins,
+  # derived from this roster. Absent: scenarios declare no module, exactly as
+  # they declare no backlog item when rebuild-backlog.md does not exist. Only
+  # --module makes the map a hard requirement.
+  local map_file="$analysis_dir/module-map.md"
+  local map_present=false map_status="" modules_json="" mfirst=true
+  local -a known_mods=()
+  if [ -f "$map_file" ]; then
+    map_present=true
+    map_status="$(read_module_map_status "$map_file")"
+    local mworkdir; mworkdir="$(mktemp -d)"
+    awk -v dir="$mworkdir" '
+      /^### MOD-[0-9]+/ { match($0, /MOD-[0-9]+/); id = substr($0, RSTART, RLENGTH); outfile = dir "/" id ".md" }
+      /^## / && !/^### MOD-[0-9]+/ { id = "" }
+      id != "" { print $0 >> outfile }
+    ' "$map_file"
+    shopt -s nullglob
+    local -a mod_files=("$mworkdir"/MOD-*.md)
+    shopt -u nullglob
+    local mf mid mname mrules
+    for mf in "${mod_files[@]}"; do
+      mid="$(basename "$mf" .md)"
+      mname="$(head -1 "$mf" | sed -E 's/^### MOD-[0-9]+[[:space:]]*(—|-)[[:space:]]*//')"
+      case "$mname" in WITHDRAWN*) ;; *) known_mods+=("$mid") ;; esac
+      mrules="$({ grep -oE 'DR-[0-9]{3}' "$mf" 2>/dev/null | awk '!seen[$0]++' | paste -sd, -; } || true)"
+      if $mfirst; then mfirst=false; else modules_json="${modules_json},"; fi
+      modules_json="${modules_json}
+    {\"mod_id\": \"$(json_escape "$mid")\", \"name\": \"$(json_escape "$mname")\", \"rules\": [$(csv_to_json_array "$mrules")]}"
+    done
+    rm -rf "$mworkdir"
+  fi
+
+  if [ -n "$module_scope" ]; then
+    $map_present || die "--module ${module_scope} needs .specclaw/analysis/module-map.md, which does not exist — a module-scoped design has no module definitions to scope to. Run /specclaw:bf-domain first, or run design mode without --module to design the whole corpus."
+    local found=false km
+    for km in ${known_mods[@]+"${known_mods[@]}"}; do
+      [ "$km" = "$module_scope" ] && { found=true; break; }
+    done
+    $found || die "--module ${module_scope} names no active module in .specclaw/analysis/module-map.md. Active modules: ${known_mods[*]:-none}."
+  fi
+
+  # ── Prior scenario roster, for GM-id carry-forward ───────────────────────
+  # Read here, before /specclaw:bf-baseline's own archive step moves
+  # scenarios.md. GM-NNN ids are permanent: a captured fixture, a manifest
+  # entry and (now) a module tag all hang off one, so a re-design that
+  # reassigned them would silently re-point every one of those without
+  # changing a single hash. ID-level facts only.
+  local scenarios_file="$baseline_dir/scenarios.md"
+  local prior_scenarios_json="" psfirst=true next_gm_num=1
+  if [ -f "$scenarios_file" ]; then
+    local sworkdir; sworkdir="$(mktemp -d)"
+    split_scenario_blocks "$scenarios_file" "$sworkdir"
+    shopt -s nullglob
+    local -a sfiles=("$sworkdir"/GM-*.md)
+    shopt -u nullglob
+    local sf sid stitle srules smods slayer sstatus snum
+    for sf in "${sfiles[@]}"; do
+      sid="$(scenario_block_id "$sf")"
+      snum="${sid#GM-}"; snum=$((10#$snum))
+      [ "$snum" -ge "$next_gm_num" ] && next_gm_num=$((snum + 1))
+      stitle="$(scenario_block_title "$sf")"
+      case "$stitle" in WITHDRAWN*) sstatus="withdrawn" ;; *) sstatus="active" ;; esac
+      srules="$({ grep -oE 'DR-[0-9]{3}' "$sf" 2>/dev/null | awk '!seen[$0]++' | paste -sd, -; } || true)"
+      smods="$(scenario_block_modules "$sf")"
+      slayer="$(scenario_block_field "$sf" "Seam layer")"
+      if $psfirst; then psfirst=false; else prior_scenarios_json="${prior_scenarios_json},"; fi
+      prior_scenarios_json="${prior_scenarios_json}
+    {\"gm_id\": \"$(json_escape "$sid")\", \"title\": \"$(json_escape "$stitle")\", \"status\": \"${sstatus}\", \"rules\": [$(csv_to_json_array "$srules")], \"modules\": [$(csv_to_json_array "$smods")], \"seam_layer\": $(json_str_or_null "$slayer")}"
+    done
+    rm -rf "$sworkdir"
+  fi
+  local next_gm_id; next_gm_id="$(printf 'GM-%03d' "$next_gm_num")"
+
   local output
   output=$(cat <<ENDJSON
 {
   "project_root": "$(json_escape "$project_root")",
   "domain_model_path": ".specclaw/analysis/domain-model.md",
+  "module_scope": $(json_str_or_null "$module_scope"),
+  "module_map": {
+    "present": ${map_present},
+    "path": ".specclaw/analysis/module-map.md",
+    "status": "$(json_escape "$map_status")",
+    "confirmed": $(case "$map_status" in CONFIRMED*) printf 'true' ;; *) printf 'false' ;; esac),
+    "modules": [${modules_json}
+    ]
+  },
+  "prior_scenarios": [${prior_scenarios_json}
+  ],
+  "next_gm_id": "$(json_escape "$next_gm_id")",
   "supplementary_docs_present": [${docs_present_json}
   ],
   "supplementary_docs_missing": [${docs_missing_json}
@@ -290,7 +511,24 @@ ENDJSON
 # ─── Subcommand: harness-collect (harness mode, pre-agent) ───────────────────
 
 cmd_harness_collect() {
-  local specclaw_dir="$1"
+  local specclaw_dir="$1"; shift
+  local module_scope=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --module)
+        shift
+        [ $# -gt 0 ] || die "--module requires a MOD-### id (e.g. --module MOD-002)."
+        module_scope="$1"
+        ;;
+      --module=*) module_scope="${1#--module=}" ;;
+      *) die "Unknown option for harness-collect: $1" ;;
+    esac
+    shift
+  done
+  if [ -n "$module_scope" ] && ! [[ "$module_scope" =~ ^MOD-[0-9]{3}$ ]]; then
+    die "--module expects a MOD-### id (three digits, e.g. MOD-002); got '${module_scope}'."
+  fi
+
   [ -d "$specclaw_dir" ] || die "specclaw directory not found: $specclaw_dir"
 
   local specclaw_dir_abs project_root baseline_dir
@@ -306,15 +544,24 @@ cmd_harness_collect() {
 
   # Archive any prior harness wholesale (it's a directory, not a single file
   # — same archive-then-replace convention, applied to a directory).
-  if [ -d "$baseline_dir/harness" ]; then
-    mkdir -p "$baseline_dir/archive"
-    mv "$baseline_dir/harness" "$baseline_dir/archive/$(date +%Y-%m-%d-%H%M%S)-harness"
+  #
+  # NOT under --module: a one-module harness run must leave every other
+  # module's generated tests exactly where they are. Archiving the directory
+  # and handing the agent one module's scenario list would delete the rest of
+  # the harness and then quietly rebuild a fraction of it.
+  if [ -z "$module_scope" ]; then
+    if [ -d "$baseline_dir/harness" ]; then
+      mkdir -p "$baseline_dir/archive"
+      mv "$baseline_dir/harness" "$baseline_dir/archive/$(date +%Y-%m-%d-%H%M%S)-harness"
+    fi
   fi
   mkdir -p "$baseline_dir/harness"
   mkdir -p "$baseline_dir/fixtures"
 
   # Deterministic checklist: every GM-NNN ID the agent must implement
-  # one-for-one, not re-derive by re-reading scenarios.md's prose.
+  # one-for-one, not re-derive by re-reading scenarios.md's prose. Under
+  # --module, only that module's ids — filtered on each scenario's own
+  # declared Modules field, never on prose.
   local workdir; workdir="$(mktemp -d)"
   split_scenario_blocks "$scenarios_file" "$workdir"
 
@@ -322,12 +569,39 @@ cmd_harness_collect() {
   local -a block_files=("$workdir"/GM-*.md)
   shopt -u nullglob
 
-  local ids_json="" first=true f
+  local ids_json="" first=true f sid_mods skipped=0 total=0
   for f in "${block_files[@]}"; do
+    # A tombstoned scenario is never implemented — it exists only to keep its
+    # id claimed.
+    case "$(scenario_block_title "$f")" in WITHDRAWN*) continue ;; esac
+    total=$((total + 1))
+    if [ -n "$module_scope" ]; then
+      sid_mods="$(scenario_block_modules "$f")"
+      if [[ ",${sid_mods}," != *",${module_scope},"* ]]; then
+        skipped=$((skipped + 1))
+        continue
+      fi
+    fi
     if $first; then first=false; else ids_json="${ids_json}, "; fi
     ids_json="${ids_json}\"$(json_escape "$(scenario_block_id "$f")")\""
   done
   rm -rf "$workdir"
+
+  if [ -n "$module_scope" ] && [ -z "$ids_json" ]; then
+    die "No scenario in .specclaw/baseline/scenarios.md declares module ${module_scope} — there is nothing to generate a harness for. Run design mode (with --module ${module_scope}) first so those scenarios exist and carry their Modules field."
+  fi
+
+  # Under --module the agent is editing INSIDE an existing harness project, so
+  # it needs to know what is already there — otherwise it either duplicates a
+  # test or reinvents the project layout beside the real one.
+  local existing_json="" efirst=true rel
+  if [ -n "$module_scope" ] && [ -d "$baseline_dir/harness" ]; then
+    while IFS= read -r rel; do
+      [ -z "$rel" ] && continue
+      if $efirst; then efirst=false; else existing_json="${existing_json}, "; fi
+      existing_json="${existing_json}\"$(json_escape "${rel#"$baseline_dir/harness/"}")\""
+    done < <(find "$baseline_dir/harness" -type f 2>/dev/null | sort)
+  fi
 
   local output
   output=$(cat <<ENDJSON
@@ -337,11 +611,18 @@ cmd_harness_collect() {
   "scenarios_path": ".specclaw/baseline/scenarios.md",
   "harness_dir": ".specclaw/baseline/harness",
   "fixtures_dir": ".specclaw/baseline/fixtures",
-  "scenario_ids": [${ids_json}]
+  "module_scope": $(json_str_or_null "$module_scope"),
+  "harness_archived": $(if [ -z "$module_scope" ]; then printf 'true'; else printf 'false'; fi),
+  "scenario_ids": [${ids_json}],
+  "existing_harness_files": [${existing_json}]
 }
 ENDJSON
 )
   emit_json "$output"
+
+  if [ -n "$module_scope" ]; then
+    echo "Module-scoped harness run for ${module_scope}: $(printf '%s' "$ids_json" | grep -o 'GM-' | wc -l | tr -d ' ') of ${total} scenario(s) selected, ${skipped} belong to other modules and were left untouched. The existing harness directory was NOT archived or emptied." >&2
+  fi
 }
 
 # ─── Subcommand: record (record mode — fully deterministic) ─────────────────
@@ -364,6 +645,37 @@ cmd_record() {
   local manifest_file="$baseline_dir/manifest.json"
   local archive_dir="$baseline_dir/archive"
   local error_map="$baseline_dir/error-map.md"
+  local map_file="$specclaw_dir_abs/analysis/module-map.md"
+  local backlog_file="$specclaw_dir_abs/analysis/rebuild-backlog.md"
+
+  # ── The BL-item -> module index, for the trace-line consistency check.
+  # MOD -> BL -> DR -> GM is only walkable if the two documents that declare
+  # module membership agree: the map owns which module a RULE belongs to, and
+  # rebuild-backlog.md owns which module an ITEM is filed under. A fixture
+  # derived from the map's rule ownership that lands in a different module
+  # than its own BL item means one of the two is wrong, and bash cannot know
+  # which — so it names both and warns. Never a hard failure: the manifest is
+  # still valid evidence, and blocking it would make a documentation
+  # disagreement destroy a capture run.
+  local -A BL_MODULE=()
+  if [ -f "$backlog_file" ]; then
+    local blworkdir; blworkdir="$(mktemp -d)"
+    awk -v dir="$blworkdir" '
+      /^### BL-[0-9]+/ { match($0, /BL-[0-9]+/); id = substr($0, RSTART, RLENGTH); outfile = dir "/" id ".md" }
+      /^## / && !/^### BL-[0-9]+/ { id = "" }
+      id != "" { print $0 >> outfile }
+    ' "$backlog_file"
+    shopt -s nullglob
+    local -a bl_files=("$blworkdir"/BL-*.md)
+    shopt -u nullglob
+    local blf blid blmod
+    for blf in "${bl_files[@]}"; do
+      blid="$(basename "$blf" .md)"
+      blmod="$({ grep -m1 -- '^\*\*Module:\*\*' "$blf" 2>/dev/null | grep -oE 'MOD-[0-9]{3}' | head -1; } || true)"
+      [ -n "$blmod" ] && BL_MODULE["$blid"]="$blmod"
+    done
+    rm -rf "$blworkdir"
+  fi
 
   local plugin_version
   plugin_version="$(jq -r '.version // "unknown"' "$PLUGIN_ROOT/.claude-plugin/plugin.json" 2>/dev/null || echo "unknown")"
@@ -378,7 +690,13 @@ cmd_record() {
     while IFS=$'\t' read -r psid pshash; do
       [ -z "$psid" ] && continue
       prior_scenario_hash["$psid"]="$pshash"
-    done < <(jq -r '.fixtures[]? | [.scenario_id, (.scenario_content_hash // "")] | @tsv' "$manifest_file" 2>/dev/null || true)
+    # `tr -d '\r'` is load-bearing, not cosmetic: jq's Windows build emits
+    # CRLF, and a trailing \r on the recorded hash means it never equals the
+    # freshly computed one — so EVERY scenario reads SUPERSEDED on every
+    # re-record, and every replay is held at PASS-PENDING-DECISIONS forever
+    # for a reason no one can find. Same guard this script already applies to
+    # its other jq-to-read pipes.
+    done < <(jq -r '.fixtures[]? | [.scenario_id, (.scenario_content_hash // "")] | @tsv' "$manifest_file" 2>/dev/null | tr -d '\r' || true)
   fi
 
   local workdir; workdir="$(mktemp -d)"
@@ -391,10 +709,11 @@ cmd_record() {
   [ "${#block_files[@]}" -gt 0 ] || { rm -rf "$workdir"; die "no GM-NNN scenarios found in .specclaw/baseline/scenarios.md — nothing to record against."; }
 
   local fixtures_json="" missing_json="" ffirst=true mfirst=true
-  local f id seam seam_layer rules backlog_item fixture_path content_hash scenario_hash status
+  local -a module_warnings=()
+  local f id seam seam_layer rules backlog_item fixture_path content_hash scenario_hash status modules
   local captured_at anchor_date commit_sha runtime_version normalized_fields
   local outcome error_code threw resolution_json
-  local captured_count=0 missing_count=0
+  local captured_count=0 missing_count=0 tombstone_count=0
   local verifiable_count=0 provisional_count=0 superseded_count=0
 
   # Every validation failure across every scenario is collected here and
@@ -405,12 +724,57 @@ cmd_record() {
 
   for f in "${block_files[@]}"; do
     id="$(scenario_block_id "$f")"
+
+    # A WITHDRAWN tombstone is an id kept claimed, not a scenario: it declares
+    # no seam layer, pins no rule, and can never be captured. Skipping it here
+    # is what keeps a tombstone from failing the whole record on the
+    # "declares no Seam layer" check — while its id still counts toward the
+    # next free GM id, so nothing ever reuses it.
+    case "$(scenario_block_title "$f")" in
+      WITHDRAWN*) tombstone_count=$((tombstone_count + 1)); continue ;;
+    esac
+
     seam="$(scenario_block_field "$f" "Seam")"
     seam_layer="$(scenario_block_field "$f" "Seam layer")"
     rules="$(scenario_block_field "$f" "Business rules pinned")"
     backlog_item="$(scenario_block_field "$f" "Verifies backlog item")"
+    modules="$(scenario_block_modules "$f")"
     fixture_path="$fixtures_dir/${id}.json"
     scenario_hash="sha256:$(scenario_block_hash "$f")"
+
+    # A declared module that names nothing in the map is a hard error, on the
+    # same grounds as an error_code with no error-map heading: it looks like a
+    # decided fact everywhere downstream, while selecting exactly nothing in
+    # /specclaw:bf-replay --module. Only checked when the map exists — a
+    # project with no module map legitimately declares no modules at all.
+    if [ -f "$map_file" ] && [ -n "$modules" ]; then
+      local mtok
+      while IFS= read -r mtok; do
+        [ -z "$mtok" ] && continue
+        if ! grep -qE "^### ${mtok}([[:space:]]|$)" "$map_file"; then
+          problems+=("${id}: declares module '${mtok}' but .specclaw/analysis/module-map.md has no '### ${mtok}' heading — a module tag naming no module selects nothing in /specclaw:bf-replay --module, silently.")
+        fi
+      # `printf '%s\n'`, never `printf '%s'`: without the trailing newline
+      # `read` returns false on the final (only) line and the loop body never
+      # runs at all — which silently disabled this entire check.
+      done < <(printf '%s\n' "$modules" | tr ',' '\n')
+    elif [ ! -f "$map_file" ] && [ -n "$modules" ]; then
+      module_warnings+=("${id}: declares module(s) ${modules}, but .specclaw/analysis/module-map.md does not exist here, so the tag cannot be validated against anything.")
+    fi
+
+    # Trace-line consistency (MOD -> BL -> DR -> GM): the scenario's module
+    # comes from the map's rule ownership; its BL item's module comes from the
+    # backlog. If they disagree, name both — one document is wrong.
+    if [ -n "$modules" ] && [ ${#BL_MODULE[@]} -gt 0 ]; then
+      local bltok blmod_expected
+      bltok="$(printf '%s' "$backlog_item" | { grep -oE 'BL-[0-9]{3}' | head -1; } || true)"
+      if [ -n "$bltok" ]; then
+        blmod_expected="${BL_MODULE[$bltok]:-}"
+        if [ -n "$blmod_expected" ] && [[ ",${modules}," != *",${blmod_expected},"* ]]; then
+          module_warnings+=("${id}: scenario declares module(s) ${modules} (from module-map.md's rule ownership) but its own backlog item ${bltok} is filed under ${blmod_expected} in rebuild-backlog.md. One of the two documents is wrong — this is not decided here.")
+        fi
+      fi
+    fi
 
     # Per CONTRACT.md (i): declared, never derived, never defaulted. Checked
     # for every scenario, captured or not — a scenario with no layer cannot
@@ -555,6 +919,7 @@ cmd_record() {
       \"seam_layer\": \"$(json_escape "$seam_layer")\",
       \"business_rules_pinned\": \"$(json_escape "$rules")\",
       \"verifies_backlog_item\": \"$(json_escape "$backlog_item")\",
+      \"module_ids\": [$(csv_to_json_array "$modules")],
       \"fixture_path\": \"$(json_escape ".specclaw/baseline/fixtures/${id}.json")\",
       \"content_hash\": \"$(json_escape "$content_hash")\",
       \"scenario_content_hash\": \"$(json_escape "$scenario_hash")\",
@@ -594,11 +959,14 @@ ${joined}"
     mv "$manifest_file" "$archive_dir/$(date +%Y-%m-%d-%H%M%S)-manifest.json"
   fi
 
-  local total="${#block_files[@]}"
+  # Tombstones are not scenarios — counting them would report a corpus larger
+  # than anything that can ever be captured, and every re-run would look
+  # permanently incomplete.
+  local total=$(( ${#block_files[@]} - tombstone_count ))
   local output
   output=$(cat <<ENDJSON
 {
-  "manifest_schema": 2,
+  "manifest_schema": 3,
   "plugin_version": "$(json_escape "$plugin_version")",
   "project_root": "$(json_escape "$project_root")",
   "generated": "$(date +%Y-%m-%d)",
@@ -615,18 +983,221 @@ ENDJSON
   emit_json "$output"
 
   echo "Wrote $manifest_file (${captured_count}/${total} scenarios captured, ${missing_count} missing; of captured: ${verifiable_count} VERIFIABLE, ${provisional_count} PROVISIONAL, ${superseded_count} SUPERSEDED — recapture a SUPERSEDED fixture, its scenario definition changed since capture)" >&2
+
+  # Module consistency findings are WARNs, deliberately reported AFTER the
+  # manifest is written: they describe a disagreement between two analysis
+  # documents, not a defect in the captured evidence, so they must never cost
+  # a capture run its manifest.
+  if [ "${#module_warnings[@]}" -gt 0 ]; then
+    warn "module consistency — ${#module_warnings[@]} finding(s); the manifest was written and is valid, but these should be reconciled:"
+    printf '  - %s\n' "${module_warnings[@]}" >&2
+  fi
+}
+
+# ─── Subcommand: merge-scenarios (module-scoped design merge) ────────────────
+#
+# Whole-corpus design mode is unchanged: the agent writes scenarios.md itself
+# after the skill archives the prior one, exactly as before. A MODULE-scoped
+# design cannot work that way — the agent only drafted one module's scenarios,
+# so letting it write the file would delete every other module's blocks and
+# break GM-id permanence in one step. So bash owns the merge for that path,
+# the same split /specclaw:bf-rebuild-plan uses: agent drafts, bash renders.
+
+cmd_merge_scenarios() {
+  local specclaw_dir="$1" draft_file="$2" module_scope="$3"
+  [ -d "$specclaw_dir" ] || die "specclaw directory not found: $specclaw_dir"
+  [ -f "$draft_file" ] || die "draft file not found: $draft_file"
+  [[ "$module_scope" =~ ^MOD-[0-9]{3}$ ]] || die "merge-scenarios expects a MOD-### id (three digits); got '${module_scope}'."
+
+  local specclaw_dir_abs baseline_dir
+  specclaw_dir_abs="$(cd "$specclaw_dir" && pwd)"
+  baseline_dir="$specclaw_dir_abs/baseline"
+  local scenarios_file="$baseline_dir/scenarios.md"
+  [ -f "$scenarios_file" ] || die "No .specclaw/baseline/scenarios.md found — a module-scoped design merges into an existing corpus design. Run /specclaw:bf-baseline (design mode, no --module) first to establish one."
+
+  local workdir; workdir="$(mktemp -d)"
+  mkdir -p "$workdir/old" "$workdir/new"
+  split_scenario_blocks "$scenarios_file" "$workdir/old"
+  split_scenario_blocks "$draft_file" "$workdir/new"
+
+  shopt -s nullglob
+  local -a old_files=("$workdir/old"/GM-*.md) new_files=("$workdir/new"/GM-*.md)
+  shopt -u nullglob
+  [ "${#new_files[@]}" -gt 0 ] || { rm -rf "$workdir"; die "draft ${draft_file} contains no '### GM-NNN' scenario blocks — nothing to merge."; }
+
+  # Every id the draft supplies, and every id the scoped module previously had.
+  local drafted_ids="" f id
+  for f in "${new_files[@]}"; do drafted_ids="${drafted_ids} $(scenario_block_id "$f")"; done
+
+  local today; today="$(date +%Y-%m-%d)"
+  local replaced=0 preserved=0 tombstoned=0 added=0
+  local -a tombstones=() shared_kept=() shared_rewritten=()
+
+  # ── Decide an action per existing id, then apply them by STREAMING the
+  # original document. A preserved block must come out byte-for-byte
+  # identical, including its own trailing blank lines: `record` hashes each
+  # scenario's block text to detect SUPERSEDED, so re-emitting an untouched
+  # block through split-and-reassemble (which normalizes trailing newlines)
+  # would mark another module's already-captured fixtures as needing
+  # recapture. A one-module run must cost the other modules nothing at all. ─
+  local action_file="$workdir/actions.tsv"; : > "$action_file"
+  for f in "${old_files[@]}"; do
+    id="$(scenario_block_id "$f")"
+    local old_mods; old_mods="$(scenario_block_modules "$f")"
+
+    # Is this scenario shared with a module other than the scoped one? A
+    # multi-module scenario pins a flow that crosses a boundary, and a
+    # single-module run has NO authority to retire the other module's
+    # coverage of it.
+    local shared=false omod
+    while IFS= read -r omod; do
+      [ -z "$omod" ] && continue
+      [ "$omod" = "$module_scope" ] && continue
+      shared=true
+    done < <(printf '%s\n' "$old_mods" | tr ',' '\n')
+
+    local is_tombstone=false
+    case "$(scenario_block_title "$f")" in WITHDRAWN*) is_tombstone=true ;; esac
+
+    if [[ " ${drafted_ids} " == *" ${id} "* ]]; then
+      printf '%s\tREPLACE\n' "$id" >> "$action_file"
+      replaced=$((replaced + 1))
+      $shared && shared_rewritten+=("$id")
+    elif $is_tombstone; then
+      printf '%s\tKEEP\n' "$id" >> "$action_file"
+      preserved=$((preserved + 1))
+    elif [[ ",${old_mods}," == *",${module_scope},"* ]] && $shared; then
+      # Shared, and this run's draft omitted it. KEEP it: retiring a
+      # cross-module scenario because a one-module redesign didn't mention it
+      # would silently delete another module's proof of a flow spanning both.
+      # Reported, never decided here.
+      printf '%s\tKEEP\n' "$id" >> "$action_file"
+      preserved=$((preserved + 1))
+      shared_kept+=("${id} (${old_mods})")
+    elif [[ ",${old_mods}," == *",${module_scope},"* ]]; then
+      # Owned solely by the scoped module, and this run's draft dropped it.
+      # Its id is permanent (CONTRACT.md (c)) — a captured fixture and a
+      # manifest entry may already hang off it — so it becomes a tombstone
+      # instead of disappearing, and next_gm_id keeps counting past it.
+      printf '%s\tTOMBSTONE\n' "$id" >> "$action_file"
+      tombstoned=$((tombstoned + 1))
+      tombstones+=("$id")
+    else
+      printf '%s\tKEEP\n' "$id" >> "$action_file"
+      preserved=$((preserved + 1))
+    fi
+  done
+
+  # Tombstone text, written once to a file so awk can splice it in verbatim.
+  local tomb_dir="$workdir/tomb"; mkdir -p "$tomb_dir"
+  local tid
+  for tid in ${tombstones[@]+"${tombstones[@]}"}; do
+    cat > "$tomb_dir/${tid}.md" <<TOMBEOF
+### ${tid} — WITHDRAWN ${today}, dropped by a module-scoped redesign of ${module_scope}
+
+- **Modules:** ${module_scope}
+
+_This scenario is no longer designed. Its id stays claimed forever so that any manifest entry, fixture, or report still citing it fails loudly rather than silently pointing at a different scenario. If a fixture was already captured for it, that fixture is now orphaned — delete nothing, and recapture under the replacing scenario's own id._
+
+TOMBEOF
+  done
+
+  local body_file="$workdir/body.md"
+  awk -v actions="$action_file" -v newdir="$workdir/new" -v tombdir="$tomb_dir" '
+    BEGIN {
+      while ((getline line < actions) > 0) {
+        split(line, a, "\t"); act[a[1]] = a[2]
+      }
+      inscen = 0; cur = ""
+    }
+    # The Scenarios section only. Everything outside it is handled in bash.
+    /^## Scenarios/ { inscen = 1; next }
+    inscen && /^## / { inscen = 0 }
+    !inscen { next }
+    /^### GM-[0-9]+/ {
+      match($0, /GM-[0-9]+/); cur = substr($0, RSTART, RLENGTH)
+      if (act[cur] == "REPLACE") {
+        while ((getline l < (newdir "/" cur ".md")) > 0) print l
+        print ""
+        next
+      }
+      if (act[cur] == "TOMBSTONE") {
+        while ((getline l < (tombdir "/" cur ".md")) > 0) print l
+        next
+      }
+    }
+    # A KEEP block is emitted line-for-line, exactly as it was.
+    { if (cur == "" || act[cur] == "KEEP") print }
+  ' "$scenarios_file" > "$body_file"
+
+  # Genuinely new ids from the draft, appended in draft order.
+  for f in "${new_files[@]}"; do
+    id="$(scenario_block_id "$f")"
+    [ -f "$workdir/old/${id}.md" ] && continue
+    cat "$f" >> "$body_file"
+    printf '\n' >> "$body_file"
+    added=$((added + 1))
+  done
+
+  # The two whole-corpus sections. A module-scoped run did not re-derive
+  # either, so they are preserved verbatim with a dated note saying exactly
+  # that — the alternative (letting a one-module draft overwrite a corpus-wide
+  # coverage check) would turn a partial run into a false all-clear.
+  local no_legacy rule_coverage
+  no_legacy="$(awk '/^## No Legacy Behaviour Exists/{flag=1;next}/^## /{flag=0}flag' "$scenarios_file" | sed '/./,$!d')"
+  rule_coverage="$(awk '/^## Rule Coverage Check/{flag=1;next}/^## /{flag=0}flag' "$scenarios_file" | sed '/./,$!d')"
+  local staleness="
+_Not re-derived by this run: \`${module_scope}\` was designed in isolation on ${today}, and this section is a whole-corpus finding. Re-run design mode without \`--module\` to recompute it._"
+
+  local header
+  header="$(awk '/^## Scenarios/{exit} {print}' "$scenarios_file")"
+
+  mkdir -p "$baseline_dir/archive"
+  cp "$scenarios_file" "$baseline_dir/archive/$(date +%Y-%m-%d-%H%M%S)-scenarios.md"
+
+  {
+    printf '%s\n' "$header"
+    printf '## Scenarios\n\n'
+    cat "$body_file"
+    printf '## No Legacy Behaviour Exists\n\n'
+    printf '%s\n' "${no_legacy:-_None recorded._}"
+    printf '%s\n\n' "$staleness"
+    printf '## Rule Coverage Check\n\n'
+    printf '%s\n' "${rule_coverage:-_Not recorded._}"
+    printf '%s\n' "$staleness"
+  } > "$scenarios_file"
+
+  rm -rf "$workdir"
+  rm -f "$draft_file"
+
+  echo "Merged ${module_scope} into $scenarios_file: ${replaced} scenario(s) replaced, ${added} added, ${preserved} preserved untouched, ${tombstoned} tombstoned.${tombstones[*]+" Tombstoned: ${tombstones[*]}."}" >&2
+  if [ "$tombstoned" -gt 0 ]; then
+    warn "${tombstoned} scenario id(s) owned solely by ${module_scope} were dropped by this redesign and are now WITHDRAWN tombstones: ${tombstones[*]}. If any had a captured fixture, that fixture is now orphaned — re-run --record to see it drop out of the manifest, and recapture under the replacing scenario's id."
+  fi
+  if [ "${#shared_kept[@]}" -gt 0 ]; then
+    warn "${#shared_kept[@]} cross-module scenario(s) were NOT in this draft and were kept as-is: ${shared_kept[*]}. A ${module_scope}-scoped run cannot retire a scenario another module also depends on — if one of these genuinely should go, re-run design mode without --module so every affected module is re-derived together."
+  fi
+  if [ "${#shared_rewritten[@]}" -gt 0 ]; then
+    warn "${#shared_rewritten[@]} cross-module scenario(s) were REWRITTEN by this ${module_scope}-scoped run: ${shared_rewritten[*]}. They also pin another module's rules, so check that the other module's coverage still holds — and note their fixtures will read SUPERSEDED at the next --record, since the scenario text changed."
+  fi
 }
 
 # ─── Main ─────────────────────────────────────────────────────────────────────
 
 case "${1:-}" in
   collect)
-    [ $# -ge 2 ] || die "Usage: specclaw-bf-baseline collect <specclaw_dir>"
-    cmd_collect "$2"
+    [ $# -ge 2 ] || die "Usage: specclaw-bf-baseline collect <specclaw_dir> [--module MOD-###]"
+    shift
+    cmd_collect "$@"
+    ;;
+  merge-scenarios)
+    [ $# -ge 4 ] || die "Usage: specclaw-bf-baseline merge-scenarios <specclaw_dir> <draft_file> <MOD-###>"
+    cmd_merge_scenarios "$2" "$3" "$4"
     ;;
   harness-collect)
-    [ $# -ge 2 ] || die "Usage: specclaw-bf-baseline harness-collect <specclaw_dir>"
-    cmd_harness_collect "$2"
+    [ $# -ge 2 ] || die "Usage: specclaw-bf-baseline harness-collect <specclaw_dir> [--module MOD-###]"
+    shift
+    cmd_harness_collect "$@"
     ;;
   record)
     [ $# -ge 2 ] || die "Usage: specclaw-bf-baseline record <specclaw_dir>"

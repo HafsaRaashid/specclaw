@@ -44,27 +44,56 @@ usage() {
 Usage: specclaw-bf-rebuild-collect <subcommand> [options]
 
 Subcommands:
-  collect  <specclaw_dir> [--refresh]
-           Checks that all four .specclaw/analysis/*.md documents exist
-           (exits non-zero naming exactly which are missing, as before).
-           Detects which optional inputs are present: decisions.md,
-           clarifications.md, .specclaw/baseline/manifest.json,
-           .specclaw/baseline/scenarios.md. If .specclaw/analysis/
-           rebuild-backlog.md already exists and --refresh was not passed,
-           exits non-zero instructing the user to re-run with --refresh (or
-           archive/delete it manually). Emits one JSON object to stdout.
+  collect  <specclaw_dir> [--refresh] [--module MOD-###]
+           Checks that all five .specclaw/analysis/*.md documents exist
+           (exits non-zero naming exactly which are missing, as before) —
+           the four analysis documents plus module-map.md, the module
+           hierarchy every backlog item is grouped under. Detects which
+           optional inputs are present: decisions.md, clarifications.md,
+           .specclaw/baseline/manifest.json, .specclaw/baseline/scenarios.md.
+           If .specclaw/analysis/rebuild-backlog.md already exists and
+           --refresh was not passed, exits non-zero instructing the user to
+           re-run with --refresh (or archive/delete it manually). Emits one
+           JSON object to stdout, including the module roster (id, name,
+           status, rules, dependencies) and the map's own PROPOSED/CONFIRMED
+           status.
 
-  render   <specclaw_dir> <draft_file>
+           --module MOD-### scopes the run to one module: the agent drafts
+           only that module's items, and every other module's items are
+           preserved untouched. The id must exist in module-map.md.
+
+  render   <specclaw_dir> <draft_file> [--module MOD-###]
            Post-agent step. <draft_file> contains STRIKE:/DEFER:/
            UNVERIFIABLE: directive lines (if any) followed by zero or more
            ### BL-NNN item blocks (new items on a first-ever run; new or
            revised items on --refresh — untouched existing items need not
-           appear in the draft at all). Archives the prior rebuild-backlog.md
-           (if any), merges the draft with every preserved existing item,
-           computes Gate/Verification/ordering for every active item,
-           renders the change report (refresh only), and writes
-           .specclaw/analysis/rebuild-backlog.md. Deletes <draft_file> on
-           success.
+           appear in the draft at all), optionally followed by
+           ## Sequencing Rationale and ## Coverage Check sections. Archives
+           the prior rebuild-backlog.md (if any), merges the draft with every
+           preserved existing item, computes Gate/Verification/ordering for
+           every active item, groups items under ## MOD-### headings in
+           module dependency order, computes the per-module coverage rollup
+           and the recommended next module, renders the change report
+           (refresh only), and writes .specclaw/analysis/rebuild-backlog.md.
+           Deletes <draft_file> on success.
+
+           Pass the same --module MOD-### the collect step was given, so the
+           draft's Coverage Check replaces only that module's coverage lines
+           instead of the whole section.
+
+  module-status <specclaw_dir>
+           Read-only status VIEW. Writes .specclaw/analysis/module-status.md:
+           one row per module — backlog items planned/total, baseline
+           scenarios captured/designed, the latest module-scoped replay
+           verdict with its run date, and the count of open questions naming
+           that module. Computed entirely from existing artifacts
+           (module-map, backlog, scenarios, manifest, retained run metadata,
+           pending-questions/clarifications); modifies nothing else.
+
+           Regenerated in full every invocation and deliberately EXEMPT from
+           archive-then-replace: it holds no finding of its own, only a
+           rendering of documents whose own history is already archived.
+           Exits non-zero only when module-map.md is missing.
 
 Options:
   -h, --help    Show this help message
@@ -388,21 +417,75 @@ extract_scr_ids() {
   { grep -oE 'SCR-[0-9]{3}' "$1" 2>/dev/null | awk '!seen[$0]++'; } || true
 }
 
-# ─── Known analysis documents (unchanged hard prerequisite) ─────────────────
+# ─── Known analysis documents (hard prerequisites) ──────────────────────────
+#
+# module-map.md joins the original four as a hard prerequisite: every backlog
+# item declares the MOD-### it belongs to, items are grouped and sequenced by
+# the map's own module dependency order, and the recommended-next-module
+# computation reads nothing else. A backlog rendered without it would have to
+# either invent a grouping or silently drop the hierarchy — so it fails
+# loudly, naming the producing command, exactly like the other four.
 
 DOC_SPECS=(
   "codebase-report.md|bf-analyze"
   "architecture.md|bf-architecture"
   "domain-model.md|bf-domain"
   "functional-spec.md|bf-domain"
+  "module-map.md|bf-domain"
 )
+
+# ─── Module map parsing (.specclaw/analysis/module-map.md) ──────────────────
+#
+# Blocks split with the same generic split_blocks above (prefix "MOD"), which
+# already stops at the next "## " heading — module-map.md has several
+# sections after "## Modules" and the last module block would otherwise
+# swallow all of them.
+
+# The map's own Status line: "PROPOSED — awaiting human confirmation", or
+# "CONFIRMED by <name>, <date>". Reported verbatim and never normalized: a
+# proposed grouping is a starting point for a conversation, and every command
+# that groups by it says on its face which one it read.
+read_module_map_status() {
+  local map_file="$1"
+  [ -f "$map_file" ] || { printf ''; return 0; }
+  { grep -m1 -- '^\*\*Status:\*\*' "$map_file" 2>/dev/null \
+    | sed -E 's/^\*\*Status:\*\* *//' | sed -E 's/[[:space:]]+$//'; } || true
+}
+
+# MOD-### tokens in a "Depends on:" field, comma-joined. Same leading-id-list
+# discipline depends_on_ids applies to BL items: only the id list before the
+# first "(" is a dependency claim, and a leading "None" means zero regardless
+# of what the parenthetical explanation happens to name.
+mod_depends_on_ids() {
+  local line="$1" leading
+  leading="${line%%(*}"
+  if [[ "$leading" =~ ^[[:space:]]*[Nn]one([[:space:]]|$) ]]; then
+    return 0
+  fi
+  printf '%s' "$leading" | { grep -oE 'MOD-[0-9]{3}' | awk '!seen[$0]++' | paste -sd, -; } || true
+}
 
 # ─── Subcommand: collect ─────────────────────────────────────────────────────
 
 cmd_collect() {
-  local specclaw_dir="$1" refresh_flag="${2:-}"
-  local is_refresh=false
-  [ "$refresh_flag" = "--refresh" ] && is_refresh=true
+  local specclaw_dir="$1"; shift
+  local is_refresh=false module_scope=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --refresh) is_refresh=true ;;
+      --module)
+        shift
+        [ $# -gt 0 ] || die "--module requires a MOD-### id (e.g. --module MOD-002)."
+        module_scope="$1"
+        ;;
+      --module=*) module_scope="${1#--module=}" ;;
+      *) die "Unknown option for collect: $1" ;;
+    esac
+    shift
+  done
+  if [ -n "$module_scope" ] && ! [[ "$module_scope" =~ ^MOD-[0-9]{3}$ ]]; then
+    die "--module expects a MOD-### id (three digits, e.g. MOD-002); got '${module_scope}'."
+  fi
 
   [ -d "$specclaw_dir" ] || die "specclaw directory not found: $specclaw_dir"
 
@@ -455,6 +538,46 @@ EOF
 )"
     fi
     mode="refresh"
+  fi
+
+  # ── Module roster (hard input — DOC_SPECS above already proved it exists) ─
+  local map_path="$analysis_dir/module-map.md"
+  local map_status modules_json="" mfirst=true
+  map_status="$(read_module_map_status "$map_path")"
+  local -a known_mods=()
+  {
+    local workdir; workdir="$(mktemp -d)"
+    split_blocks "$map_path" "$workdir" "MOD"
+    local f mid mname mstatus mrules_json mdeps_json
+    for f in "$workdir"/MOD-*.md; do
+      [ -f "$f" ] || continue
+      mid="$(block_id "$f")"
+      mname="$(block_title_after_dash "$f")"
+      # A withdrawn module keeps its id claimed forever but is never a
+      # grouping target — reported so a reader (and the agent) can see the
+      # tombstone rather than wonder where the id went.
+      case "$mname" in WITHDRAWN*) mstatus="withdrawn" ;; *) mstatus="active"; known_mods+=("$mid") ;; esac
+      mrules_json="$(ids_to_json_array "$(extract_dr_ids "$f")")"
+      mdeps_json="$(ids_to_json_array "$(mod_depends_on_ids "$(block_single_field "$f" "Depends on")" | tr ',' '\n')")"
+      if $mfirst; then mfirst=false; else modules_json="${modules_json},"; fi
+      modules_json="${modules_json}
+    {\"mod_id\": \"$(json_escape "$mid")\", \"name\": \"$(json_escape "$mname")\", \"status\": \"${mstatus}\", \"rules\": [${mrules_json}], \"depends_on\": [${mdeps_json}]}"
+    done
+    rm -rf "$workdir"
+  }
+
+  # A --module id that names no active module in the map is a hard failure,
+  # not a run that quietly plans nothing: the whole point of the flag is to
+  # scope work to a real module, and a typo would otherwise render a backlog
+  # in which that module's items were silently left unplanned.
+  if [ -n "$module_scope" ]; then
+    local found=false m
+    for m in ${known_mods[@]+"${known_mods[@]}"}; do
+      [ "$m" = "$module_scope" ] && { found=true; break; }
+    done
+    if ! $found; then
+      die "--module ${module_scope} names no active module in .specclaw/analysis/module-map.md. Active modules: ${known_mods[*]:-none}. (A WITHDRAWN module cannot be planned — its id stays claimed as a tombstone.)"
+    fi
   fi
 
   # Optional inputs.
@@ -548,7 +671,7 @@ EOF
   if [ "$mode" = "refresh" ]; then
     local workdir; workdir="$(mktemp -d)"
     split_blocks "$backlog_file" "$workdir" "BL"
-    local f id title depends_json rules_json status old_gate old_verification num
+    local f id title depends_json rules_json status old_gate old_verification num item_module
     for f in "$workdir"/BL-*.md; do
       [ -f "$f" ] || continue
       id="$(block_id "$f")"
@@ -562,9 +685,13 @@ EOF
       rules_json="$(ids_to_json_array "$(extract_dr_ids "$f")")"
       old_gate="$(block_single_field "$f" "Gate")"
       old_verification="$(block_single_field "$f" "Verification")"
+      # An item written before the module hierarchy existed carries no
+      # Module field; that reads back as "" and is reported as unassigned
+      # rather than guessed at from the item's rules.
+      item_module="$(printf '%s' "$(block_single_field "$f" "Module")" | { grep -oE 'MOD-[0-9]{3}' | head -1; } || true)"
       if $efirst; then efirst=false; else existing_json="${existing_json},"; fi
       existing_json="${existing_json}
-    {\"id\": \"$(json_escape "$id")\", \"title\": \"$(json_escape "$title")\", \"depends_on\": [${depends_json}], \"rules\": [${rules_json}], \"status\": \"${status}\", \"old_gate\": \"$(json_escape "${old_gate%% —*}")\", \"old_verification\": \"$(json_escape "${old_verification%% —*}")\"}"
+    {\"id\": \"$(json_escape "$id")\", \"title\": \"$(json_escape "$title")\", \"module\": \"$(json_escape "$item_module")\", \"depends_on\": [${depends_json}], \"rules\": [${rules_json}], \"status\": \"${status}\", \"old_gate\": \"$(json_escape "${old_gate%% —*}")\", \"old_verification\": \"$(json_escape "${old_verification%% —*}")\"}"
     done
     rm -rf "$workdir"
   fi
@@ -606,6 +733,14 @@ EOF
 {
   "project_root": "$(json_escape "$project_root")",
   "mode": "${mode}",
+  "module_scope": $(if [ -n "$module_scope" ]; then printf '"%s"' "$(json_escape "$module_scope")"; else printf 'null'; fi),
+  "module_map": {
+    "path": ".specclaw/analysis/module-map.md",
+    "status": "$(json_escape "$map_status")",
+    "confirmed": $(case "$map_status" in CONFIRMED*) printf 'true' ;; *) printf 'false' ;; esac),
+    "modules": [${modules_json}
+    ]
+  },
   "docs": [${docs_json}
   ],
   "optional_inputs": {
@@ -673,7 +808,20 @@ cq_touches_item() {
 # ─── Subcommand: render ──────────────────────────────────────────────────────
 
 cmd_render() {
-  local specclaw_dir="$1" draft_file="$2"
+  local specclaw_dir="$1" draft_file="$2"; shift 2
+  local module_scope=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --module)
+        shift
+        [ $# -gt 0 ] || die "--module requires a MOD-### id (e.g. --module MOD-002)."
+        module_scope="$1"
+        ;;
+      --module=*) module_scope="${1#--module=}" ;;
+      *) die "Unknown option for render: $1" ;;
+    esac
+    shift
+  done
   [ -d "$specclaw_dir" ] || die "specclaw directory not found: $specclaw_dir"
   [ -f "$draft_file" ] || die "draft file not found: $draft_file"
 
@@ -689,6 +837,8 @@ cmd_render() {
   local decisions_file="$analysis_dir/decisions.md"
   local manifest_file="$baseline_dir/manifest.json"
   local scenarios_file="$baseline_dir/scenarios.md"
+  local map_file="$analysis_dir/module-map.md"
+  [ -f "$map_file" ] || die "No .specclaw/analysis/module-map.md found — every backlog item is grouped under a MOD-### module and this document declares them. Run /specclaw:bf-domain first."
 
   local is_refresh=false
   [ -f "$backlog_file" ] && is_refresh=true
@@ -857,6 +1007,61 @@ cmd_render() {
     warn "jq not found — treating manifest.json as present but unreadable; Verification will fall back to scenarios.md's roster (PENDING CAPTURE, not VERIFIABLE)"
   fi
 
+  # ── Parse module-map.md (fresh, like everything else render computes) ────
+  declare -A MOD_NAME MOD_DEPS
+  MOD_NAME[__init__]=1; unset 'MOD_NAME[__init__]'
+  MOD_DEPS[__init__]=1; unset 'MOD_DEPS[__init__]'
+  local mod_ids="" map_status
+  map_status="$(read_module_map_status "$map_file")"
+  mkdir -p "$workdir/mods"
+  split_blocks "$map_file" "$workdir/mods" "MOD"
+  for f in "$workdir/mods"/MOD-*.md; do
+    [ -f "$f" ] || continue
+    id="$(block_id "$f")"
+    MOD_NAME[$id]="$(block_title_after_dash "$f")"
+    # A WITHDRAWN module keeps its id claimed forever (nothing may reuse it)
+    # but is never a grouping target, so it stays out of mod_ids.
+    case "${MOD_NAME[$id]}" in
+      WITHDRAWN*) ;;
+      *) mod_ids="${mod_ids} ${id}" ;;
+    esac
+    MOD_DEPS[$id]="$(mod_depends_on_ids "$(block_single_field "$f" "Depends on")")"
+  done
+  if [ -n "$module_scope" ] && [[ " ${mod_ids} " != *" ${module_scope} "* ]]; then
+    die "--module ${module_scope} names no active module in .specclaw/analysis/module-map.md."
+  fi
+
+  # ── Module dependency rank (fixed point, same shape as the BL rank below).
+  # A cycle is REPORTED, not silently ordered: the iteration cap would
+  # otherwise leave an arbitrary ranking behind and someone would migrate in
+  # whatever order fell out of it. ────────────────────────────────────────
+  declare -A MOD_RANK
+  MOD_RANK[__init__]=1; unset 'MOD_RANK[__init__]'
+  local m
+  for m in $mod_ids; do MOD_RANK[$m]=0; done
+  local mpass mchanged=1 mmaxpass=30
+  for ((mpass=0; mpass<mmaxpass && mchanged; mpass++)); do
+    mchanged=0
+    for m in $mod_ids; do
+      local mdep mmaxdep=-1
+      IFS=',' read -ra _mdeps <<< "${MOD_DEPS[$m]:-}"
+      for mdep in ${_mdeps[@]+"${_mdeps[@]}"}; do
+        [ -z "$mdep" ] && continue
+        [[ " ${mod_ids} " == *" ${mdep} "* ]] || continue
+        local mdr="${MOD_RANK[$mdep]:-0}"
+        [ "$mdr" -gt "$mmaxdep" ] && mmaxdep=$mdr
+      done
+      local mwant=0
+      [ "$mmaxdep" -ge 0 ] && mwant=$((mmaxdep + 1))
+      if [ "${MOD_RANK[$m]}" -ne "$mwant" ]; then MOD_RANK[$m]=$mwant; mchanged=1; fi
+    done
+  done
+  local mod_cycle=""
+  if [ "$mchanged" -eq 1 ]; then
+    mod_cycle="module dependency ranking did not converge after ${mmaxpass} passes — module-map.md's 'Depends on' fields describe a cycle. Modules are still grouped and rendered, but their order below is not a valid dependency order until the cycle is broken."
+    warn "$mod_cycle"
+  fi
+
   # ── UI fidelity inputs (fresh every run, like everything else bash
   # computes here). All of this stays inert unless SQ-013 is decided
   # FAITHFUL or THEME-ONLY. ───────────────────────────────────────────────
@@ -996,13 +1201,27 @@ cmd_render() {
     active_ids="${active_ids} ${eid}"
   done
 
-  # ── Per-item rules[] / depends_on[] extracted from the final body ──────
-  declare -A ITEM_RULES ITEM_DEPS ITEM_SCRS
+  # ── Per-item rules[] / depends_on[] / module extracted from the final body ─
+  declare -A ITEM_RULES ITEM_DEPS ITEM_SCRS ITEM_MOD
   ITEM_SCRS[__init__]=1; unset 'ITEM_SCRS[__init__]'
+  ITEM_MOD[__init__]=1; unset 'ITEM_MOD[__init__]'
+  local unassigned_items="" unknown_mod_items=""
   for id in $active_ids; do
     printf '%s\n' "${FINAL_BODY[$id]}" > "$workdir/body.tmp"
     ITEM_RULES[$id]="$(extract_dr_ids "$workdir/body.tmp" | paste -sd, - 2>/dev/null || true)"
     ITEM_DEPS[$id]="$(depends_on_ids "$(block_single_field "$workdir/body.tmp" "Depends on")")"
+    # The item's own declared module — read from its body, never derived from
+    # its rules. Deriving one would be a silent assignment, and the map's DR
+    # ownership disagreeing with an item's placement is exactly the
+    # inconsistency /specclaw:bf-baseline record reports at record time.
+    ITEM_MOD[$id]="$(printf '%s' "$(block_single_field "$workdir/body.tmp" "Module")" | { grep -oE 'MOD-[0-9]{3}' | head -1; } || true)"
+    if [ -z "${ITEM_MOD[$id]}" ]; then
+      unassigned_items="${unassigned_items}${unassigned_items:+, }${id}"
+    elif [[ " ${mod_ids} " != *" ${ITEM_MOD[$id]} "* ]]; then
+      unknown_mod_items="${unknown_mod_items}${unknown_mod_items:+, }${id} (declares ${ITEM_MOD[$id]})"
+      ITEM_MOD[$id]=""
+      unassigned_items="${unassigned_items}${unassigned_items:+, }${id}"
+    fi
     # SCR citations the item's own acceptance basis carries, unioned with
     # this run's SCREEN-BEARING directive. The textual citation in the body
     # is the join key /specclaw:bf-ui --checklist keys against later, the
@@ -1182,10 +1401,21 @@ cmd_render() {
     ordered_ids="${ordered_ids} ${id}"
   done < <(sort -k1,1n -k2,2n -k3,3n -k4,4 "$sortlist")
 
-  # ── Render each active item ──────────────────────────────────────────────
-  local backlog_body="" bfirst=true
-  for id in $ordered_ids; do
-    local entry provisional_block=""
+  # ── Module group order: module dependency rank, then id for a stable
+  # tiebreak — foundations first. Item order WITHIN a module is untouched:
+  # it is exactly the ordered_ids sequence computed above (BL dependency
+  # rank, then Gate readiness, then Verification readiness, then id). ──────
+  local mod_order="" mgroup_sort="$workdir/modsort.tsv"; : > "$mgroup_sort"
+  for m in $mod_ids; do
+    printf '%03d\t%s\n' "${MOD_RANK[$m]}" "$m" >> "$mgroup_sort"
+  done
+  while IFS=$'\t' read -r _mr m; do
+    mod_order="${mod_order} ${m}"
+  done < <(sort -k1,1n -k2,2 "$mgroup_sort")
+
+  # ── Render each active item, grouped under its module ────────────────────
+  render_item() {
+    local id="$1" entry provisional_block=""
     if [ -n "${PROVISIONAL[$id]:-}" ]; then
       provisional_block="
 ${PROVISIONAL[$id]}
@@ -1205,24 +1435,91 @@ ${FINAL_BODY[$id]}
 
 ${FINAL_TAIL[$id]}"
     fi
-    if $bfirst; then bfirst=false; else backlog_body="${backlog_body}
+    printf '%s' "$entry"
+  }
+
+  local backlog_body="" mod_item_counts=""
+  for m in $mod_order; do
+    local group_body="" gfirst=true n_in_mod=0
+    for id in $ordered_ids; do
+      [ "${ITEM_MOD[$id]:-}" = "$m" ] || continue
+      n_in_mod=$((n_in_mod + 1))
+      if $gfirst; then gfirst=false; else group_body="${group_body}
 
 ---
 
 "; fi
-    backlog_body="${backlog_body}${entry}"
+      group_body="${group_body}$(render_item "$id")"
+    done
+    mod_item_counts="${mod_item_counts}${m}=${n_in_mod} "
+    # A module with no active items is still rendered as a heading with an
+    # explicit line. Omitting it would make a module that exists in the map
+    # but has nothing planned yet indistinguishable from one that does not
+    # exist — which is precisely the gap a module-at-a-time migration needs
+    # to see.
+    local dep_note="${MOD_DEPS[$m]:-}"
+    [ -n "$dep_note" ] && dep_note="${dep_note//,/, }" || dep_note="none"
+    # Never print a rank number computed inside a cycle — the fixed point
+    # never converged, so whatever the counter stopped at is an artifact of
+    # the iteration cap, not a dependency depth.
+    local rank_note="Module dependency rank ${MOD_RANK[$m]}"
+    [ -n "$mod_cycle" ] && rank_note="module dependency rank undefined — module-map.md describes a dependency cycle"
+    backlog_body="${backlog_body}## ${m} — ${MOD_NAME[$m]}
+
+_Depends on: ${dep_note}. ${rank_note}. ${n_in_mod} active item(s)._
+
+"
+    if [ "$n_in_mod" -eq 0 ]; then
+      backlog_body="${backlog_body}_No active backlog items are assigned to this module yet — run \`/specclaw:bf-rebuild-plan --refresh --module ${m}\` to plan it._
+
+"
+    else
+      backlog_body="${backlog_body}${group_body}
+
+"
+    fi
   done
 
-  # ── Struck tombstones (ID order) ─────────────────────────────────────────
-  local struck_body=""
-  for id in $(printf '%s\n' "${!STRIKE_REASON[@]}" | sort); do
-    struck_body="${struck_body}
+  # Items whose module could not be determined — never silently folded into
+  # a real module. Either they predate the hierarchy, or they declare a
+  # MOD-### the map does not define.
+  local unassigned_body="" ufirst=true
+  for id in $ordered_ids; do
+    [ -z "${ITEM_MOD[$id]:-}" ] || continue
+    if $ufirst; then ufirst=false; else unassigned_body="${unassigned_body}
 
 ---
 
-### ${id} — STRUCK — ${STRIKE_REASON[$id]}"
+"; fi
+    unassigned_body="${unassigned_body}$(render_item "$id")"
   done
-  [ -n "$struck_body" ] && backlog_body="${backlog_body}${struck_body}"
+  if [ -n "$unassigned_body" ]; then
+    backlog_body="${backlog_body}## Unassigned — no module declared
+
+_These items declare no \`**Module:**\` field, or declare a \`MOD-###\` that module-map.md does not define. They are NOT grouped into a module by guesswork: an item's module is declared, never derived from its rules. Add the field (or fix the id), then re-run \`--refresh\`._
+
+${unassigned_body}
+
+"
+  fi
+
+  # ── Struck tombstones (ID order) ─────────────────────────────────────────
+  # Under their own "## Struck" heading rather than trailing the last module
+  # group: a tombstone appended straight after the final module's items would
+  # read as belonging to that module, and a struck item belongs to no module.
+  local struck_body=""
+  for id in $(printf '%s\n' "${!STRIKE_REASON[@]}" | sort); do
+    struck_body="${struck_body}### ${id} — STRUCK — ${STRIKE_REASON[$id]}
+
+"
+  done
+  if [ -n "$struck_body" ]; then
+    backlog_body="${backlog_body}## Struck
+
+_Tombstones. A struck item keeps its BL-### id forever so that anything still citing it fails loudly instead of silently pointing at another item._
+
+${struck_body}"
+  fi
 
   # ── Deferred section (ID order) ──────────────────────────────────────────
   local deferred_body=""
@@ -1268,6 +1565,113 @@ ${body}"
     fi
   done
 
+  # ── Per-module readiness + the recommended next module ───────────────────
+  #
+  # "Dependencies satisfied" is stated honestly: specclaw records no BUILT
+  # state for a backlog item (only a human's own status note), so this can
+  # never claim a dependency module is finished. What it can compute, from
+  # declared data alone, is READINESS — no BLOCKED and no PROVISIONAL item in
+  # the module or in anything it depends on — and the rendered line says that
+  # is what it means rather than implying completion.
+  declare -A MOD_N MOD_BLOCKED MOD_PROV MOD_CLEAR MOD_OPEN
+  for m in $mod_order; do
+    MOD_N[$m]=0; MOD_BLOCKED[$m]=0; MOD_PROV[$m]=0; MOD_CLEAR[$m]=0; MOD_OPEN[$m]=0
+  done
+  for id in $active_ids; do
+    m="${ITEM_MOD[$id]:-}"
+    [ -n "$m" ] || continue
+    [[ " ${mod_ids} " == *" ${m} "* ]] || continue
+    MOD_N[$m]=$(( MOD_N[$m] + 1 ))
+    case "${GATE_RANK[$id]}" in
+      0) MOD_CLEAR[$m]=$(( MOD_CLEAR[$m] + 1 )) ;;
+      2) MOD_OPEN[$m]=$(( MOD_OPEN[$m] + 1 )) ;;
+      3) MOD_BLOCKED[$m]=$(( MOD_BLOCKED[$m] + 1 )) ;;
+    esac
+    [ -n "${PROVISIONAL[$id]:-}" ] && MOD_PROV[$m]=$(( MOD_PROV[$m] + 1 ))
+  done
+
+  local recommended_module="" rec_mod_reason="" first_blocker=""
+  # A cycle means no module has a defensible dependency depth, so "which one
+  # comes first" has no answer to give. Recommending one anyway — with a rank
+  # number the iteration cap happened to stop at — would be the single most
+  # misleading line this document could print.
+  if [ -n "$mod_cycle" ]; then
+    first_blocker="module dependency order is undefined — module-map.md's 'Depends on' fields describe a cycle (see the warning above). Break the cycle, then re-run --refresh"
+  else
+    for m in $mod_order; do
+      [ "${MOD_N[$m]}" -gt 0 ] || continue
+      local deps_ok=true unready_dep="" mdep
+      IFS=',' read -ra _mdeps <<< "${MOD_DEPS[$m]:-}"
+      for mdep in ${_mdeps[@]+"${_mdeps[@]}"}; do
+        [ -z "$mdep" ] && continue
+        [[ " ${mod_ids} " == *" ${mdep} "* ]] || continue
+        if [ "${MOD_BLOCKED[$mdep]:-0}" -gt 0 ] || [ "${MOD_PROV[$mdep]:-0}" -gt 0 ]; then
+          deps_ok=false
+          unready_dep="${unready_dep}${unready_dep:+, }${mdep} (${MOD_BLOCKED[$mdep]:-0} BLOCKED, ${MOD_PROV[$mdep]:-0} PROVISIONAL)"
+        fi
+      done
+      if [ "${MOD_BLOCKED[$m]}" -eq 0 ] && [ "${MOD_PROV[$m]}" -eq 0 ] && $deps_ok; then
+        recommended_module="$m"
+        local dep_list="${MOD_DEPS[$m]:-}"
+        [ -n "$dep_list" ] && dep_list="${dep_list//,/, }" || dep_list="none"
+        rec_mod_reason="dependency rank ${MOD_RANK[$m]}; depends on ${dep_list}; ${MOD_N[$m]} active item(s) — ${MOD_CLEAR[$m]} CLEAR, ${MOD_OPEN[$m]} OPEN QUESTIONS, 0 BLOCKED, 0 PROVISIONAL; every module it depends on is likewise free of BLOCKED and PROVISIONAL items"
+        break
+      fi
+      if [ -z "$first_blocker" ]; then
+        if ! $deps_ok; then
+          first_blocker="${m} — ${MOD_NAME[$m]} is itself ready, but a module it depends on is not: ${unready_dep}"
+        else
+          first_blocker="${m} — ${MOD_NAME[$m]} has ${MOD_BLOCKED[$m]} BLOCKED and ${MOD_PROV[$m]} PROVISIONAL item(s); answer the questions those items name first"
+        fi
+      fi
+    done
+  fi
+
+  local module_block
+  module_block="**Module map:** ${map_status:-status line missing} — $(echo "$mod_ids" | wc -w | tr -d ' ') active module(s)"
+  case "$map_status" in
+    CONFIRMED*) ;;
+    *)
+      module_block="${module_block}
+
+> ⚠ **The module map is not confirmed.** Its \`**Status:**\` line reads \`${map_status:-<missing>}\`, so the grouping and sequencing below rest on a proposal no human has signed off. Review \`.specclaw/analysis/module-map.md\` and set its Status to \`CONFIRMED by <name>, <date>\`. Nothing here is blocked by this — the backlog is complete and usable — but a module boundary nobody checked becomes the shape of the whole migration."
+      warn "module-map.md is not CONFIRMED (Status: ${map_status:-<missing>}) — module grouping and sequencing rest on an unconfirmed proposal."
+      ;;
+  esac
+  if [ -n "$mod_cycle" ]; then
+    module_block="${module_block}
+
+> ⚠ **Module dependency cycle.** ${mod_cycle}"
+  fi
+  if [ -n "$unassigned_items" ]; then
+    module_block="${module_block}
+
+- **Unassigned items:** ${unassigned_items} — no \`**Module:**\` field, or an id the map does not define. Rendered under their own \`## Unassigned\` heading, never folded into a module by guesswork."
+    warn "these active items declare no usable module and were left unassigned: ${unassigned_items}"
+  fi
+  if [ -n "$unknown_mod_items" ]; then
+    module_block="${module_block}
+- **Unknown module declared:** ${unknown_mod_items} — module-map.md defines no such module (check for a typo, or a module that was withdrawn)."
+    warn "these active items declare a MOD-### that module-map.md does not define: ${unknown_mod_items}"
+  fi
+  if [ -n "$recommended_module" ]; then
+    module_block="${module_block}
+
+**Recommended next module to build:** ${recommended_module} — ${MOD_NAME[$recommended_module]}
+- **Why:** ${rec_mod_reason}.
+- **Readiness, not completion:** specclaw records no \"built\" state for a backlog item, so this is the next module whose work can *start*, not a claim that anything it depends on is finished."
+  elif [ -n "$mod_cycle" ]; then
+    module_block="${module_block}
+
+**Recommended next module to build:** none — not because any module is unready, but because there is no defensible order to recommend one from.
+- **Why:** ${first_blocker}."
+  else
+    module_block="${module_block}
+
+**Recommended next module to build:** none — no module is currently free of BLOCKED and PROVISIONAL items with all its dependencies likewise clear.
+- **Nearest candidate:** ${first_blocker:-no module has any active backlog item yet}."
+  fi
+
   local missing_note_decisions missing_note_clar missing_note_manifest missing_note_scenarios
   missing_note_decisions="present"; [ -f "$decisions_file" ] || missing_note_decisions="missing — run /specclaw:bf-clarify --resolve"
   missing_note_clar="present"; [ -f "$clar_file" ] || missing_note_clar="missing — run /specclaw:bf-clarify"
@@ -1311,12 +1715,22 @@ ${body}"
   esac
 
   local status_header
+  # Built outside the here-doc: a trailing newline inside a $( ) is stripped
+  # by command substitution, which would weld this line to the next one.
+  local scope_line=""
+  if [ -n "$module_scope" ]; then
+    scope_line="**Scope:** this run re-planned ${module_scope} only — every other module's items, coverage lines, and human-added status notes were preserved untouched.
+"
+  fi
+
   status_header="**Date:** $(date +%Y-%m-%d)
-**Inputs consumed:**
+${scope_line}**Inputs consumed:**
 - decisions.md: ${missing_note_decisions}
 - clarifications.md: ${missing_note_clar}
 - baseline/manifest.json: ${missing_note_manifest}
 - baseline/scenarios.md: ${missing_note_scenarios}
+
+${module_block}
 
 ${ui_status_block}
 
@@ -1355,18 +1769,96 @@ ${ui_status_block}
 **Recommended next item to propose:** ${recommended}"
   fi
 
-  # ── Preserve Sequencing Rationale / Coverage Check verbatim (bash never
-  # regenerates prose narrative it can't verify against the source docs;
-  # the change report above is the mechanism for surfacing what changed) ──
-  local sequencing_rationale="See prior version below — /specclaw:bf-rebuild-plan --refresh does not regenerate this narrative automatically; update by hand if new items change the dependency story."
-  local coverage_check="See prior version below — carried forward unchanged by /specclaw:bf-rebuild-plan --refresh."
+  # ── Sequencing Rationale / Coverage Check ────────────────────────────────
+  #
+  # Both are agent-authored narrative bash cannot verify against the source
+  # documents, so bash never writes their prose — but it does have to CARRY
+  # it. Precedence: this run's draft wins; otherwise the prior file's own
+  # section is preserved; otherwise (a first run whose draft omitted the
+  # section) a line saying plainly that it is absent and why.
+  #
+  # Reading the draft here is a fix, not a new feature: the planner agent has
+  # always been instructed to emit these two sections, and render always
+  # dropped them on the floor — so a first-ever run rendered the "See prior
+  # version below" placeholder as if it were content, and every later
+  # --refresh faithfully preserved that placeholder forever. The per-module
+  # coverage rollup below counts the agent's own coverage lines, which is
+  # impossible while those lines never reach the file.
+  local draft_sequencing draft_coverage
+  draft_sequencing="$(awk '/^## Sequencing Rationale/{flag=1;next}/^## /{flag=0}flag' "$draft_file" | sed '/./,$!d' | strip_trailing_separator)"
+  draft_coverage="$(awk '/^## Coverage Check/{flag=1;next}/^## /{flag=0}flag' "$draft_file" | sed '/./,$!d' | strip_trailing_separator)"
+
+  local prior_sequencing="" prior_coverage=""
   if $is_refresh; then
-    sequencing_rationale="$(awk '/^## Sequencing Rationale/{flag=1;next}/^## /{flag=0}flag' "$backlog_file" | sed '/./,$!d')"
-    coverage_check="$(awk '/^## Coverage Check/{flag=1;next}/^## /{flag=0}flag' "$backlog_file" | sed '/./,$!d')"
-    # Drop any prior run's UI Screen Coverage subsection — it is bash-
-    # computed and re-derived below, so carrying the old one forward would
-    # render two, one of them stale.
-    coverage_check="$(printf '%s\n' "$coverage_check" | awk '/^### UI Screen Coverage \(SCR\)/{stop=1} !stop' | strip_trailing_separator)"
+    prior_sequencing="$(awk '/^## Sequencing Rationale/{flag=1;next}/^## /{flag=0}flag' "$backlog_file" | sed '/./,$!d')"
+    prior_coverage="$(awk '/^## Coverage Check/{flag=1;next}/^## /{flag=0}flag' "$backlog_file" | sed '/./,$!d')"
+    # Drop any prior run's bash-computed subsections — both are re-derived
+    # below, so carrying the old ones forward would render two of each, one
+    # stale.
+    prior_coverage="$(printf '%s\n' "$prior_coverage" | awk '/^### UI Screen Coverage \(SCR\)/{stop=1} /^### Module Coverage Rollup/{stop=1} !stop' | strip_trailing_separator)"
+  fi
+
+  local sequencing_rationale="$prior_sequencing"
+  [ -n "$draft_sequencing" ] && sequencing_rationale="$draft_sequencing"
+  [ -n "$sequencing_rationale" ] || sequencing_rationale="_Not stated — this run's planner draft carried no \`## Sequencing Rationale\` section. Item order is still fully computed (module dependency rank, then per-item dependency rank, then readiness); this section is the human-readable explanation of it._"
+
+  local coverage_check
+  if [ -n "$draft_coverage" ] && [ -n "$module_scope" ] && [ -n "$prior_coverage" ]; then
+    # Module-scoped run: replace ONLY this module's coverage lines, keeping
+    # every other module's accounting intact. Line-level surgery on the
+    # declared grammar, the same surgical discipline /specclaw:bf-clarify
+    # applies to a single PQ Status line — a wholesale replace here would
+    # silently delete the coverage record of every module this run never
+    # looked at.
+    coverage_check="$(printf '%s\n' "$prior_coverage" \
+      | awk -v mod="- **${module_scope}**" 'index($0, mod) != 1' \
+      | strip_trailing_separator)
+${draft_coverage}"
+  elif [ -n "$draft_coverage" ]; then
+    coverage_check="$draft_coverage"
+  else
+    coverage_check="$prior_coverage"
+  fi
+  [ -n "$coverage_check" ] || coverage_check="_Not stated — this run's planner draft carried no \`## Coverage Check\` section, and no prior one exists. Capability-bullet coverage is therefore unaccounted for; re-run \`/specclaw:bf-rebuild-plan --refresh\` to have the planner emit it._"
+
+  # ── Module Coverage Rollup (bash-computed) ───────────────────────────────
+  # Counted from the planner agent's own declared coverage lines:
+  #
+  #   - **MOD-002** — "<capability bullet>" → BL-014
+  #   - **MOD-002** — "<capability bullet>" → EXCLUDED: <reason>
+  #   - **MOD-002** — "<capability bullet>" → ORPHAN
+  #
+  # Bullet granularity is unchanged — this counts the per-bullet lines, it
+  # does not replace them with a coarser unit. An agent declares what it
+  # covered; bash counts. When no line matches the grammar the rollup says so
+  # rather than reporting a confident 0/0 that reads as "nothing to cover."
+  local rollup_lines="" rollup_any=false
+  printf '%s\n' "$coverage_check" > "$workdir/cov.tmp"
+  for m in $mod_order; do
+    local cov_total cov_bl cov_excl cov_orph
+    cov_total=$(grep -cE "^- \*\*${m}\*\*[[:space:]]" "$workdir/cov.tmp" 2>/dev/null || true)
+    cov_bl=$(grep -E "^- \*\*${m}\*\*[[:space:]]" "$workdir/cov.tmp" 2>/dev/null | grep -c '→ BL-' || true)
+    cov_excl=$(grep -E "^- \*\*${m}\*\*[[:space:]]" "$workdir/cov.tmp" 2>/dev/null | grep -c '→ EXCLUDED:' || true)
+    cov_orph=$(grep -E "^- \*\*${m}\*\*[[:space:]]" "$workdir/cov.tmp" 2>/dev/null | grep -c '→ ORPHAN' || true)
+    [ "$cov_total" -gt 0 ] && rollup_any=true
+    rollup_lines="${rollup_lines}- **${m} — ${MOD_NAME[$m]}:** ${cov_bl}/${cov_total} capability bullets covered; ${cov_excl} excluded; ${cov_orph} orphaned
+"
+  done
+  rm -f "$workdir/cov.tmp"
+  if $rollup_any; then
+    coverage_check="${coverage_check}
+
+### Module Coverage Rollup
+
+_Bash-computed by counting the per-module capability-coverage lines above. Bullet granularity is unchanged — every bullet is still accounted for individually; this only rolls those counts up per module._
+
+${rollup_lines}"
+  else
+    coverage_check="${coverage_check}
+
+### Module Coverage Rollup
+
+_Not computable — the Coverage Check above carries no per-module coverage lines in the countable form \`- **MOD-### ** — \"<bullet>\" → BL-0## | EXCLUDED: <reason> | ORPHAN\`. Re-run \`/specclaw:bf-rebuild-plan --refresh\` so the planner agent re-emits it; reporting 0/0 here would read as \"nothing to cover\", which is a different claim entirely._"
   fi
 
   # ── UI Screen Coverage (bash-computed, appended to the Coverage Check).
@@ -1437,19 +1929,238 @@ ${scr_cov}
   rm -f "$draft_file"
   rm -rf "$workdir"
 
-  echo "Wrote $backlog_file ($(echo "$active_ids" | wc -w | tr -d ' ') active item(s), ${#STRIKE_REASON[@]} struck, ${#DEFER_REASON[@]} deferred)" >&2
+  echo "Wrote $backlog_file ($(echo "$active_ids" | wc -w | tr -d ' ') active item(s) across $(echo "$mod_ids" | wc -w | tr -d ' ') module(s), ${#STRIKE_REASON[@]} struck, ${#DEFER_REASON[@]} deferred; per-module item counts: ${mod_item_counts:-none}; recommended next module: ${recommended_module:-none})" >&2
+}
+
+# ─── Subcommand: module-status ───────────────────────────────────────────────
+#
+# A read-only status VIEW. Writes exactly one file
+# (.specclaw/analysis/module-status.md), reads everything else, and computes
+# every number from artifacts that are themselves archived — so it is
+# deliberately EXEMPT from archive-then-replace and regenerated in full on
+# every invocation. See templates/module-status.md's own comment for why, and
+# for the column definitions.
+
+cmd_module_status() {
+  local specclaw_dir="$1"
+  [ -d "$specclaw_dir" ] || die "specclaw directory not found: $specclaw_dir"
+
+  local specclaw_dir_abs project_root analysis_dir baseline_dir
+  specclaw_dir_abs="$(cd "$specclaw_dir" && pwd)"
+  project_root="$(cd "$specclaw_dir_abs/.." && pwd)"
+  analysis_dir="$specclaw_dir_abs/analysis"
+  baseline_dir="$specclaw_dir_abs/baseline"
+
+  local map_file="$analysis_dir/module-map.md"
+  [ -f "$map_file" ] || die "No .specclaw/analysis/module-map.md found — there are no modules to report a status for. Run /specclaw:bf-domain first."
+
+  local backlog_file="$analysis_dir/rebuild-backlog.md"
+  local scenarios_file="$baseline_dir/scenarios.md"
+  local manifest_file="$baseline_dir/manifest.json"
+  local pq_file="$analysis_dir/pending-questions.md"
+  local clar_file="$analysis_dir/clarifications.md"
+
+  local workdir; workdir="$(mktemp -d)"
+  mkdir -p "$workdir/mods" "$workdir/items" "$workdir/scen" "$workdir/cqs"
+
+  # ── Modules ──────────────────────────────────────────────────────────────
+  local map_status; map_status="$(read_module_map_status "$map_file")"
+  split_blocks "$map_file" "$workdir/mods" "MOD"
+  declare -A MS_NAME MS_DEPS
+  MS_NAME[__init__]=1; unset 'MS_NAME[__init__]'
+  MS_DEPS[__init__]=1; unset 'MS_DEPS[__init__]'
+  local mod_ids="" f id
+  for f in "$workdir/mods"/MOD-*.md; do
+    [ -f "$f" ] || continue
+    id="$(block_id "$f")"
+    MS_NAME[$id]="$(block_title_after_dash "$f")"
+    case "${MS_NAME[$id]}" in WITHDRAWN*) continue ;; esac
+    MS_DEPS[$id]="$(mod_depends_on_ids "$(block_single_field "$f" "Depends on")")"
+    mod_ids="${mod_ids} ${id}"
+  done
+
+  # ── Backlog items per module: active / struck / deferred ─────────────────
+  declare -A MS_PLANNED MS_TOTAL
+  local m unassigned_n=0
+  for m in $mod_ids; do MS_PLANNED[$m]=0; MS_TOTAL[$m]=0; done
+  if [ -f "$backlog_file" ]; then
+    split_blocks "$backlog_file" "$workdir/items" "BL"
+    local itemmod title status
+    for f in "$workdir/items"/BL-*.md; do
+      [ -f "$f" ] || continue
+      title="$(block_title_after_dash "$f")"
+      itemmod="$(printf '%s' "$(block_single_field "$f" "Module")" | { grep -oE 'MOD-[0-9]{3}' | head -1; } || true)"
+      if [ -z "$itemmod" ] || [[ " ${mod_ids} " != *" ${itemmod} "* ]]; then
+        unassigned_n=$((unassigned_n + 1))
+        continue
+      fi
+      status="active"
+      grep -qE '^\*\*Status:\*\* Deferred' "$f" && status="deferred"
+      [[ "$title" == STRUCK* ]] && status="struck"
+      MS_TOTAL[$itemmod]=$(( MS_TOTAL[$itemmod] + 1 ))
+      [ "$status" = "active" ] && MS_PLANNED[$itemmod]=$(( MS_PLANNED[$itemmod] + 1 ))
+    done
+  fi
+
+  # ── Scenarios per module: designed / captured ────────────────────────────
+  # A cross-module scenario counts under EVERY module it declares — the same
+  # rule /specclaw:bf-replay applies — so these columns deliberately do not
+  # sum to the corpus total.
+  declare -A MS_DESIGNED MS_CAPTURED
+  for m in $mod_ids; do MS_DESIGNED[$m]=0; MS_CAPTURED[$m]=0; done
+  local captured_ids=""
+  if [ -f "$manifest_file" ] && command -v jq &>/dev/null; then
+    captured_ids=" $({ jq -r '.fixtures[].scenario_id' "$manifest_file" 2>/dev/null | tr -d '\r' | paste -sd' ' -; } || true) "
+  fi
+  if [ -f "$scenarios_file" ]; then
+    split_blocks "$scenarios_file" "$workdir/scen" "GM"
+    local smods stitle tok
+    for f in "$workdir/scen"/GM-*.md; do
+      [ -f "$f" ] || continue
+      id="$(block_id "$f")"
+      stitle="$(head -1 "$f" | sed -E 's/^### GM-[0-9]+[[:space:]]*(—|-)[[:space:]]*//')"
+      case "$stitle" in WITHDRAWN*) continue ;; esac
+      smods="$(printf '%s' "$(block_single_field "$f" "Modules")" | { grep -oE 'MOD-[0-9]{3}' | awk '!seen[$0]++' | paste -sd, -; } || true)"
+      [ -n "$smods" ] || continue
+      while IFS= read -r tok; do
+        [ -z "$tok" ] && continue
+        [[ " ${mod_ids} " == *" ${tok} "* ]] || continue
+        MS_DESIGNED[$tok]=$(( MS_DESIGNED[$tok] + 1 ))
+        [[ "$captured_ids" == *" ${id} "* ]] && MS_CAPTURED[$tok]=$(( MS_CAPTURED[$tok] + 1 ))
+      done < <(printf '%s\n' "$smods" | tr ',' '\n')
+    done
+  fi
+
+  # ── Latest module-scoped replay verdict per module ────────────────────────
+  # Only a --module run records which module it covered (run-metadata.json's
+  # own "module" field). A change-scoped or --all run exercises a module's
+  # fixtures and its report carries a per-module rollup, but it records no
+  # per-module verdict in metadata — so it is reported as absent here rather
+  # than borrowing a corpus verdict and presenting it as the module's own.
+  declare -A MS_VERDICT MS_VDATE
+  if command -v jq &>/dev/null; then
+    local meta mmod mverdict mdate mrun
+    while IFS= read -r meta; do
+      [ -f "$meta" ] || continue
+      mmod="$(jq -r '.module // ""' "$meta" 2>/dev/null | tr -d '\r' || true)"
+      [ -n "$mmod" ] && [ "$mmod" != "null" ] || continue
+      mverdict="$(jq -r '.overall_verdict // "?"' "$meta" 2>/dev/null | tr -d '\r' || true)"
+      mdate="$(jq -r '.date // "?"' "$meta" 2>/dev/null | tr -d '\r' || true)"
+      mrun="$(jq -r '.run_id // "?"' "$meta" 2>/dev/null | tr -d '\r' || true)"
+      # run_id is a sortable timestamp; the newest wins.
+      if [ -z "${MS_VDATE[$mmod]:-}" ] || [[ "$mrun" > "${MS_VDATE[$mmod]}" ]]; then
+        MS_VDATE[$mmod]="$mrun"
+        MS_VERDICT[$mmod]="${mverdict} (${mdate})"
+      fi
+    done < <(find "$specclaw_dir_abs/replay/evidence" "$specclaw_dir_abs/changes" \
+                -type f -name run-metadata.json 2>/dev/null || true)
+  fi
+
+  # ── Open questions naming a module ───────────────────────────────────────
+  declare -A MS_QS
+  for m in $mod_ids; do MS_QS[$m]=0; done
+  if [ -f "$pq_file" ]; then
+    local pqwork; pqwork="$(mktemp -d)"
+    awk -v dir="$pqwork" '
+      /^### PQ-[0-9]+/ { match($0, /PQ-[0-9]+/); id = substr($0, RSTART, RLENGTH); outfile = dir "/" id ".md" }
+      id != "" { print $0 >> outfile }
+    ' "$pq_file"
+    for f in "$pqwork"/PQ-*.md; do
+      [ -f "$f" ] || continue
+      grep -qE '^- \*\*Status:\*\* OPEN' "$f" || continue
+      for m in $mod_ids; do
+        grep -qF "$m" "$f" && MS_QS[$m]=$(( MS_QS[$m] + 1 ))
+      done
+    done
+    rm -rf "$pqwork"
+  fi
+  if [ -f "$clar_file" ]; then
+    split_blocks "$clar_file" "$workdir/cqs" "CQ"
+    local answer_txt
+    for f in "$workdir/cqs"/CQ-*.md; do
+      [ -f "$f" ] || continue
+      answer_txt="$(awk '
+        /^- \*\*Answer:\*\*/ { sub(/^- \*\*Answer:\*\* */, ""); capturing=1; buf=$0; next }
+        /^- \*\*Decided by:\*\*/ { capturing=0 }
+        capturing { buf = buf "\n" $0; next }
+        END { print buf }
+      ' "$f" | tr -d '[:space:]')"
+      [ -n "$answer_txt" ] && continue
+      for m in $mod_ids; do
+        grep -qF "$m" "$f" && MS_QS[$m]=$(( MS_QS[$m] + 1 ))
+      done
+    done
+  fi
+
+  # ── Render ───────────────────────────────────────────────────────────────
+  local rows="" deps
+  for m in $mod_ids; do
+    deps="${MS_DEPS[$m]:-}"
+    [ -n "$deps" ] && deps="${deps//,/, }" || deps="none"
+    rows="${rows}| ${m} | ${MS_NAME[$m]} | ${deps} | ${MS_PLANNED[$m]}/${MS_TOTAL[$m]} | ${MS_CAPTURED[$m]}/${MS_DESIGNED[$m]} | ${MS_VERDICT[$m]:-no module-scoped run} | ${MS_QS[$m]} |
+"
+  done
+  [ -n "$rows" ] || rows="| — | _No active modules in module-map.md._ | — | — | — | — | — |
+"
+
+  local table="| Module | Name | Depends on | Backlog items (planned/total) | Scenarios (captured/designed) | Latest replay verdict | Open questions |
+|---|---|---|---|---|---|---|
+${rows}"
+
+  local unassigned_note=""
+  if [ "$unassigned_n" -gt 0 ]; then
+    unassigned_note="> ⚠ **${unassigned_n} active backlog item(s) declare no usable module** and are counted in no row above — they have no \`**Module:**\` field, or one naming a module \`module-map.md\` does not define. See \`rebuild-backlog.md\`'s own \`## Unassigned\` group; they are never distributed into a module by guesswork."
+  fi
+
+  local notes=""
+  case "$map_status" in
+    CONFIRMED*) ;;
+    *) notes="${notes}- **The module map is not confirmed** (\`${map_status:-<missing>}\`). Every boundary below rests on a proposal no human has signed off — confirm it by editing \`module-map.md\`'s \`**Status:**\` line.
+" ;;
+  esac
+  [ -f "$backlog_file" ] || notes="${notes}- \`rebuild-backlog.md\` does not exist — backlog columns read 0/0. Run \`/specclaw:bf-rebuild-plan\`.
+"
+  [ -f "$scenarios_file" ] || notes="${notes}- \`baseline/scenarios.md\` does not exist — scenario columns read 0/0. Run \`/specclaw:bf-baseline\`.
+"
+  [ -f "$manifest_file" ] || notes="${notes}- \`baseline/manifest.json\` does not exist — nothing is captured yet. Run the harness, then \`/specclaw:bf-baseline --record\`.
+"
+  notes="${notes}- A verdict here covers only **module-scoped** replay runs that retained evidence. A change-scoped or \`--all\` run exercises a module's fixtures too, but records no per-module verdict in its metadata — read that run's report's own **Module Rollup** section instead.
+- No number here says a module is *done*: specclaw records no built state for a backlog item, so these are planning, capture, and comparison coverage only."
+
+  local template_file="$SCRIPT_DIR/../templates/module-status.md"
+  [ -f "$template_file" ] || die "Template missing: ${template_file}"
+  local doc
+  doc="$(cat "$template_file")"
+  doc="$(substitute "$doc" '{{title}}' "$(project_title "$project_root")")"
+  doc="$(substitute "$doc" '{{date}}' "$(date +%Y-%m-%d)")"
+  doc="$(substitute "$doc" '{{map_status}}' "${map_status:-<status line missing>}")"
+  doc="$(substitute "$doc" '{{module_table}}' "$table")"
+  doc="$(substitute "$doc" '{{unassigned_note}}' "$unassigned_note")"
+  doc="$(substitute "$doc" '{{notes}}' "$notes")"
+
+  local out_file="$analysis_dir/module-status.md"
+  printf '%s\n' "$doc" > "$out_file"
+  rm -rf "$workdir"
+
+  echo "Wrote $out_file ($(echo "$mod_ids" | wc -w | tr -d ' ') module(s)${unassigned_n:+, ${unassigned_n} unassigned item(s)}). Status view — regenerated in full every run, never archived." >&2
 }
 
 # ─── Main ─────────────────────────────────────────────────────────────────────
 
 case "${1:-}" in
   collect)
-    [ $# -ge 2 ] || die "Usage: specclaw-bf-rebuild-collect collect <specclaw_dir> [--refresh]"
-    cmd_collect "$2" "${3:-}"
+    [ $# -ge 2 ] || die "Usage: specclaw-bf-rebuild-collect collect <specclaw_dir> [--refresh] [--module MOD-###]"
+    shift
+    cmd_collect "$@"
     ;;
   render)
-    [ $# -ge 3 ] || die "Usage: specclaw-bf-rebuild-collect render <specclaw_dir> <draft_file>"
-    cmd_render "$2" "$3"
+    [ $# -ge 3 ] || die "Usage: specclaw-bf-rebuild-collect render <specclaw_dir> <draft_file> [--module MOD-###]"
+    shift
+    cmd_render "$@"
+    ;;
+  module-status)
+    [ $# -ge 2 ] || die "Usage: specclaw-bf-rebuild-collect module-status <specclaw_dir>"
+    cmd_module_status "$2"
     ;;
   "")
     usage
