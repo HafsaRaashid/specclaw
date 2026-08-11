@@ -217,8 +217,9 @@ backlog item, its fixtures, and its screens by reading these files:
 .specclaw/analysis/rebuild-backlog.md        # change → BL item → DR rules / SCR screens
 .specclaw/analysis/domain-model.md           # DR rules, for coverage reporting
 .specclaw/analysis/decisions.md              # sanctioning CQs; the SQ-013 UI policy
-.specclaw/baseline/scenarios.md              # GM scenario definitions
+.specclaw/baseline/scenarios.md              # GM scenario definitions + seam layers
 .specclaw/baseline/seams.md                  # seam recommendations cited in remediations
+.specclaw/baseline/error-map.md              # the project's semantic error vocabulary
 .specclaw/baseline/manifest.json             # fixture roster + content hashes  ┐ always
 .specclaw/baseline/fixtures/                 # the captured fixtures           ┘ together
 .specclaw/ui/ui-inventory.md                 # SCR entries (FAITHFUL/THEME-ONLY only)
@@ -227,6 +228,16 @@ backlog item, its fixtures, and its screens by reading these files:
 .specclaw/ui/screens/                        # captured PNGs      ┐ always
 .specclaw/ui/ui-manifest.json                # their hashes       ┘ together
 ```
+
+**`error-map.md` is not optional.** It is the legacy app's own error vocabulary
+— one `SCREAMING_SNAKE` code per business condition it can reject on, each
+citing the legacy line that raises it. `/specclaw:bf-replay` maps the rebuild's
+errors into *that* vocabulary rather than comparing raw exception type names,
+which is what stops a framework change from reading as twenty behaviour
+changes. Without this file in the new repo, no error can be mapped at all and
+every rejection scenario lands as an unmapped code holding the run at
+`PASS-PENDING-DECISIONS`. Nothing in the specclaw plugin contains a code; this
+file is the only place they exist.
 
 **The paired lines are paired for one reason: a hash without the file it
 hashes, or a file without its recorded hash, proves nothing.**

@@ -6,31 +6,98 @@
 **Backlog item:** {{bl_item}}
 **Selected fixtures:** {{selected_count}}
 **Overall verdict:** {{overall_verdict}}
+**Rendered by:** specclaw v{{plugin_version}} — baseline recorded by specclaw v{{manifest_plugin_version}} (manifest schema {{manifest_schema}})
 
 {{evidence_block}}
 
 ## Summary
 
-| Verdict | Count |
+| Outcome | Count |
 |---|---|
-| MATCH | {{match_count}} |
-| DIVERGES | {{diverges_count}} |
-| ERROR | {{error_count}} |
-| NOT REPLAYABLE | {{not_replayable_count}} |
+| Exact match | {{match_count}} |
+| Behavioural divergence — sanctioned | {{behavioural_sanctioned_count}} |
+| Behavioural divergence — **unsanctioned** | {{behavioural_unsanctioned_count}} |
+| Representation-only difference | {{representation_count}} |
+| Unmapped error code | {{unmapped_error_code_count}} |
+| Error | {{error_count}} |
+| Not replayable — seam-layer mismatch | {{seam_mismatch_count}} |
+| Not replayable — other | {{not_replayable_other_count}} |
 
 <!--
-  MATCH/DIVERGES/ERROR are computed mechanically by `specclaw-bf-replay compare`
-  — never asserted by an agent. Every DIVERGES row's sanction citation below
-  was independently re-verified by `specclaw-bf-replay sanction-check` against
-  decisions.md's own `### CQ-0NN —` headings; an agent's claim alone never
-  promotes a row to SANCTIONED.
+  Every count above is computed mechanically by `specclaw-bf-replay compare`
+  from the declared data in templates/CONTRACT.md — never asserted by an
+  agent. The three-way split matters:
+
+  - BEHAVIOURAL means outcome, threw, error_code, or any other field that is
+    neither representation-class nor normalized differs. This is the rebuild
+    deciding something different from the legacy app. Unsanctioned, it FAILs
+    the run.
+  - REPRESENTATION means ONLY the raw exception type/message differed
+    (CONTRACT.md (b.2)). The business decision was identical. This never
+    FAILs a run; both raw values are kept below as evidence.
+  - UNMAPPED ERROR CODE means an error neither agent could confidently map to
+    this project's error-map.md vocabulary, so nobody guessed one
+    (CONTRACT.md (h)). It holds the run at PASS-PENDING-DECISIONS.
+
+  Every DIVERGES row's sanction citation was independently re-verified by
+  `specclaw-bf-replay sanction-check` against decisions.md's own
+  `### CQ-0NN —` headings; an agent's claim alone never promotes a row to
+  SANCTIONED. Only behavioural rows are ever put to the auditor at all.
 -->
 
 ## Fixtures
 
-| Scenario | Verdict | Sanction | Detail |
-|---|---|---|---|
+| Scenario | Verdict | Class | Sanction | Detail |
+|---|---|---|---|---|
 {{fixture_table_rows}}
+
+## Behavioural Divergences
+
+<!--
+  The rebuild decided something different from the legacy application. Each
+  line is the mechanical fact only — field, legacy value, rebuild value — with
+  no interpretation attached by any agent. An unsanctioned entry here is why
+  this run FAILs.
+-->
+
+{{behavioural_divergence_detail}}
+
+## Representation-Only Differences
+
+<!--
+  Same business decision, different framework surface: the raw exception type
+  or message differed while outcome, error_code, threw, and every other
+  compared field agreed. Recorded here in full — both raw values retained —
+  because it IS useful evidence of how the rebuild expresses errors. It is not
+  a divergence in behaviour and does not affect the verdict.
+-->
+
+{{representation_detail}}
+
+## Seam-Layer Mismatches
+
+<!--
+  A fixture captured at one layer whose replay test targeted another
+  (CONTRACT.md (i)). Forced to NOT REPLAYABLE by `compare`, mechanically,
+  regardless of what the mapper agent claimed — a service-layer fixture
+  replayed through HTTP measures transport and middleware, not the business
+  rule the fixture pins. The fix is a replay test at the captured layer, never
+  a comparison at whichever layer happened to be reachable.
+-->
+
+{{seam_mismatch_list}}
+
+## Normalization Warnings
+
+<!--
+  A normalized_fields path that resolved against the captured fixture but
+  matches nothing in the rebuild's actual output — meaning the rebuild
+  reshaped the very field the path was meant to exclude, so it is no longer
+  being excluded from anything. Never changes a verdict; always worth fixing,
+  because a dead normalization path silently stops normalizing.
+-->
+
+{{normalization_warning_list}}
 
 ## Not Replayable
 
@@ -40,12 +107,14 @@
 
 <!--
   Soft-block, not a refusal to run: an exercised (MATCH/DIVERGES/ERROR)
-  fixture whose underlying scenario still rests on an open pending question
-  never reaches a plain PASS, no matter how clean its own comparison came
-  back. This section — and the -PROVISIONAL suffix on the affected rows in
-  the Fixtures table above — clears automatically, with no manual cleanup,
-  the next time this report is rendered after the cited PQ/CQ is answered
-  under decisions.md's ## Decisions.
+  fixture whose underlying scenario still rests on an open pending question,
+  whose scenario definition changed since capture (SUPERSEDED), or whose error
+  could not be mapped to a semantic code, never reaches a plain PASS — no
+  matter how clean its own comparison came back. This section, and the
+  -PROVISIONAL / -SUPERSEDED suffixes on the affected rows in the Fixtures
+  table above, clear automatically with no manual cleanup: once the cited
+  PQ/CQ is answered under decisions.md's ## Decisions, once the fixture is
+  recaptured, or once the code is added to error-map.md.
 -->
 
 {{open_decisions_blocking_pass}}
@@ -60,9 +129,13 @@ _Business rules from domain-model.md not exercised by any REPLAYABLE fixture in 
 
 **{{overall_verdict}}**
 
-- **PASS** — every REPLAYABLE fixture MATCHed (or every DIVERGES is SANCTIONED by a decided CQ), and none of them are PROVISIONAL.
-- **PASS-PENDING-DECISIONS** — same as PASS, except at least one exercised fixture is still PROVISIONAL — see Open Decisions Blocking PASS above. Gates CI/PR exactly like FAIL (exit code 1); analysis and build keep moving, but this run is not yet citable as final proof.
-- **FAIL** — at least one ERROR, or at least one DIVERGES with no sanctioning decided CQ. "Looks more correct" is never a sanction.
-- **INCOMPLETE** — the selected fixture set was non-empty but nothing in it was actually replayable this run.
+Evaluated in this order, mechanically (`templates/CONTRACT.md` (j.3)):
+
+1. **INCOMPLETE** — the selected fixture set was non-empty but every fixture in it came back NOT REPLAYABLE (nothing was actually exercised). Exit code 2.
+2. **FAIL** — at least one ERROR, or at least one **behavioural** divergence with no sanctioning decided CQ. "Looks more correct" is never a sanction. Exit code 1.
+3. **PASS-PENDING-DECISIONS** — no failure above, but at least one exercised fixture is PROVISIONAL (an open pending question still blocks the rule it pins), SUPERSEDED (its scenario definition changed since capture — recapture it), or carries an unmapped error code. Gates CI/PR exactly like FAIL (exit code 1); analysis and build keep moving, but this run is not yet citable as final proof.
+4. **PASS** — everything else: every exercised fixture matched, or diverged behaviourally under a decided CQ. Representation-only differences do not hold a run back from PASS. Exit code 0.
+
+Order matters: an unsanctioned behavioural divergence is **always** FAIL. No provisional, superseded, or unmapped state ever converts it into PASS-PENDING-DECISIONS.
 
 {{ui_fidelity_footer}}

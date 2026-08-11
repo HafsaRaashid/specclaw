@@ -9,6 +9,7 @@
   ### GM-NNN — <short title>
 
   - **Seam:** <from seams.md>
+  - **Seam layer:** pure-function | service | http | persistence
   - **Business rules pinned:** <rule number(s) from domain-model.md, e.g. "rule 7">
   - **Arrange:** <state to set up>
   - **Act:** <call/action under test>
@@ -21,6 +22,24 @@
   keys on them. Scenarios are derived directly from domain-model.md's
   documented rules; never invent a rule or a rationale the source document
   doesn't state.
+
+  SEAM LAYER is a closed enum (templates/CONTRACT.md (i)), copied from the
+  seam's own declaration in seams.md — never re-derived from this scenario's
+  prose. `specclaw-bf-baseline record` extracts it verbatim into
+  manifest.json and HARD-FAILS on a missing or non-enum value; there is no
+  default. It exists so /specclaw:bf-replay can enforce that the replay test
+  exercises the rebuild at the same layer the fixture was captured at — a
+  service-layer fixture replayed through HTTP measures transport and
+  middleware, not the business rule this scenario pins.
+
+  IDENTITY AND IDEMPOTENCY SCENARIOS (CONTRACT.md (k)): when the rule is
+  about identity or idempotency, the Assert (shape) must name boolean
+  ASSERTIONS the seam itself can answer — first_call_created,
+  second_call_same_entity, second_call_created_duplicate — never a raw
+  generated id. Two independently seeded databases never produce the same
+  key, so comparing one is guaranteed noise and the rule goes unverified. A
+  raw id recorded as evidence belongs in the fixture's normalized_fields, as
+  a canonical path (CONTRACT.md (g)).
 
   A scenario the legacy app can never actually reach (no code path sets
   that state) does not belong here — list it under "No Legacy Behaviour
