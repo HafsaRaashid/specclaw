@@ -21,9 +21,11 @@
 #   .xaml element capture, .cshtml detection-only marking, zero-eligible-
 #   file scoping, and subdirectory scoping exclusion (AC1-AC13).
 # Plus rebuild-plan-bridge (Case 12): specclaw-bf-rebuild-collect collect's
-#   existence-check + line-count JSON emission for the four
-#   .specclaw/analysis/*.md documents, and its missing-document error path
-#   naming exactly which doc(s) are missing plus the producing command
+#   existence-check + line-count JSON emission for the five
+#   .specclaw/analysis/*.md documents (module-map.md joined the original four
+#   as a prerequisite when the MOD-### hierarchy landed), the module roster it
+#   parses out of module-map.md, and its missing-document error path naming
+#   exactly which doc(s) are missing plus the producing command
 #   (AC1-AC2).
 #
 # Plain bash only — no bats/npm. Run from anywhere:
@@ -902,16 +904,23 @@ echo
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Case 12 — rebuild-collect: existence-check + line-count JSON emission for
-# the four .specclaw/analysis/*.md documents (rebuild-plan-bridge, AC1-AC2),
-# and the missing-document error path naming exactly which doc(s) are
-# missing and which command produces each.
+# the five .specclaw/analysis/*.md documents (rebuild-plan-bridge, AC1-AC2),
+# the module roster parsed from module-map.md, and the missing-document error
+# path naming exactly which doc(s) are missing and which command produces
+# each.
+#
+# module-map.md is the fifth prerequisite, not an optional input: every
+# backlog item is grouped under a MOD-### module and that document declares
+# them, so collect refuses rather than inventing a grouping — the same
+# contract skills/bf-rebuild-plan/SKILL.md states, and the same one `render`
+# and `module-status` enforce independently.
 # ─────────────────────────────────────────────────────────────────────────────
-echo "--- Case 12: specclaw-bf-rebuild-collect collect — existence, line counts, missing-doc errors ---"
+echo "--- Case 12: specclaw-bf-rebuild-collect collect — existence, line counts, module roster, missing-doc errors ---"
 REBUILD_BIN="$BIN_DIR/specclaw-bf-rebuild-collect"
 if [[ ! -f "$REBUILD_BIN" ]]; then
   fail "specclaw-bf-rebuild-collect missing"
 else
-  # 12a-12b — all four fixture docs present: JSON lists all four paths with
+  # 12a-12b — all five fixture docs present: JSON lists all five paths with
   # line counts matching a hand-computed `wc -l` (same discipline as 9e).
   RFIX="$WORK/rebuild-proj"
   mkdir -p "$RFIX/.specclaw/analysis"
@@ -921,7 +930,7 @@ else
   rebuild_exit=$?
   assert_eq "12a all-present: exit 0" "0" "$rebuild_exit"
 
-  for doc in codebase-report.md architecture.md domain-model.md functional-spec.md; do
+  for doc in codebase-report.md architecture.md domain-model.md functional-spec.md module-map.md; do
     hand_count="$(wc -l < "$FIXTURES_DIR/rebuild-plan/analysis/$doc" | tr -d ' ')"
     doc_line="$(grep -o "\"path\": \"\.specclaw/analysis/${doc}\", \"lines\": [0-9]*" <<<"$rebuild_out")"
     if grep -q "\"lines\": ${hand_count}\$" <<<"$doc_line"; then
@@ -938,8 +947,22 @@ else
     fail "12c project_root reflects the collected project (got: $(grep '"project_root":' <<<"$rebuild_out"))"
   fi
 
-  # 12d-12f — partial docs (2 of 4 missing): non-zero exit, and stderr names
-  # exactly the missing files plus the command that produces each.
+  # 12g — the module roster is actually emitted. This is the field whose
+  # absence turned 12a-12c from "wrong value" into "empty output" when
+  # module-map.md became a prerequisite, so it gets its own assertion rather
+  # than being implied by the line count above.
+  if grep -q '"mod_id": "MOD-001"' <<<"$rebuild_out" \
+     && grep -q '"confirmed": true' <<<"$rebuild_out"; then
+    pass "12g module roster and confirmation state reported from module-map.md"
+  else
+    fail "12g module roster and confirmation state reported from module-map.md (got: $(grep -o '"module_map".\{0,140\}' <<<"$rebuild_out"))"
+  fi
+
+  # 12d-12f — partial docs (3 of 5 missing): non-zero exit, and stderr names
+  # exactly the missing files plus the command that produces each. The partial
+  # fixture copies only codebase-report.md and architecture.md, so
+  # module-map.md is missing here too and is named alongside the other two —
+  # which 12e and 12f are both indifferent to by construction.
   RFIX_PARTIAL="$WORK/rebuild-proj-partial"
   mkdir -p "$RFIX_PARTIAL/.specclaw/analysis"
   cp "$FIXTURES_DIR/rebuild-plan/analysis/codebase-report.md" "$RFIX_PARTIAL/.specclaw/analysis/"
@@ -948,9 +971,9 @@ else
   partial_err="$(bash "$REBUILD_BIN" collect "$RFIX_PARTIAL/.specclaw" 2>&1 1>/dev/null)"
   partial_exit=$?
   if [[ "$partial_exit" -ne 0 ]]; then
-    pass "12d partial docs (2 of 4 missing): non-zero exit"
+    pass "12d partial docs (3 of 5 missing): non-zero exit"
   else
-    fail "12d partial docs (2 of 4 missing): non-zero exit (got exit 0)"
+    fail "12d partial docs (3 of 5 missing): non-zero exit (got exit 0)"
   fi
   if grep -q 'domain-model.md (run /specclaw:bf-domain)' <<<"$partial_err" \
      && grep -q 'functional-spec.md (run /specclaw:bf-domain)' <<<"$partial_err"; then
