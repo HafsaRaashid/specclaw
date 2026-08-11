@@ -7,20 +7,24 @@ line that raises the condition it names.
 <!--
   THIS FILE IS PER-PROJECT DATA. It lives in the target repo at
   .specclaw/baseline/error-map.md and belongs to that project alone. The
-  specclaw plugin ships this skeleton and nothing else — no codes, no
-  framework exception names, no mapping between them. If a code ever appears
-  inside the plugin, that is a bug, not a shortcut.
+  specclaw plugin ships this skeleton and nothing else — no code tables, no
+  framework exception names, no mapping between them. If any specclaw command
+  ever READS OR MATCHES ON a specific code or exception name, that is a bug:
+  the plugin's only interest in this file is that a heading exists for each
+  code a fixture asserts. (Prose elsewhere may name a code to illustrate the
+  format; an illustration a command never reads is documentation, a lookup a
+  command consults is a dictionary. Only the second is forbidden.)
 
   WHAT IT IS FOR
 
   A golden-master fixture records what the legacy app DECIDED, not how its
-  framework happened to express the decision. `ValidationException` with the
-  message "Credit note already issued for invoice 4471" is a representation
-  of a decision; CREDIT_NOTE_ALREADY_ISSUED is the decision. A rebuild on a
-  different framework raises differently-named exceptions with differently
-  worded messages while making exactly the same decision — so the raw surface
-  is recorded as evidence (templates/CONTRACT.md (b.2)) and the code is what
-  is actually compared (CONTRACT.md (b.1), (h)).
+  framework happened to express the decision. An exception class plus a
+  human-worded message is a representation of a decision; the code is the
+  decision. A rebuild on a different framework raises differently-named
+  exceptions with differently worded messages while making exactly the same
+  decision — so the raw surface is recorded as evidence
+  (templates/CONTRACT.md (b.2)) and the code is what is actually compared
+  (CONTRACT.md (b.1), (h)).
 
   WHO WRITES IT
 
