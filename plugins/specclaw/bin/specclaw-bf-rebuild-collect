@@ -2043,7 +2043,13 @@ cmd_module_status() {
     while IFS= read -r meta; do
       [ -f "$meta" ] || continue
       mmod="$(jq -r '.module // ""' "$meta" 2>/dev/null | tr -d '\r' || true)"
-      [ -n "$mmod" ] && [ "$mmod" != "null" ] || continue
+      # An explicit conditional, not `[ … ] && [ … ] || continue`: that form
+      # reads as if-then-else but runs the `||` branch whenever EITHER test
+      # fails, which is what is wanted here and therefore exactly the
+      # ambiguity shellcheck flags (SC2015). Same semantics, stated plainly —
+      # skip this run when it recorded no module (a change-scoped or --all
+      # run) or when jq handed back the literal string "null".
+      if [ -z "$mmod" ] || [ "$mmod" = "null" ]; then continue; fi
       mverdict="$(jq -r '.overall_verdict // "?"' "$meta" 2>/dev/null | tr -d '\r' || true)"
       mdate="$(jq -r '.date // "?"' "$meta" 2>/dev/null | tr -d '\r' || true)"
       mrun="$(jq -r '.run_id // "?"' "$meta" 2>/dev/null | tr -d '\r' || true)"
