@@ -15,8 +15,16 @@ usage() {
 Usage: specclaw-bf-replay <subcommand> [options]
 
 Subcommands:
-  resolve       <specclaw_dir> <change_name|--all> <out_selection_json>
-                Change -> BL -> DR -> GM join (or --all for the full manifest).
+  resolve       <specclaw_dir> <change_name|MOD-###|--all> <out_selection_json>
+                Change -> BL -> DR -> GM join; MOD-### for one module's
+                fixtures (a pure jq join on manifest module_ids, ANY-of, so a
+                cross-module fixture is selected by every module it touches);
+                or --all for the full manifest. Three selection scopes,
+                smallest to largest: change, module, corpus.
+                A MOD-### target additionally hard-fails on a manifest older
+                than the schema that first carried module_ids, or one whose
+                fixtures carry none at all — each naming its own fix, rather
+                than selecting nothing and reporting a clean INCOMPLETE.
                 Verifies manifest/fixtures are present and every selected
                 fixture's sha256 matches manifest.json's recorded hash — fails
                 loudly on any mismatch, missing manifest, or unresolved BL
@@ -61,8 +69,9 @@ Subcommands:
                 `### CQ-0NN —` heading in decisions.md (never an Outstanding
                 Question). Writes sanction-verified.json.
 
-  render        <specclaw_dir> <change_name|--all> <run_dir> [--discard]
-                Renders replay-report.md (or report-<run_id>.md for --all)
+  render        <specclaw_dir> <change_name|MOD-###|--all> <run_dir> [--discard]
+                Renders replay-report.md (report-<run_id>.md for --all,
+                report-<run_id>-MOD-###.md for a module run)
                 from selection/mapping/compare/sanction-verified JSON, plus
                 an evidence-package pointer header (pass --discard when the
                 caller will discard evidence, so the report says so instead
@@ -70,7 +79,7 @@ Subcommands:
                 prior per-change report first. Exits 0/1/2 for
                 PASS/FAIL/INCOMPLETE.
 
-  finalize      <specclaw_dir> <change_name|--all> <run_dir> [--keep|--discard]
+  finalize      <specclaw_dir> <change_name|MOD-###|--all> <run_dir> [--keep|--discard]
                 Retention is the default: curates the run directory's
                 generated tests (source only — excludes whatever
                 run-config.json's evidence_exclusions names as this stack's
@@ -79,16 +88,19 @@ Subcommands:
                 record (run-config/selection/mapping/compare/sanction/
                 sanction-verified JSON and the build/test logs)
                 into .specclaw/changes/<name>/replay-evidence/run-<id>/ (or
-                .specclaw/replay/evidence/run-<id>/ for --all), regenerates
+                .specclaw/replay/evidence/run-<id>/ for --all and MOD-###,
+                which share the corpus pool and record the module they
+                covered in run-metadata.json), regenerates
                 evidence-summary.md, warns if .gitignore would swallow the
                 evidence path, then removes the working run directory.
                 --keep is accepted and silently treated the same as the
                 default. --discard skips all of the above and just deletes
                 the run directory — no evidence, summary left untouched.
 
-  prune-evidence <specclaw_dir> <change_name|--all> <n>
+  prune-evidence <specclaw_dir> <change_name|MOD-###|--all> <n>
                 Keeps only the newest <n> evidence run folders for that
-                change (or the --all evidence pool), deleting older ones.
+                change (or the shared pool --all and MOD-### runs use),
+                deleting older ones.
                 Never runs automatically — explicit-only, standalone from
                 any replay run.
 
@@ -125,6 +137,26 @@ load_gm_paths() {
 # defaulting it to VERIFIABLE turns "we never checked" into "we checked and it
 # was fine."
 MANIFEST_SCHEMA_MIN=2
+
+# The schema that first carried per-fixture `module_ids`. Deliberately a
+# SEPARATE, higher floor than MANIFEST_SCHEMA_MIN: a `<change-name>` or `--all`
+# run needs nothing from it and keeps working against a schema-2 manifest, so
+# adopting this version costs a project that ignores modules exactly nothing.
+# Only a `MOD-###` run — which is a join on that field — requires it, and it
+# says so with the same fix instruction the older guard uses.
+MODULE_SCHEMA_MIN=3
+
+# Three selection scopes, smallest to largest: one change's BL item(s), one
+# module, the whole corpus. A module target is the literal MOD-### token, so
+# every subcommand keeps its existing `<change_name|--all>` argument shape and
+# nothing needs a new flag threaded through five call sites.
+target_kind() {
+  case "$1" in
+    --all)          printf 'all' ;;
+    MOD-[0-9][0-9][0-9]) printf 'module' ;;
+    *)              printf 'change' ;;
+  esac
+}
 
 plugin_version_of_this_run() {
   jq -r '.version // "unknown"' "$PLUGIN_ROOT/.claude-plugin/plugin.json" 2>/dev/null || echo "unknown"
@@ -343,23 +375,54 @@ Fix: re-run /specclaw:bf-baseline --record"
     warn "Baseline was recorded by specclaw v${manifest_plugin_version}; this replay is running specclaw v${this_version}. Both versions are stamped into the report header and run-metadata.json so the difference is visible on the report's face."
   fi
 
-  local bl_id=""
-  if [ "$target" != "--all" ]; then
-    local change_dir="$specclaw_dir_abs/changes/${target}"
-    [ -d "$change_dir" ] || die "Change '${target}' not found under ${specclaw_dir_abs}/changes/."
-    bl_id="$(resolve_bl_id "$change_dir" "$backlog_file")"
-    [ -n "$bl_id" ] || die "Change '${target}' cites no backlog (BL-###) item in proposal.md/spec.md — replay only makes sense for backlog-driven changes."
-  fi
+  local kind bl_id="" module_id=""
+  kind="$(target_kind "$target")"
+  case "$kind" in
+    change)
+      local change_dir="$specclaw_dir_abs/changes/${target}"
+      [ -d "$change_dir" ] || die "Change '${target}' not found under ${specclaw_dir_abs}/changes/."
+      bl_id="$(resolve_bl_id "$change_dir" "$backlog_file")"
+      [ -n "$bl_id" ] || die "Change '${target}' cites no backlog (BL-###) item in proposal.md/spec.md — replay only makes sense for backlog-driven changes."
+      ;;
+    module)
+      module_id="$target"
+      # ── Module-metadata guards. Both fire here, before anything is created
+      # on disk, and both name the fix — the same discipline the schema guard
+      # above uses. A --module run is a join on manifest data; without that
+      # data it would silently select nothing and report a clean INCOMPLETE,
+      # which reads as "this module has no behaviour to check."
+      if [ "$manifest_schema" -lt "$MODULE_SCHEMA_MIN" ]; then
+        die "manifest.json at ${manifest} is schema v${manifest_schema}; a --module run needs v${MODULE_SCHEMA_MIN} or newer, which is the first schema carrying per-fixture module_ids. A change-scoped or --all run still works against this manifest unchanged.
+Fix: re-run /specclaw:bf-baseline --record"
+      fi
+      local tagged_count
+      tagged_count="$(jq '[ .fixtures[] | select(((.module_ids // []) | length) > 0) ] | length' "$manifest")"
+      if [ "$tagged_count" -eq 0 ]; then
+        die "No fixture in ${manifest} carries any module_ids, so there is nothing for --module ${module_id} to select. The baseline was recorded before its scenarios declared a module.
+Fix: re-run /specclaw:bf-baseline (design mode) so each scenario declares the module(s) owning the rules it pins, then /specclaw:bf-baseline --record"
+      fi
+      ;;
+  esac
 
   local selected_fixtures
   if [ -n "$bl_id" ]; then
     selected_fixtures="$(jq --arg bl "$bl_id" '[ .fixtures[] | select(.verifies_backlog_item | startswith($bl)) ]' "$manifest")"
+  elif [ -n "$module_id" ]; then
+    # Pure jq join on declared manifest data — no agent, no re-derivation from
+    # scenarios.md prose. ANY-of semantics: a fixture whose rules span modules
+    # carries several module_ids and is selected by EVERY one of them, because
+    # it is the record of a flow that crosses those boundaries and neither
+    # module can be accepted without it.
+    selected_fixtures="$(jq --arg mod "$module_id" '[ .fixtures[] | select((.module_ids // []) | index($mod)) ]' "$manifest")"
   else
     selected_fixtures="$(jq '.fixtures' "$manifest")"
   fi
 
   local count
   count="$(jq 'length' <<< "$selected_fixtures")"
+  if [ "$count" -eq 0 ] && [ -n "$module_id" ]; then
+    die "No fixture in ${manifest} is tagged with module ${module_id}. Modules that do appear: $(jq -r '[ .fixtures[] | (.module_ids // [])[] ] | unique | join(", ")' "$manifest"). Check the id against .specclaw/analysis/module-map.md, or design and record that module's scenarios first."
+  fi
   [ "$count" -gt 0 ] || die "No fixtures matched selection for '${target}'${bl_id:+ (${bl_id})} in ${manifest}."
 
   # Hash-verify every selected fixture against the manifest's recorded hash.
@@ -399,6 +462,14 @@ Fix: re-run /specclaw:bf-baseline --record"
 ${joined}"
   fi
 
+  # How many fixtures each module has IN THE WHOLE MANIFEST, not just in this
+  # selection. The report needs it to say whether a module's rollup row is a
+  # full picture of that module or a partial one — a change-scoped or
+  # single-module run pulls other modules in through shared fixtures, and a row
+  # showing 1 of that module's 12 fixtures must not read as its verdict.
+  local module_totals_json
+  module_totals_json="$(jq '[ .fixtures[] | (.module_ids // [])[] ] | group_by(.) | map({key: .[0], value: length}) | from_entries' "$manifest")"
+
   local dr_rules_json legacy_shas_json
   dr_rules_json="$(jq '[ .[].business_rules_pinned ] | join(" ") | [scan("DR-[0-9]{3}")] | unique' <<< "$selected_fixtures")"
   legacy_shas_json="$(jq '[ .[].legacy_commit_sha ] | unique' <<< "$selected_fixtures")"
@@ -410,25 +481,37 @@ ${joined}"
   jq -n \
     --arg target "$target" \
     --arg bl "$bl_id" \
+    --arg module "$module_id" \
+    --arg kind "$kind" \
     --argjson fixtures "$selected_fixtures" \
     --argjson dr_rules "$dr_rules_json" \
     --argjson legacy_shas "$legacy_shas_json" \
+    --argjson module_totals "$module_totals_json" \
     --argjson count "$count" \
     --argjson manifest_schema "$manifest_schema" \
     --arg manifest_plugin_version "${manifest_plugin_version:-unknown}" \
     '{
       target: $target,
+      target_kind: $kind,
       bl_item: (if $bl == "" then null else $bl end),
+      module: (if $module == "" then null else $module end),
       manifest_schema: $manifest_schema,
       manifest_plugin_version: $manifest_plugin_version,
       selected_count: $count,
+      module_totals: $module_totals,
       dr_rules_covered: $dr_rules,
       legacy_commit_shas: $legacy_shas,
       legacy_commit_sha: $legacy_shas[0],
       fixtures: $fixtures
     }' > "$out_path"
 
-  echo "Selected ${count} fixture(s) for ${target}${bl_id:+ (${bl_id})}. DR rules covered: $(jq -r 'join(", ")' <<< "$dr_rules_json"). Legacy commit: $(jq -r '.[0]' <<< "$legacy_shas_json")."
+  local shared_note=""
+  if [ -n "$module_id" ]; then
+    local shared_n
+    shared_n="$(jq --arg mod "$module_id" '[ .[] | select(((.module_ids // []) | length) > 1) ] | length' <<< "$selected_fixtures")"
+    shared_note=" ${shared_n} of them also belong to another module (shared cross-module flows, selected by both)."
+  fi
+  echo "Selected ${count} fixture(s) for ${target}${bl_id:+ (${bl_id})}.${shared_note} DR rules covered: $(jq -r 'join(", ")' <<< "$dr_rules_json"). Legacy commit: $(jq -r '.[0]' <<< "$legacy_shas_json")."
 }
 
 # ─── Subcommand: init-rundir ─────────────────────────────────────────────────
@@ -772,31 +855,46 @@ run_id_from_dir() {
 # Evidence directory, relative to the project root — for display in the
 # report and for the .gitignore check (git check-ignore wants a repo-
 # relative path, not an absolute one).
+# A MODULE run's evidence shares the corpus-wide pool rather than getting a
+# directory of its own, and the module it covered is recorded in that run's
+# own run-metadata.json. A module is not a change: it has no
+# .specclaw/changes/<name>/ to live under, and giving it a parallel tree would
+# fork the evidence layout for a selection dimension — the module is a
+# property of the run, not a new place to keep runs.
 evidence_dir_rel() {
   local target="$1" run_id="$2"
-  if [ "$target" = "--all" ]; then
-    printf '.specclaw/replay/evidence/run-%s' "$run_id"
-  else
-    printf '.specclaw/changes/%s/replay-evidence/run-%s' "$target" "$run_id"
-  fi
+  case "$(target_kind "$target")" in
+    all|module) printf '.specclaw/replay/evidence/run-%s' "$run_id" ;;
+    *)          printf '.specclaw/changes/%s/replay-evidence/run-%s' "$target" "$run_id" ;;
+  esac
 }
 
 evidence_dir_abs() {
   local specclaw_dir_abs="$1" target="$2" run_id="$3"
-  if [ "$target" = "--all" ]; then
-    printf '%s/replay/evidence/run-%s' "$specclaw_dir_abs" "$run_id"
-  else
-    printf '%s/changes/%s/replay-evidence/run-%s' "$specclaw_dir_abs" "$target" "$run_id"
-  fi
+  case "$(target_kind "$target")" in
+    all|module) printf '%s/replay/evidence/run-%s' "$specclaw_dir_abs" "$run_id" ;;
+    *)          printf '%s/changes/%s/replay-evidence/run-%s' "$specclaw_dir_abs" "$target" "$run_id" ;;
+  esac
 }
 
 evidence_root_abs() {
   local specclaw_dir_abs="$1" target="$2"
-  if [ "$target" = "--all" ]; then
-    printf '%s/replay/evidence' "$specclaw_dir_abs"
-  else
-    printf '%s/changes/%s/replay-evidence' "$specclaw_dir_abs" "$target"
-  fi
+  case "$(target_kind "$target")" in
+    all|module) printf '%s/replay/evidence' "$specclaw_dir_abs" ;;
+    *)          printf '%s/changes/%s/replay-evidence' "$specclaw_dir_abs" "$target" ;;
+  esac
+}
+
+# The report path for a run. A module run gets its own suffixed filename in the
+# shared replay directory so several modules' reports coexist without one
+# overwriting another, and so the filename itself says which module it covers.
+report_path_abs() {
+  local specclaw_dir_abs="$1" target="$2" run_id="$3"
+  case "$(target_kind "$target")" in
+    all)    printf '%s/replay/report-%s.md' "$specclaw_dir_abs" "$run_id" ;;
+    module) printf '%s/replay/report-%s-%s.md' "$specclaw_dir_abs" "$run_id" "$target" ;;
+    *)      printf '%s/changes/%s/replay-report.md' "$specclaw_dir_abs" "$target" ;;
+  esac
 }
 
 # Per-verdict counts + overall PASS/FAIL/INCOMPLETE, independently
@@ -1154,6 +1252,67 @@ cmd_render() {
     dr_uncovered_list="_domain-model.md not found — cannot compute uncovered DR rules._"
   fi
 
+  # ── Module rollup ────────────────────────────────────────────────────────
+  # Per module: fixture counts by verdict, that module's own verdict computed
+  # by the SAME four-step order as the overall one (CONTRACT.md (j.3)) over
+  # its own subset, and — mandatory, never omitted — how many of its fixtures
+  # are shared with another module.
+  #
+  # THE CROSS-MODULE HONESTY RULE. A fixture whose rules span modules counts
+  # toward EVERY module it touches. A module verdict that quietly excluded the
+  # shared flows would be a false verdict: those are precisely the flows that
+  # break when one module is rebuilt in isolation. So the Shared column is
+  # always present and always states the other modules by name — a reader must
+  # never be able to mistake "MOD-002: PASS" for "MOD-002 is done" when three
+  # of its fixtures only pass because MOD-005 still behaves as it did.
+  #
+  # None of this touches the overall verdict or the exit code: it is a
+  # reporting view over the same computed rows.
+  local module_rollup
+  module_rollup=$(jq -r --argjson merged "$merged" '
+    def exercised: (.verdict=="MATCH" or .verdict=="DIVERGES" or .verdict=="ERROR");
+    ([ .fixtures[] | (.module_ids // [])[] ] | unique) as $mods
+    | if ($mods | length) == 0 then
+        "_No module metadata in the manifest for this run — per-module rollups are unavailable. Re-run `/specclaw:bf-baseline --record` against scenarios that declare their modules to enable them._"
+      else
+        (.module_totals // {}) as $totals
+        | ([ "| Module | Fixtures in this run | Match | Behav. unsanctioned | Behav. sanctioned | Repr. | Unmapped | Error | Not replayable | Verdict | Shared with other modules |",
+           "|---|---|---|---|---|---|---|---|---|---|---|" ]
+         + [ $mods[] as $m
+             | ([ .fixtures[] | select((.module_ids // []) | index($m)) ]) as $fx
+             | ([ $fx[] | .scenario_id ]) as $ids
+             | ([ $merged[] | select(.scenario_id as $s | $ids | index($s)) ]) as $rows
+             | ($fx | length) as $total
+             | ([ $rows[] | select(.verdict=="MATCH") ] | length) as $match
+             | ([ $rows[] | select(.divergence_class=="behavioural" and (.sanctioned != true)) ] | length) as $bu
+             | ([ $rows[] | select(.divergence_class=="behavioural" and .sanctioned==true) ] | length) as $bs
+             | ([ $rows[] | select(.divergence_class=="representation") ] | length) as $rep
+             | ([ $rows[] | select(.divergence_class=="unmapped-error-code") ] | length) as $unm
+             | ([ $rows[] | select(.verdict=="ERROR") ] | length) as $err
+             | ([ $rows[] | select(.verdict=="NOT REPLAYABLE") ] | length) as $nr
+             | ([ $rows[] | select(exercised and .fixture_status=="PROVISIONAL") ] | length) as $prov
+             | ([ $rows[] | select(exercised and .fixture_status=="SUPERSEDED") ] | length) as $sup
+             | (if ($total > 0 and $nr == $total) then "INCOMPLETE"
+                elif ($err > 0 or $bu > 0) then "FAIL"
+                elif ($prov > 0 or $sup > 0 or $unm > 0) then "PASS-PENDING-DECISIONS"
+                else "PASS" end) as $verdict
+             | ([ $fx[] | select(((.module_ids // []) | length) > 1) ]) as $shared
+             | ([ $shared[] | (.module_ids // [])[] | select(. != $m) ] | unique) as $others
+             | ($totals[$m] // $total) as $module_total
+             | (if $total < $module_total
+                then ($total|tostring) + " of " + ($module_total|tostring) + " — **PARTIAL**"
+                else ($total|tostring) + " of " + ($module_total|tostring) end) as $scope
+             | "| " + $m + " | " + $scope + " | " + ($match|tostring) + " | " +
+               ($bu|tostring) + " | " + ($bs|tostring) + " | " + ($rep|tostring) + " | " +
+               ($unm|tostring) + " | " + ($err|tostring) + " | " + ($nr|tostring) + " | **" +
+               $verdict + (if $total < $module_total then " (of the selected subset only)" else "" end) + "** | " +
+               (if ($shared | length) == 0 then "none — every fixture here belongs to this module only"
+                else ($shared | length | tostring) + " of " + ($total|tostring) + " shared with " + ($others | join(", ")) end) + " |"
+           ])
+        | join("\n")
+      end
+  ' "$selection")
+
   local today
   today=$(date +%Y-%m-%d)
 
@@ -1209,6 +1368,7 @@ This package contains the generated tests (source), the actual outputs produced 
   content="$(fill_placeholder "$content" "{{not_replayable_list}}" "$not_replayable_list")"
   content="$(fill_placeholder "$content" "{{open_decisions_blocking_pass}}" "$open_decisions_blocking_pass")"
   content="$(fill_placeholder "$content" "{{dr_uncovered_list}}" "$dr_uncovered_list")"
+  content="$(fill_placeholder "$content" "{{module_rollup}}" "$module_rollup")"
 
   # ── Informational footer only. Purely additive: the verdict above and the
   # exit code below are computed exactly as before, and a project whose UI
@@ -1223,15 +1383,10 @@ This package contains the generated tests (source), the actual outputs produced 
   content="$(fill_placeholder "$content" "{{ui_fidelity_footer}}" "$ui_footer")"
 
   local out_path
-  if [ "$target" = "--all" ]; then
-    local run_id
-    run_id="$(basename "$run_dir")"
-    run_id="${run_id#run-}"
-    mkdir -p "${specclaw_dir_abs}/replay"
-    out_path="${specclaw_dir_abs}/replay/report-${run_id}.md"
-  else
-    out_path="${specclaw_dir_abs}/changes/${target}/replay-report.md"
-  fi
+  out_path="$(report_path_abs "$specclaw_dir_abs" "$target" "$evidence_run_id")"
+  case "$(target_kind "$target")" in
+    all|module) mkdir -p "${specclaw_dir_abs}/replay" ;;
+  esac
   printf '%s\n' "$content" > "$out_path"
 
   echo "Replay report written to ${out_path}. Overall verdict: ${overall} (MATCH=${match_n} BEHAVIOURAL=${behav_unsanctioned_n} unsanctioned/${behav_sanctioned_n} sanctioned REPRESENTATION=${repr_n} UNMAPPED_ERROR_CODE=${unmapped_n} ERROR=${error_n} SEAM_MISMATCH=${seam_n} NOT_REPLAYABLE=${nr_other_n})."
@@ -1274,11 +1429,7 @@ cmd_finalize() {
   mkdir -p "$evidence_dir/tests" "$evidence_dir/actual-results" "$evidence_dir/expected" "$evidence_dir/pipeline"
 
   local report_src
-  if [ "$target" = "--all" ]; then
-    report_src="${specclaw_dir_abs}/replay/report-${run_id}.md"
-  else
-    report_src="${specclaw_dir_abs}/changes/${target}/replay-report.md"
-  fi
+  report_src="$(report_path_abs "$specclaw_dir_abs" "$target" "$run_id")"
   [ -f "$report_src" ] || die "Report not found at ${report_src} — run 'render' before 'finalize'."
   cp "$report_src" "$evidence_dir/report.md"
 
@@ -1324,9 +1475,13 @@ cmd_finalize() {
     echo '{ "fixtures": [] }' > "$evidence_dir/expected/manifest-excerpt.json"
   fi
 
-  local legacy_sha bl_item selected_count manifest_pv manifest_schema
+  local legacy_sha bl_item module_id selected_count manifest_pv manifest_schema
   legacy_sha=$(jq -r '.legacy_commit_sha // "unknown"' "$selection" 2>/dev/null || echo "unknown")
   bl_item=$(jq -c '.bl_item // null' "$selection" 2>/dev/null || echo null)
+  # The module this run covered, recorded IN the run's own metadata rather than
+  # in its directory path — which is what lets several modules' evidence share
+  # the corpus-wide pool without ambiguity about what each run proved.
+  module_id=$(jq -c '.module // null' "$selection" 2>/dev/null || echo null)
   selected_count=$(jq -r '.selected_count // 0' "$selection" 2>/dev/null || echo 0)
   manifest_pv=$(jq -r '.manifest_plugin_version // "unknown"' "$selection" 2>/dev/null || echo "unknown")
   manifest_schema=$(jq -c '.manifest_schema // null' "$selection" 2>/dev/null || echo null)
@@ -1344,6 +1499,7 @@ cmd_finalize() {
     --arg run_id "$run_id" \
     --arg target "$target" \
     --argjson bl_item "$bl_item" \
+    --argjson module "$module_id" \
     --arg date "$today" \
     --arg legacy_sha "$legacy_sha" \
     --arg new_repo_sha "$new_repo_sha" \
@@ -1357,6 +1513,7 @@ cmd_finalize() {
       run_id: $run_id,
       target: $target,
       bl_item: $bl_item,
+      module: $module,
       date: $date,
       legacy_commit_sha: $legacy_sha,
       new_repo_commit_sha: $new_repo_sha,
@@ -1380,7 +1537,10 @@ cmd_finalize() {
     fi
   fi
 
-  [ "$target" != "--all" ] && regenerate_evidence_summary "$specclaw_dir_abs" "$target"
+  # evidence-summary.md is change-scoped by design — a module is not a change
+  # and has no per-change index to regenerate. A module run's evidence lives in
+  # the shared pool, identified by its own run-metadata.json.
+  [ "$(target_kind "$target")" = "change" ] && regenerate_evidence_summary "$specclaw_dir_abs" "$target"
 
   rm -rf "$run_dir"
   echo "Evidence retained at ${evidence_dir} (report.md, run-metadata.json, tests/, actual-results/, expected/, pipeline/). Working run directory removed."
@@ -1401,7 +1561,7 @@ cmd_prune_evidence() {
   local specclaw_dir_abs
   specclaw_dir_abs="$(cd "$specclaw_dir" && pwd)"
 
-  if [ "$target" != "--all" ]; then
+  if [ "$(target_kind "$target")" = "change" ]; then
     [ -d "${specclaw_dir_abs}/changes/${target}" ] || die "Change '${target}' not found under ${specclaw_dir_abs}/changes/."
   fi
 
@@ -1430,7 +1590,10 @@ cmd_prune_evidence() {
     removed=$((removed + 1))
   done
 
-  [ "$target" != "--all" ] && regenerate_evidence_summary "$specclaw_dir_abs" "$target"
+  # evidence-summary.md is change-scoped by design — a module is not a change
+  # and has no per-change index to regenerate. A module run's evidence lives in
+  # the shared pool, identified by its own run-metadata.json.
+  [ "$(target_kind "$target")" = "change" ] && regenerate_evidence_summary "$specclaw_dir_abs" "$target"
 
   echo "Pruned ${removed} evidence run(s) for ${target}, keeping the newest ${n} (of ${total} total)."
 }
@@ -1443,7 +1606,7 @@ case "${1:-}" in
     exit 0
     ;;
   resolve)
-    [ $# -ge 4 ] || die "Usage: specclaw-bf-replay resolve <specclaw_dir> <change_name|--all> <out_selection_json>"
+    [ $# -ge 4 ] || die "Usage: specclaw-bf-replay resolve <specclaw_dir> <change_name|MOD-###|--all> <out_selection_json>"
     cmd_resolve "$2" "$3" "$4"
     ;;
   init-rundir)
@@ -1463,15 +1626,15 @@ case "${1:-}" in
     cmd_sanction_check "$2" "$3"
     ;;
   render)
-    [ $# -ge 4 ] || die "Usage: specclaw-bf-replay render <specclaw_dir> <change_name|--all> <run_dir> [--discard]"
+    [ $# -ge 4 ] || die "Usage: specclaw-bf-replay render <specclaw_dir> <change_name|MOD-###|--all> <run_dir> [--discard]"
     cmd_render "$2" "$3" "$4" "${5:-}"
     ;;
   finalize)
-    [ $# -ge 4 ] || die "Usage: specclaw-bf-replay finalize <specclaw_dir> <change_name|--all> <run_dir> [--keep|--discard]"
+    [ $# -ge 4 ] || die "Usage: specclaw-bf-replay finalize <specclaw_dir> <change_name|MOD-###|--all> <run_dir> [--keep|--discard]"
     cmd_finalize "$2" "$3" "$4" "${5:-}"
     ;;
   prune-evidence)
-    [ $# -ge 4 ] || die "Usage: specclaw-bf-replay prune-evidence <specclaw_dir> <change_name|--all> <n>"
+    [ $# -ge 4 ] || die "Usage: specclaw-bf-replay prune-evidence <specclaw_dir> <change_name|MOD-###|--all> <n>"
     cmd_prune_evidence "$2" "$3" "$4"
     ;;
   "")

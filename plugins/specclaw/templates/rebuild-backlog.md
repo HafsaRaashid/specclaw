@@ -2,7 +2,7 @@
 
 **Path analyzed:** {{path}}
 **Date generated:** {{date}}
-**Source documents:** codebase-report.md, architecture.md, domain-model.md, functional-spec.md
+**Source documents:** codebase-report.md, architecture.md, domain-model.md, functional-spec.md, module-map.md
 
 <!--
   NOTE ON THIS COMMENT: never write a literal double-brace placeholder
@@ -21,14 +21,42 @@
   propose. This block, and every item's Gate:/Verification: field below,
   is recomputed from scratch on every run — never hand-maintained.
 
-  Expected per-item sub-structure inside the Backlog section below — one
-  entry per backlog item, in readiness order (dependency rank first — a hard
-  constraint — then within the same rank: CLEAR+VERIFIABLE, then
-  CLEAR+PENDING CAPTURE/NO BASELINE DATA/UNVERIFIABLE, then OPEN QUESTIONS,
-  then BLOCKED):
+  MODULE GROUPING. The Backlog section below is two levels deep: one
+  "## MOD-### — <Module Name>" heading per module from module-map.md, with
+  that module's "### BL-0##" items beneath it. Modules are ordered by their
+  own dependency rank from the map (foundations first), computed in bash by
+  the same fixed-point pass that ranks items; a declared cycle is reported
+  and no rank number is printed, because the number would be an artifact of
+  the iteration cap rather than a dependency depth.
+
+  A module is a MIGRATION/ACCEPTANCE unit — the "one flow at a time" slice a
+  large legacy system is rebuilt and signed off in. BL items remain the
+  BUILD units: the hierarchy is MOD-### -> BL-0## -> DR-### -> GM-###, and a
+  module is NEVER collapsed into one giant BL item. Item granularity rules
+  are exactly as they were — a module only groups items that already exist
+  at capability-bullet granularity.
+
+  Item order WITHIN a module is unchanged from before modules existed
+  (dependency rank first — a hard constraint — then within the same rank:
+  CLEAR+VERIFIABLE, then CLEAR+PENDING CAPTURE/NO BASELINE DATA/
+  UNVERIFIABLE, then OPEN QUESTIONS, then BLOCKED). Two further top-level
+  groups may appear after the modules: "## Unassigned — no module declared"
+  (items with no **Module:** field, or one naming a MOD-### the map does not
+  define — never folded into a real module by guesswork) and "## Struck"
+  (tombstones, which belong to no module).
+
+  Expected per-item sub-structure inside each module group — one entry per
+  backlog item:
 
   ### BL-NNN — <Feature Title>
 
+  **Module:** <the MOD-### from module-map.md this item belongs to. Declared
+    by the planner agent, read mechanically by bash, and NEVER derived from
+    the item's DR-### rules — deriving one would be a silent assignment, and
+    a disagreement between this field and the map's own rule ownership is
+    exactly what /specclaw:bf-baseline record reports as a WARN at record
+    time. An item with no such field is rendered under "## Unassigned",
+    never guessed into a module.>
   **Maps to capability:** <functional-spec.md capability name/quote>
   **Depends on:** <earlier items' BL-NNN IDs, or "None">
   **Acceptance basis (domain-model.md):**
@@ -129,6 +157,33 @@
 {{sequencing_rationale}}
 
 ## Coverage Check
+
+<!--
+  Capability-bullet coverage, authored by the planner agent (bash never
+  writes prose it cannot verify against the source documents) and carried
+  by bash: this run's draft wins, otherwise the prior file's section is
+  preserved verbatim, otherwise a line saying plainly that it is absent.
+
+  Each bullet is accounted for on its own line, in this countable form so
+  that the per-module rollup below can be computed mechanically rather than
+  asserted:
+
+    - **MOD-002** — "<capability bullet, quoted>" -> BL-014
+    - **MOD-002** — "<capability bullet, quoted>" -> EXCLUDED: <reason>
+    - **MOD-002** — "<capability bullet, quoted>" -> ORPHAN
+
+  Granularity is unchanged — this is still one line per individual
+  capability bullet (and per distinct clause of a compound bullet), never
+  one line per module. The "### Module Coverage Rollup" subsection is
+  bash-computed by counting these lines per module and is re-derived from
+  scratch every run; a prior run's copy is dropped before the new one is
+  appended, exactly as the UI Screen Coverage subsection is. When no line
+  matches the countable form, the rollup says it is not computable rather
+  than reporting 0/0 — which would read as "nothing to cover."
+
+  Under a --module scoped run, only the scoped module's lines are replaced;
+  every other module's accounting is preserved by line-level surgery.
+-->
 
 {{coverage_check}}
 

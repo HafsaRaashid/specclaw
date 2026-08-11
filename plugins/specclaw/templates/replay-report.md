@@ -45,6 +45,31 @@
   SANCTIONED. Only behavioural rows are ever put to the auditor at all.
 -->
 
+## Module Rollup
+
+<!--
+  Per-module counts, each module's own verdict (computed by the SAME four-step
+  order as the overall verdict in CONTRACT.md (j.3), over that module's own
+  subset), and — always, never omitted — how many of its fixtures are shared
+  with another module. Computed in bash by `specclaw-bf-replay render` from
+  manifest-declared module_ids; no agent asserts any of it.
+
+  THE CROSS-MODULE HONESTY RULE. A fixture whose pinned rules span modules
+  counts toward EVERY module it touches, and the Shared column names the other
+  modules. This is not bookkeeping detail: a shared fixture is the record of a
+  flow that crosses a module boundary, and it is exactly the thing that breaks
+  when one module is rebuilt in isolation. A module verdict that silently
+  excluded its shared flows would be a false verdict — so "MOD-002: PASS" is
+  always accompanied by how much of that PASS depends on another module still
+  behaving as it did.
+
+  This section changes NO verdict and NO exit code. The overall verdict below
+  is computed over the whole selected set exactly as it always was; a module
+  rollup is a reporting view over the same rows, not a second gate.
+-->
+
+{{module_rollup}}
+
 ## Fixtures
 
 | Scenario | Verdict | Class | Sanction | Detail |

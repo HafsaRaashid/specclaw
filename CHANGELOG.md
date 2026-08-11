@@ -4,6 +4,86 @@ All notable changes to specclaw are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.0] — 2026-08-11
+
+### Added
+- **Module hierarchy (`MOD-###`) across the brownfield pipeline.** A large
+  legacy system can now be migrated and behaviourally accepted **one module at
+  a time** instead of through a flat whole-project backlog and all-or-one-change
+  replay scoping. The hierarchy is `MOD-### → BL-0## → DR-### → GM-###`:
+  modules are migration/acceptance units, backlog items remain the build units.
+  Modules are a **selection dimension** over the one shared corpus — one
+  manifest, one backlog, one `fixtures/` directory; nothing is split per module.
+- **`.specclaw/analysis/module-map.md`** — written by `/specclaw:bf-domain`
+  (new rubric dimension). Per module: purpose, owned entities, **referenced-but-
+  not-owned** entities with their owner, services/routes, screens, owned
+  `DR-###` rules, dependencies, and evidence (`file:line` or a quoted analysis
+  passage) for every grouping claim. Grouping is evidence-based, never derived
+  from directory names. The map is agent-**proposed** and human-**confirmed**
+  via its own `Status:` line; every downstream command runs regardless and
+  states on its face when the grouping is unconfirmed. `MOD-###` ids are
+  **reconciled** across regenerations (name match, then ≥50% owned-entity
+  overlap), never renumbered; a retired module leaves a `WITHDRAWN` tombstone.
+- **Ambiguous boundaries become questions, not assignments.** A contested
+  entity/rule/screen, or a reconciliation tie, raises a typed pending question
+  (trigger `T3`) naming both candidate modules, places the item provisionally
+  with a `⚠ PROVISIONAL` marker, and is typed `DECISION`/`SCOPE` by
+  `/specclaw:bf-clarify`. No new question type was added — the seven-type
+  taxonomy is unchanged.
+- **`/specclaw:bf-rebuild-plan`** requires the map, groups items under
+  `## MOD-###` headings in the map's own dependency order (cycles reported, not
+  silently ordered), gives every item a declared `**Module:**`, adds a
+  bash-computed per-module coverage rollup, recommends the **next module to
+  build** with its reasons stated, and accepts `--module MOD-###` to (re)plan
+  one module while preserving every other module's items, coverage lines, and
+  human-added status notes.
+- **`/specclaw:bf-baseline`** — each scenario declares the `MOD-###` module(s)
+  owning the rules it pins (a scenario spanning modules is tagged with **all**
+  of them); `record` carries these into `manifest.json`'s new `module_ids` and
+  hard-fails on a module tag with no map heading; `--module` designs or extends
+  a harness for one module without disturbing another's scenarios or generated
+  tests, via the new deterministic `merge-scenarios` step.
+- **`/specclaw:bf-replay --module MOD-###`** — a third selection scope between
+  a change and `--all`, resolved by a pure jq join on `module_ids` (ANY-of).
+  The report gains a **module rollup**: per-module counts, each module's own
+  verdict, and — always — how many of its fixtures are **shared** with which
+  other modules. Partial views are marked `PARTIAL`. Selection only: verdict
+  logic and exit codes are identical across all three scopes.
+- **`.specclaw/analysis/module-status.md`** — a read-only per-module status view
+  (items planned/total, scenarios captured/designed, latest module-scoped replay
+  verdict, open questions), regenerated in full by every
+  `/specclaw:bf-rebuild-plan` run and deliberately exempt from
+  archive-then-replace.
+
+### Changed
+- **`manifest_schema` 2 → 3**, adding per-fixture `module_ids`. **This forces no
+  re-record**: change-scoped and `--all` runs still read a schema-2 manifest
+  unchanged. Only `--module`, which is a join on that field, requires 3, and it
+  fails with its own message naming the fix.
+- `CONTRACT.md` gains section **(l)** (module hierarchy, ownership direction,
+  the cross-module honesty rule, selection-only guarantee); `MOD-NNN` joins the
+  ID-permanence rule in (c), which now also documents tombstones and
+  reconciliation.
+- `/specclaw:bf-rebuild-plan`'s Coverage Check and Sequencing Rationale are now
+  actually taken from the planner agent's draft. They were previously discarded,
+  so both sections rendered a placeholder string on a first run and every later
+  `--refresh` preserved that placeholder — the agent's coverage work never
+  reached the file.
+
+### Fixed
+- **Every fixture read `SUPERSEDED` on every re-record on Windows/MSYS.** jq's
+  Windows build emits CRLF, so the manifest's recorded `scenario_content_hash`
+  never equalled the recomputed one — holding every replay at
+  `PASS-PENDING-DECISIONS` permanently, for a reason nothing surfaced.
+- `split_scenario_blocks` did not stop at the next `## ` heading, so the last
+  scenario absorbed `## No Legacy Behaviour Exists` and `## Rule Coverage Check`
+  into its own block — putting unrelated prose inside its content hash (editing
+  the coverage check marked that fixture `SUPERSEDED`) and letting a `MOD-###`
+  mentioned in the coverage check read back as that scenario's declared module.
+- `scenario_block_title` used a `[—-]` bracket expression, which byte-splits the
+  multi-byte em dash on a byte-oriented sed build and left stray bytes on the
+  front of every title — silently defeating every `WITHDRAWN*` tombstone check.
+
 ## [0.5.5] — 2026-07-17
 
 ### Added

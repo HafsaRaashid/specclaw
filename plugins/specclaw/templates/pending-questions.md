@@ -38,8 +38,14 @@
     T1 — Field rendering/widget type not evidenced in code (input type,
          component, file-handling logic all absent or ambiguous).
     T2 — Code behaviour contradicts comments, docs, or naming.
-    T3 — Multiple plausible interpretations of a business rule with no
-         test, usage site, or data constraint disambiguating them.
+    T3 — Multiple plausible interpretations of a business rule, or of a
+         module grouping, with no test, usage site, data constraint, or
+         dependency edge disambiguating them. (The module case: an entity,
+         rule, service or screen two MOD-###s could each plausibly own, or
+         two prior modules that match one proposed module equally well
+         during MOD-ID reconciliation. /specclaw:bf-clarify types these
+         DECISION — an ownership fork — or SCOPE, when the real question is
+         whether that module belongs in the rebuild at all.)
     T4 — Legacy behaviour that appears to be a defect (describe; clarify
          will type it DEFECT).
     T5 — A capability with no one-to-one mapping in the rebuild target
@@ -55,7 +61,11 @@
   - **Status:** OPEN | PROMOTED → CQ-### | WITHDRAWN
   - **Source:** <command/agent that raised it>
   - **Trigger:** T1–T6
-  - **Blocks:** <artifact item IDs: DR-###, BL-0##, GM-###, field path>
+  - **Blocks:** <artifact item IDs: MOD-###, DR-###, BL-0##, GM-###, field
+    path. Name every id the question actually blocks — for a contested
+    module boundary that means BOTH candidate MOD-###s plus the item they
+    are contesting, since a question naming only one of them reads as
+    settled in that one's favour.>
   - **Evidence found:** <cited findings, file:line or quoted passage>
   - **Could not determine:** <the specific gap>
   - **Candidates considered:** <options>

@@ -12,11 +12,17 @@ This command does **not** run the legacy app and does **not** capture fixtures i
 
 ## Mode A — design (default: no flag)
 
+If the user's message contains `--module MOD-###`, this is a **module-scoped design** — read the sub-section at the end of this mode before doing anything, because steps 2 and 4 change.
+
 1. **Collect:**
    ```bash
-   specclaw-bf-baseline collect .specclaw
+   specclaw-bf-baseline collect .specclaw [--module MOD-###]
    ```
    Requires `.specclaw/analysis/domain-model.md` to exist — scenarios are derived from its numbered business rules. **If it exits non-zero, surface its stderr message to the user verbatim and stop** — it names `/specclaw:bf-domain` as the command to run first. Don't retry, don't design scenarios from nothing. Also reports which supplementary documents (`codebase-report.md`, `architecture.md`, `functional-spec.md`, `rebuild-backlog.md`) are present, for the agent's own stack detection and backlog-item linkage.
+
+   It additionally reports the **module map** (soft input — its `PROPOSED`/`CONFIRMED` status plus every module's owned `DR-###` rules, so each scenario can declare the module(s) owning the rules it pins) and the **prior scenario roster** with the next free `GM-###` id. `--module` makes the map a hard requirement and fails if the id names no active module.
+
+   **Run this before step 2's archive.** The prior roster is read from the live `scenarios.md`, which step 2 is about to move, and it is the only thing that keeps `GM-###` ids stable across a re-design — a captured fixture, a manifest entry, and a module tag all hang off one.
 
 2. **Archive the prior design, if any**, before writing a new one:
    ```bash
@@ -26,6 +32,8 @@ This command does **not** run the legacy app and does **not** capture fixtures i
    ```
    Skip each `mv` independently if that specific file doesn't exist yet. This is `/specclaw:bf-baseline`'s own archive directory (`.specclaw/baseline/archive/`) — a separate document family from `.specclaw/analysis/archive/`, but the same convention: archive-then-replace, never silently overwrite.
 
+   **Skip this step entirely for a `--module` run** — `merge-scenarios` archives `scenarios.md` itself as part of merging, and moving it here would leave the merge nothing to merge into.
+
 3. **Spawn the design agent:** `Agent` tool, `subagent_type: "bf-baseline-designer"`, on the model from `config.yaml` `models.review` (default: `anthropic/claude-sonnet-4-5`) — same routing as the sibling read-only analysis agents, since this is still read-only design work, not spec/design authoring for a change. Pass as context:
    - The collected JSON (stdout of Step 1) — now including `clarifications_md`/`pending_questions_md` presence + resolved paths.
    - The resolved path of `.specclaw/analysis/domain-model.md`, plus the resolved paths of whichever supplementary documents are present, for the agent to `Read` directly.
@@ -33,9 +41,23 @@ This command does **not** run the legacy app and does **not** capture fixtures i
 
 4. The agent writes `.specclaw/baseline/seams.md` and `.specclaw/baseline/scenarios.md` itself, per its own Output section — this skill does not write either file.
 
-5. **Present a short summary** to the user: the seam ranking (which class was recommended and why, and which `seam_layer` each ranked seam declared), the capture blockers (non-determinism) found and their proposed mitigations, and the scenario count against `domain-model.md`'s numbered business rules (from the Rule Coverage Check). Mention that each scenario's declared layer is what `/specclaw:bf-replay` will later enforce the replay test against — a fixture captured at `service` and replayed through `http` is refused as a seam mismatch, not accepted as a weaker check.
+5. **Present a short summary** to the user: the seam ranking (which class was recommended and why, and which `seam_layer` each ranked seam declared), the capture blockers (non-determinism) found and their proposed mitigations, and the scenario count against `domain-model.md`'s numbered business rules (from the Rule Coverage Check). Also report the per-module scenario counts and **name every cross-module scenario** — one whose rules span two modules is the record of a flow crossing a boundary, it will be selected by both modules' replay runs, and neither module can be accepted in isolation on the strength of it. If the module map's status is still `PROPOSED`, say so: these tags rest on a grouping no human has confirmed. Mention that each scenario's declared layer is what `/specclaw:bf-replay` will later enforce the replay test against — a fixture captured at `service` and replayed through `http` is refused as a seam mismatch, not accepted as a weaker check.
 
 6. **Ask the human to confirm the recommended seam** before generating a harness — do not proceed to `--harness` in the same turn without an explicit go-ahead. If any capture blocker was recommended for "record timestamp + injectable clock" (the highest-fidelity mitigation), remind the user this implies a design constraint / ADR in the new repo.
+
+### Module-scoped design (`--module MOD-###`)
+
+Same steps, three differences:
+
+- **Step 2 is skipped** (see above).
+- **Step 3** tells the agent it is running module-scoped, names the `MOD-###`, and instructs it to write **only** `.specclaw/baseline/.scenarios-module-draft.md` — not `scenarios.md`.
+- **A new step 4b merges the draft deterministically:**
+  ```bash
+  specclaw-bf-baseline merge-scenarios .specclaw .specclaw/baseline/.scenarios-module-draft.md MOD-###
+  ```
+  Replaces that module's blocks, preserves every other module's blocks **byte-for-byte** (so their captured fixtures don't read `SUPERSEDED`), tombstones any id owned solely by this module that the draft dropped, keeps any cross-module id the draft omitted, archives the prior file, and deletes the draft. **If it exits non-zero, surface its stderr verbatim and stop.**
+
+  **Relay every warning it prints.** There are three, and each is a decision for a human: ids tombstoned (their fixtures are now orphaned); cross-module scenarios kept because this run had no authority to retire them; and cross-module scenarios rewritten (their fixtures will read `SUPERSEDED` for **every** module sharing them). Also say plainly that "No Legacy Behaviour Exists" and "Rule Coverage Check" were **not** re-derived — they are whole-corpus findings, preserved with a dated note, and only a run without `--module` recomputes them.
 
 7. **Note the /specclaw:bf-clarify cross-reference:** every non-determinism finding and every "No Legacy Behaviour Exists" entry is shaped like a `TARGET-GAP` or `SCOPE` question for `/specclaw:bf-clarify`. If `.specclaw/analysis/clarifications.md` already exists, mention the linkage to the user; `/specclaw:bf-baseline` never writes into that file itself.
 
@@ -45,9 +67,11 @@ Only run after the human has confirmed Mode A's recommended seam (Step 6 above) 
 
 1. **Collect:**
    ```bash
-   specclaw-bf-baseline harness-collect .specclaw
+   specclaw-bf-baseline harness-collect .specclaw [--module MOD-###]
    ```
-   Requires `.specclaw/baseline/seams.md` and `scenarios.md` to already exist (Mode A must have run). **If it exits non-zero, surface its stderr message verbatim and stop** — it means Mode A hasn't run yet. On success, this archives any prior `.specclaw/baseline/harness/` directory wholesale, creates fresh empty `harness/` and `fixtures/` directories, and emits the full, deterministic list of `GM-NNN` scenario IDs the agent must implement one-for-one.
+   Requires `.specclaw/baseline/seams.md` and `scenarios.md` to already exist (Mode A must have run). **If it exits non-zero, surface its stderr message verbatim and stop** — it means Mode A hasn't run yet. On success, this archives any prior `.specclaw/baseline/harness/` directory wholesale, creates fresh empty `harness/` and `fixtures/` directories, and emits the full, deterministic list of `GM-NNN` scenario IDs the agent must implement one-for-one. Tombstoned (`WITHDRAWN`) scenarios are excluded — they declare no seam and can never be captured.
+
+   **With `--module MOD-###` the harness directory is neither archived nor emptied.** It emits only that module's scenario IDs plus an inventory of the harness files that already exist, and the agent adds or replaces only those tests. Wiping the harness for a one-module run would delete every other module's generated tests — so `harness_archived` reads `false`, and the summary states how many scenarios belong to other modules and were left untouched. It fails loudly if no scenario declares that module (design it first).
 
 2. **Spawn the harness agent:** `Agent` tool, `subagent_type: "bf-baseline-designer"`, same model routing as Mode A. Pass as context:
    - The collected JSON (stdout of Step 1 — includes the `scenario_ids` checklist).
@@ -84,6 +108,8 @@ Fully deterministic — no agent involved. Run this after a human has actually e
    A fixture set captured before this contract will fail the third check with a message naming the fix: re-run `--harness`, re-capture, then `--record`. That is deliberate — there is no migration that can invent an `error_code` nobody ever recorded, and deriving one from the exception type would reintroduce the precise coupling this contract removes.
 
 2. **Present a short summary:** how many of the total scenarios have a captured fixture and how many are still missing (naming them), the status breakdown (VERIFIABLE/PROVISIONAL/SUPERSEDED — name which fixtures are SUPERSEDED, since those need a human to recapture, not just wait on a decision), plus the manifest's location. If `record` failed instead, relay its problem list verbatim — every entry names both the fixture and the fix.
+
+   **Also relay the module picture.** `record` extracts each fixture's `module_ids` from its scenario's own declared `Modules` field and writes them into the manifest — that is what `/specclaw:bf-replay --module` joins on. Report how many fixtures are tagged, how many are **shared across modules** (those are the cross-module flows, and they count toward every module they touch), and how many carry no module at all. **Surface any module-consistency WARN verbatim**: it means a scenario's module (from the map's rule ownership) disagrees with the module its own backlog item is filed under, one of those two documents is wrong, and neither `record` nor you should decide which. The manifest is still valid and was written — this is a reconciliation task, not a failure.
 
 ## What this command does not do
 

@@ -121,8 +121,8 @@ declared data above — never enumerated per project, per stack, or by an agent.
 
 ```jsonc
 {
-  "manifest_schema": 2,
-  "plugin_version": "0.9.0",
+  "manifest_schema": 3,
+  "plugin_version": "0.10.0",
   "generated": "2026-08-10",
   "generated_at": "2026-08-10T09:12:00Z",
   "project_root": "…",
@@ -132,11 +132,19 @@ declared data above — never enumerated per project, per stack, or by an agent.
 }
 ```
 
-- `manifest_schema` — integer, currently `2`. **`specclaw-bf-replay resolve`
-  hard-fails on a manifest that lacks this field or predates the current
-  schema**, before it creates anything, and names
+- `manifest_schema` — integer, currently `3`. **`specclaw-bf-replay resolve`
+  hard-fails on a manifest that lacks this field or predates the *minimum*
+  readable schema (`2`)**, before it creates anything, and names
   `re-run /specclaw:bf-baseline --record` as the fix. It never assumes a
   missing field means "the old default was fine."
+
+  **Two floors, deliberately.** A change-scoped or `--all` run needs nothing
+  from schema 3 and keeps reading a schema-2 manifest unchanged, so adopting
+  the module hierarchy forces no project to re-record. Only a `MOD-###` run
+  — which *is* a join on `module_ids` — requires `3`, and it fails with its
+  own message saying so. A version bump that silently invalidated every
+  existing baseline would cost every project a recapture cycle for a feature
+  it may not use.
 - `plugin_version` — the specclaw version that recorded this manifest, stamped
   at record time. `specclaw-bf-replay` stamps its own running version into
   `run-metadata.json` and the report header, so a mismatch between the two
@@ -154,6 +162,12 @@ Each `fixtures[]` entry carries:
   be recaptured, and until it is, replaying it proves nothing about the
   scenario as currently written. `specclaw-bf-replay` propagates both into its
   verdict computation (section (j)); never a stack-specific concern.
+- `module_ids`: `["MOD-002", "MOD-005"]` — every module whose `DR-###` rules
+  this scenario pins, per (l). Extracted verbatim from the scenario's own
+  declared `Modules` field, never re-derived here; `[]` is legal and means
+  the project has no module map. **A scenario whose rules span modules
+  carries all of them**, and `specclaw-bf-replay --module` selects it for
+  every one (ANY-of).
 - `seam_layer`: the fixture's capture layer, per (i) — extracted verbatim from
   the scenario's own declaration, never re-derived from prose.
 - `outcome` / `error_code` / `threw`: lifted from the fixture's own `output`
@@ -169,10 +183,24 @@ Each `fixtures[]` entry carries:
 
 ## (c) ID permanence
 
-`GM-NNN` (scenarios), `DR-NNN` (business rules), `CQ-NNN`/`SQ-NNN`/`UQ-NNN`
-(clarify questions), `BL-NNN` (backlog items) are permanent once assigned —
-never renumbered, never reformatted, across any regeneration or archive
-cycle.
+`MOD-NNN` (modules), `GM-NNN` (scenarios), `DR-NNN` (business rules),
+`CQ-NNN`/`SQ-NNN`/`UQ-NNN` (clarify questions), `BL-NNN` (backlog items) are
+permanent once assigned — never renumbered, never reformatted, across any
+regeneration or archive cycle.
+
+An id that no longer describes anything becomes a **tombstone** rather than
+disappearing (`### MOD-004 — WITHDRAWN <date>, superseded by MOD-002`, and the
+same shape for `DR`/`BL`/`GM`), so that any document still citing it fails
+loudly instead of silently pointing at whatever now occupies that position. A
+tombstoned id stays claimed forever and is never reused; `record` and
+`harness-collect` skip tombstoned scenarios while still counting their ids
+toward the next free one.
+
+`MOD-NNN` and `GM-NNN` are both **reconciled** across regenerations rather
+than regenerated: their producing collectors read the prior document *before*
+the archive step and hand the agent an id-level roster to match against.
+Without that, a re-run would silently re-point every fixture, manifest entry,
+and module tag hanging off those ids — without changing a single hash.
 
 ## (d) `harness-manifest.json` schema
 
@@ -513,3 +541,74 @@ which is what makes it excluded rather than merely hoped-over.
 This is guidance for scenario design and harness/test generation. The comparator
 needs no special case for it: once (g) makes normalization paths actually
 resolve, an ID listed there is genuinely skipped.
+
+## (l) The module hierarchy, and module selection
+
+A **module** (`MOD-NNN`) is a migration and acceptance unit — the "one flow at
+a time" slice a large legacy system is rebuilt and behaviourally signed off in.
+The hierarchy is:
+
+```
+MOD-NNN (module)  →  BL-0NN (backlog item)  →  DR-NNN (rule)  →  GM-NNN (scenario)
+```
+
+**Modules never fragment the corpus.** There is one `manifest.json`, one
+`decisions.md`, one `rebuild-backlog.md`, one `fixtures/` directory. A module is
+a **selection dimension** over that single shared corpus — never a per-module
+directory, never a per-module manifest. Splitting the corpus would make a
+cross-module flow unrepresentable, which is precisely the thing this hierarchy
+exists to keep visible.
+
+### (l.1) Who declares what — one direction per fact
+
+The map is written before any backlog exists, so ownership is declared once, in
+exactly one place, and copied thereafter:
+
+| Fact | Declared by | Copied to |
+|---|---|---|
+| A module's entities, rules, services, screens | `module-map.md` | — |
+| A backlog item's module | `rebuild-backlog.md`'s `**Module:**` field | — |
+| A scenario's module(s) | `scenarios.md`'s `Modules` field, derived once from the map's rule ownership | `manifest.json`'s `module_ids`, verbatim |
+
+Nothing re-derives a module downstream. `record` does not infer a scenario's
+module from its rules; `resolve` does not read `scenarios.md`; no agent computes
+module selection or a module verdict. `module-map.md`'s `Backlog items:` field is
+a back-filled convenience only — the backlog is authoritative for item
+membership.
+
+`record` performs two mechanical checks from declared data: a **hard error** on
+a declared `MOD-NNN` with no `### MOD-NNN` heading in `module-map.md` (an
+unmapped module tag selects nothing, silently — the same reasoning as (h)'s
+unmapped error code), and a **WARN** when a scenario's module disagrees with the
+module its own `BL` item is filed under. The warn never blocks the manifest: one
+of two analysis documents is wrong, bash cannot know which, and a documentation
+disagreement must not cost a capture run its evidence.
+
+### (l.2) Multi-module scenarios and the cross-module honesty rule
+
+A scenario whose pinned rules span modules is tagged with **all** of them. This
+is required, not an edge case to round down:
+
+- `specclaw-bf-replay resolve MOD-NNN` selects it for **every** module it names
+  (ANY-of), because it is the record of a flow crossing those boundaries.
+- The report's module rollup counts it toward **every** module it touches, and
+  each module's row states **how many of its fixtures are shared, naming the
+  other modules**. A module verdict that silently excluded its shared flows
+  would be a false verdict — those are exactly the flows that break when one
+  module is rebuilt in isolation.
+- A module pulled into a run only because a shared fixture touches it is marked
+  `PARTIAL`, with its verdict qualified `(of the selected subset only)`, so a
+  glimpse of another module can never read as that module's verdict.
+- A module-scoped design merge may not retire a cross-module scenario: it is
+  preserved and reported, because a one-module run has no authority over
+  another module's coverage.
+
+### (l.3) Selection only
+
+`--module` changes **which** fixtures are compared and **nothing** about what a
+comparison means. Field classification (j.1), row class (j.2), the four-step
+overall verdict and its exit codes (j.3), the same-layer rule (i), sanctioning,
+and evidence retention are all identical across the three selection scopes
+(change / module / corpus). The overall verdict is always computed over the whole
+selected set; a per-module verdict is a reporting view over the same rows and
+gates nothing.
