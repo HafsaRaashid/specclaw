@@ -4,6 +4,69 @@ All notable changes to specclaw are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.11.0] — 2026-08-12
+
+### Added
+- **Module bypass — build a module before its dependencies exist, without
+  making that invisible.** The module dependency graph stays the *recommended*
+  order; a team can now depart from it deliberately, per unmet dependency, and
+  everything built on top of the departure is marked until the real module
+  lands. Working out of order was always possible by simply doing it — what
+  was missing was any way for a later reader to tell a verdict earned against
+  a real module from one earned against a placeholder.
+- **`.specclaw/analysis/module-stubs.md`** — the `ST-###` bypass registry. One
+  entry per bypass: which `BL-0##`/`MOD-###` it substitutes, the strategy
+  (`stub-interface` | `mock-data` | `feature-flag` | `item-split`), what it
+  concretely fakes (cited `file:line` in the rebuild, written at build time),
+  which items consumed it, who chose it and when. One shared corpus,
+  **append/update-in-place, never archived** — like `clarifications.md`.
+  `ST-###` ids are permanent; retirement updates an entry, never deletes it.
+- **`/specclaw:propose` gained dependency awareness** (it had none). When a
+  proposed item depends on a *cross-module* item with no completion signal,
+  propose stops and presents the four strategies with concrete sketches
+  grounded in what the dependency actually is, plus "it is actually built" and
+  "abort and follow the recommended order". **A bypass is always an explicit
+  human choice** — never agent-decided, never a default; entries record a
+  named chooser and a date. Same-module dependencies are refused rather than
+  offered a strategy: stubbing one means stubbing part of the thing being
+  built. Three new bash subcommands (`bypass-check`, `stub-append`,
+  `stub-update`) own the mechanical half; agents never compute any of it.
+- **Spec carry-through.** `spec.md` gains `## Bypassed Dependencies`, and on a
+  bypassed change **every** acceptance criterion is labelled `[real]` or
+  `[stub: ST-###]`. Two criteria are mandatory per stub: the dev/test-scoping
+  assertion naming the repo's own isolation mechanism, and the
+  registry-completion obligation.
+- **Stub taint in `/specclaw:bf-replay`.** Any fixture verifying an item that
+  consumed an `ACTIVE` stub is stamped `stub_refs`, carried through
+  `compare.json` into the report (`(with active stubs: ST-###)` on the verdict
+  line, a **Stubs In Effect** section, a per-row Stubs column) and into
+  `run-metadata.json`. A three-state flow (`ACTIVE` → `RETIRING` → `RETIRED`)
+  makes a clean re-replay able to honestly retire a stub.
+- **`module-status.md`** gained a **Stub-tainted items** column (latest run per
+  item wins), renders `PASS*` while it is non-zero, and lists per module the
+  `ST-###` entries faking *that* module for others — so "who is waiting on the
+  real MOD-005" is one lookup.
+- **`/specclaw:bf-rebuild-plan`** gained a bash-computed **Stub Retirement**
+  block naming, per stub, the consuming items and the exact replay commands,
+  with each step attributed to human or Claude — and a per-item
+  `⚠ STUB-BACKED` marker alongside `⚠ PROVISIONAL`.
+- `run-stub-registry-tests.sh` (42 assertions), registered in CI.
+
+### Unchanged by design
+- **Verdict logic and exit codes.** Taint enters no rule of `CONTRACT.md`
+  (j.3), adds no `field_class` or `divergence_class`, and has no exit code of
+  its own. It marks a PASS as resting on something unreal; **it never softens
+  a FAIL**, which is asserted directly in the new suite. Unlike `PROVISIONAL`,
+  which participates in the verdict because an open question means nobody has
+  decided what correct is, a stub leaves the comparison sound and qualifies
+  only its standing.
+- **No re-record.** `manifest.json` and its schema number are untouched.
+- **Greenfield and non-brownfield projects see nothing.** No registry means no
+  stubs, silently; `bypass-check` returns `applicable: false` and propose
+  behaves exactly as before.
+- Evidence immutability, the fixture contract, and dependency ordering as the
+  default recommendation.
+
 ## [0.10.0] — 2026-08-11
 
 ### Added

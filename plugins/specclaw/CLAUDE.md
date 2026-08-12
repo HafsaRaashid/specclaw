@@ -61,6 +61,8 @@ Suites live in `tests/`, are bash + coreutils only (no jq in the suites themselv
 | `run-long-orchestration-tests.sh` | `run-long`, the e2e tier, `browser-lock wrap`, PR-aware status |
 | `run-synth-agent-tests.sh` | dynamically synthesized build subagents |
 | `run-shellcheck-gate-tests.sh` | the shellcheck gate itself |
+| `run-replay-classification-tests.sh` | field-path language, record-time validation, divergence classification, verdict order |
+| `run-stub-registry-tests.sh` | module bypass: `bypass-check` classification, the declared `BUILT:` signal, registry refusals, and that stub taint changes no verdict or exit code |
 
 `shellcheck-gate.sh` fails CI on any shellcheck finding absent from `shellcheck-baseline.txt` (pairs of `<path> <SCxxxx>`, no line numbers, so unrelated edits do not churn it). Fix a new finding or add a targeted `# shellcheck disable=SCxxxx` with a rationale — never silence one by appending to the baseline. It skips with exit 0 when shellcheck is not installed, so the suite still runs locally.
 

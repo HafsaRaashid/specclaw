@@ -1709,11 +1709,16 @@ cmd_finalize() {
   # a retained run can never be cited later as clean proof without the
   # qualification travelling with it. `module-status` reads stub_tainted_items
   # across runs to find each item's LATEST verdict.
-  local stubs_effect tainted_items stub_tainted_flag
+  local stubs_effect tainted_items covered_items stub_tainted_flag
   stubs_effect="$(jq -c '[ (.stubs_in_effect // [])[].id ]' "$selection" 2>/dev/null || echo '[]')"
   tainted_items="$(jq -c '[ .fixtures[] | select(((.stub_refs // []) | length) > 0)
                             | .verifies_backlog_item // "" | [scan("BL-[0-9]{3}")][0]
                             | select(. != null) ] | unique' "$selection" 2>/dev/null || echo '[]')"
+  # Every BL item this run touched, tainted or not. Without it, "this item's
+  # LATEST verdict is stub-tainted" is not computable: a later clean run would
+  # be invisible, and the item would read as tainted forever.
+  covered_items="$(jq -c '[ .fixtures[] | .verifies_backlog_item // ""
+                            | [scan("BL-[0-9]{3}")][0] | select(. != null) ] | unique' "$selection" 2>/dev/null || echo '[]')"
   stub_tainted_flag="$(jq -r 'if (.stub_tainted_exercised // 0) > 0 then "true" else "false" end' <<< "$counts")"
 
   jq -n \
@@ -1732,6 +1737,7 @@ cmd_finalize() {
     --argjson counts "$counts" \
     --argjson stubs_in_effect "$stubs_effect" \
     --argjson stub_tainted_items "$tainted_items" \
+    --argjson bl_items_covered "$covered_items" \
     --argjson stub_tainted "$stub_tainted_flag" \
     '{
       run_id: $run_id,
@@ -1750,7 +1756,8 @@ cmd_finalize() {
       overall_verdict: $counts.overall,
       stub_tainted: $stub_tainted,
       stubs_in_effect: $stubs_in_effect,
-      stub_tainted_items: $stub_tainted_items
+      stub_tainted_items: $stub_tainted_items,
+      bl_items_covered: $bl_items_covered
     }' > "$evidence_dir/run-metadata.json"
 
   # Committable-by-design: evidence is meant to travel with the change's PR.

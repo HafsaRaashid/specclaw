@@ -62,6 +62,30 @@
       A run invoked with --discard retained no evidence and is therefore
       invisible here, by design.
 
+  Stub-tainted items
+      How many of this module's items have a LATEST replay verdict that was
+      earned while a dependency-bypass stub (templates/CONTRACT.md (m)) stood
+      in for a module that is not built yet.
+
+      LATEST is load-bearing. For each item, the newest retained run that
+      COVERED it wins — so an item tainted in March and re-run clean in April
+      counts as clean. Reading only "which runs were tainted" would keep
+      reporting March forever.
+
+      Unlike the verdict column, this counts runs at EVERY scope. A
+      change-scoped run records no per-module verdict, but it does record
+      exactly which items it exercised and which of those rested on a stub,
+      and that is a per-item fact no scope distorts.
+
+      An item consuming an ACTIVE stub that no run has ever exercised is NOT
+      counted here — it has no verdict at all, tainted or otherwise. Those
+      are named under the stub table instead, because "not yet checked" and
+      "checked against a placeholder" are different states and collapsing
+      them would overstate what has been verified.
+
+      When this column is non-zero the verdict column reads PASS* rather
+      than PASS. The two travel together so neither can be read alone.
+
   Open questions
       OPEN entries in pending-questions.md plus unanswered entries in
       clarifications.md whose text names this MOD-###. These are soft
@@ -74,6 +98,10 @@
   statement about planning, capture, and comparison coverage — not about
   completion. A module whose every fixture PASSed is a module whose recorded
   behaviour matched; it is not a module signed off.
+
+  And a module showing PASS* has not even matched cleanly on its own terms:
+  some of what it was compared against was a deliberate placeholder for a
+  module nobody has built yet.
 -->
 
 ## Modules
@@ -81,6 +109,28 @@
 {{module_table}}
 
 {{unassigned_note}}
+
+## Stubs In Effect By Module
+
+<!--
+  Every ACTIVE dependency-bypass stub, keyed by the module it FAKES — so
+  "who is waiting on the real MOD-005?" is one lookup rather than a scan of
+  every item's dependency list.
+
+  Read the Consumed by column as the answer: those are the items already
+  built against a placeholder for that module, whose verdicts carry an
+  asterisk until it lands and they are re-replayed.
+
+  ACTIVE only. A RETIRING entry is mid-verification and taints nothing; a
+  RETIRED one is history. Both stay in module-stubs.md forever — the record
+  that an item was built out of order outlives the stub — but neither is
+  something anyone is still waiting on, which is what this table is for.
+
+  The module an entry fakes is the MOD-### its Substitutes field names, or
+  the module owning the BL item it names. Never inferred from anything else.
+-->
+
+{{stubs_by_module}}
 
 ## Notes
 

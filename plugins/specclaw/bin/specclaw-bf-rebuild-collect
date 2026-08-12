@@ -1365,7 +1365,31 @@ cmd_render() {
   done
 
   # ── Gate + Verification per active item ─────────────────────────────────
-  declare -A GATE VERIF GATE_RANK VERIF_RANK PROVISIONAL UI_FIDELITY
+  declare -A GATE VERIF GATE_RANK VERIF_RANK PROVISIONAL UI_FIDELITY STUB_BACKED
+
+  # ── Stub registry (CONTRACT.md (m)) — read fresh, never persisted ────────
+  # Same tier as PROVISIONAL: a marker recomputed from nothing on every run,
+  # so retiring a stub clears every consuming item's marker automatically with
+  # no manual cleanup and no directive needed to REMOVE one.
+  #
+  # Absent registry = no stubs, silently. Most projects never bypass anything.
+  declare -A STUB_SUBSTITUTES STUB_STATUS_MAP STUB_STRATEGY_MAP STUB_CONSUMERS
+  local st_ids="" stubs_file_r
+  stubs_file_r="$(stubs_file_path "$specclaw_dir_abs")"
+  if [ -f "$stubs_file_r" ]; then
+    mkdir -p "$workdir/stubs"
+    split_blocks "$stubs_file_r" "$workdir/stubs" "ST"
+    local sf sidr
+    for sf in "$workdir/stubs"/ST-*.md; do
+      [ -f "$sf" ] || continue
+      sidr="$(block_id "$sf")"
+      st_ids="${st_ids} ${sidr}"
+      STUB_STATUS_MAP[$sidr]="$(stub_status_of "$(block_single_field "$sf" "Status")")"
+      STUB_SUBSTITUTES[$sidr]="$(block_single_field "$sf" "Substitutes")"
+      STUB_STRATEGY_MAP[$sidr]="$(block_single_field "$sf" "Strategy")"
+      STUB_CONSUMERS[$sidr]="$(block_single_field "$sf" "Consumed by")"
+    done
+  fi
   UI_FIDELITY[__init__]=1; unset 'UI_FIDELITY[__init__]'
   for id in $active_ids; do
     local blocked_by="" open_qs="" cid
@@ -1456,6 +1480,25 @@ cmd_render() {
       PROVISIONAL[$id]="⚠ PROVISIONAL — pending ${prov_cqs//,/, }"
     fi
 
+    # ── STUB-BACKED (CONTRACT.md (m.3)) — its own marker line, deliberately
+    # NOT folded into the Verification: field. Verification answers "is there
+    # a fixture for this?"; taint answers "was the thing under test real?".
+    # Orthogonal axes, so this rides alongside Gate/Verification exactly as
+    # PROVISIONAL does, and is recomputed from the registry every run — a
+    # retired stub clears it with no cleanup.
+    local stub_marks="" sid2
+    for sid2 in $st_ids; do
+      [ "${STUB_STATUS_MAP[$sid2]}" = "ACTIVE" ] || continue
+      case " ${STUB_CONSUMERS[$sid2]//,/ } " in
+        *" ${id} "*) ;;
+        *) continue ;;
+      esac
+      stub_marks="${stub_marks}${stub_marks:+; }${sid2} (${STUB_STRATEGY_MAP[$sid2]}, faking ${STUB_SUBSTITUTES[$sid2]})"
+    done
+    if [ -n "$stub_marks" ]; then
+      STUB_BACKED[$id]="⚠ STUB-BACKED — built against ${stub_marks}. Any replay verdict for this item says so until the stub is retired."
+    fi
+
     if [ -n "${UNVERIF_CQ[$id]:-}" ]; then
       VERIF[$id]="UNVERIFIABLE — acceptance must come from a stakeholder decision, not fixture comparison (see ${UNVERIF_CQ[$id]}). ${UNVERIF_REASON[$id]}"
       VERIF_RANK[$id]=1
@@ -1524,6 +1567,11 @@ cmd_render() {
     if [ -n "${PROVISIONAL[$id]:-}" ]; then
       provisional_block="
 ${PROVISIONAL[$id]}
+"
+    fi
+    if [ -n "${STUB_BACKED[$id]:-}" ]; then
+      provisional_block="${provisional_block}
+${STUB_BACKED[$id]}
 "
     fi
     entry="### ${id} — ${FINAL_TITLE[$id]}
@@ -1845,6 +1893,84 @@ ${ui_status_block}
 
 **Recommended next item to propose:** ${recommended}"
 
+  # ── Stub Retirement (CONTRACT.md (m.4)) ──────────────────────────────────
+  #
+  # For every ACTIVE stub, is the thing it substitutes built yet? The trigger
+  # is narrow and declared: a "BUILT:" line in the substituted item's own
+  # Status-notes block. Prose is not parsed — specclaw records no built state,
+  # and inferring "done last week" from free text would be the guess this
+  # whole mechanism exists to prevent.
+  #
+  # When a stub substitutes a whole MOD-###, every active item of that module
+  # must carry the signal: a module is not built because one of its items is.
+  local stub_retirement="" ready_block="" waiting_block="" sid3 today_str
+  today_str="$(date +%Y-%m-%d)"
+  for sid3 in $st_ids; do
+    case "${STUB_STATUS_MAP[$sid3]}" in
+      ACTIVE|RETIRING) ;;
+      *) continue ;;
+    esac
+    local subs="${STUB_SUBSTITUTES[$sid3]}" consumers="${STUB_CONSUMERS[$sid3]}"
+    local cmds="" replay_cmds="" c
+    for c in $(printf '%s' "$consumers" | tr ',' ' '); do
+      case "$c" in BL-[0-9][0-9][0-9]) ;; *) continue ;; esac
+      cmds="${cmds}${cmds:+ }${c}"
+      replay_cmds="${replay_cmds}${replay_cmds:+, }\`/specclaw:bf-replay <the change that built ${c}>\`"
+    done
+
+    if [ "${STUB_STATUS_MAP[$sid3]}" = "RETIRING" ]; then
+      ready_block="${ready_block}- **${sid3}** — already \`RETIRING\`. Re-replay its consumers (${cmds// /, }) and, on a clean run, flip it to \`RETIRED\` citing that run id. A FAIL sends it back to \`ACTIVE\`.
+"
+      continue
+    fi
+
+    # Which BL items must be built for this stub to be retirable.
+    local required="" mod_target
+    mod_target="$(printf '%s' "$subs" | { grep -oE 'MOD-[0-9]{3}' | head -1; } || true)"
+    local subs_bl; subs_bl="$(printf '%s' "$subs" | { grep -oE 'BL-[0-9]{3}' | head -1; } || true)"
+    if [ -n "$subs_bl" ]; then
+      required="$subs_bl"
+    elif [ -n "$mod_target" ]; then
+      local aid
+      for aid in $active_ids; do
+        [ "${ITEM_MOD[$aid]:-}" = "$mod_target" ] && required="${required}${required:+ }${aid}"
+      done
+    fi
+
+    local unbuilt=""
+    for c in $required; do
+      if [ -f "$workdir/existing/${c}.md" ]; then
+        built_signal_of "$workdir/existing/${c}.md" >/dev/null 2>&1 && continue
+      fi
+      unbuilt="${unbuilt}${unbuilt:+, }${c}"
+    done
+
+    if [ -z "$required" ]; then
+      waiting_block="${waiting_block}- **${sid3}** — substitutes \`${subs}\`, which resolves to no active backlog item. Nothing here can tell whether it is built; check by hand.
+"
+    elif [ -z "$unbuilt" ]; then
+      ready_block="${ready_block}- **${sid3}** — ${subs} is declared BUILT. Retire it:
+  1. *(human)* remove or disable the stub code, then \`specclaw-bf-rebuild-collect stub-update .specclaw ${sid3} --status \"RETIRING ${today_str}\"\`
+  2. *(Claude)* re-replay each consumer: ${replay_cmds}
+  3. *(Claude, on a clean run only)* \`stub-update .specclaw ${sid3} --status \"RETIRED <date>, cleared by run <run_id>\" --retirement \"<date>, run <run_id>, re-replayed ${cmds// /, }\"\`
+  4. *(human)* on a FAIL, flip it back to \`ACTIVE\` — the real module does not yet carry these items.
+"
+    else
+      waiting_block="${waiting_block}- **${sid3}** — waiting on ${unbuilt} (no declared \`BUILT:\` note). Consumed by ${cmds// /, }.
+"
+    fi
+  done
+  if [ -n "$ready_block" ] || [ -n "$waiting_block" ]; then
+    stub_retirement="${ready_block:+### Ready to retire
+
+${ready_block}
+}${waiting_block:+### Still waiting
+
+${waiting_block}}"
+  else
+    stub_retirement="_No active dependency bypass stubs. Every item is being built on the real modules it depends on._"
+  fi
+
   # ── Change report (refresh only) ─────────────────────────────────────────
   local change_report="Not applicable — this is the first-ever run."
   if $is_refresh; then
@@ -2029,6 +2155,7 @@ ${scr_cov}
   doc="$(substitute "$doc" '{{coverage_check}}' "$coverage_check")"
   doc="$(substitute "$doc" '{{deferred_items}}' "$deferred_body")"
   doc="$(substitute "$doc" '{{change_report}}' "$change_report")"
+  doc="$(substitute "$doc" '{{stub_retirement}}' "$stub_retirement")"
 
   printf '%s\n' "$doc" > "$backlog_file"
   rm -f "$draft_file"
@@ -2085,7 +2212,7 @@ cmd_module_status() {
   done
 
   # ── Backlog items per module: active / struck / deferred ─────────────────
-  declare -A MS_PLANNED MS_TOTAL
+  declare -A MS_PLANNED MS_TOTAL ITEM_MODULE
   local m unassigned_n=0
   for m in $mod_ids; do MS_PLANNED[$m]=0; MS_TOTAL[$m]=0; done
   if [ -f "$backlog_file" ]; then
@@ -2099,6 +2226,7 @@ cmd_module_status() {
         unassigned_n=$((unassigned_n + 1))
         continue
       fi
+      ITEM_MODULE[$(block_id "$f")]="$itemmod"
       status="active"
       grep -qE '^\*\*Status:\*\* Deferred' "$f" && status="deferred"
       [[ "$title" == STRUCK* ]] && status="struck"
@@ -2167,6 +2295,103 @@ cmd_module_status() {
                 -type f -name run-metadata.json 2>/dev/null || true)
   fi
 
+  # ── Stub taint per module (CONTRACT.md (m.3)) ────────────────────────────
+  #
+  # "How many of this module's items have a LATEST verdict that was earned
+  # while a bypass stub was standing in for something?"
+  #
+  # LATEST is the load-bearing word, and it is why this reads bl_items_covered
+  # rather than only stub_tainted_items: an item tainted in March and re-run
+  # clean in April is no longer tainted, and a column that could not see the
+  # April run would keep reporting the March one forever. So for each item,
+  # find the newest run that COVERED it (run_id is a sortable timestamp), then
+  # ask whether that particular run tainted it.
+  #
+  # Unlike the verdict column, this counts runs at EVERY scope — change,
+  # module, and --all. A change-scoped run records no per-module verdict, but
+  # it does record exactly which items it exercised and which of those rested
+  # on a stub, and that is a per-item fact no scope distorts.
+  declare -A ITEM_LATEST_RUN ITEM_LATEST_TAINTED
+  if command -v jq &>/dev/null; then
+    local meta mrun line bl
+    while IFS= read -r meta; do
+      [ -f "$meta" ] || continue
+      mrun="$(jq -r '.run_id // ""' "$meta" 2>/dev/null | tr -d '\r' || true)"
+      [ -n "$mrun" ] || continue
+      while IFS=$'\t' read -r bl tainted; do
+        [ -z "$bl" ] && continue
+        if [ -z "${ITEM_LATEST_RUN[$bl]:-}" ] || [[ "$mrun" > "${ITEM_LATEST_RUN[$bl]}" ]]; then
+          ITEM_LATEST_RUN[$bl]="$mrun"
+          ITEM_LATEST_TAINTED[$bl]="$tainted"
+        fi
+      # `tr -d '\r'`, as everywhere else jq output is read here: this
+      # toolchain's jq writes CRLF, which would otherwise land a literal
+      # carriage return inside the flag and make every equality test fail
+      # silently — the count reads 0 and nothing looks wrong.
+      # The item is bound to $b before the membership test: inside
+      # `$t | index(.)` the `.` would rebind to $t itself, which is truthy
+      # whenever $t is non-empty and would mark every covered item tainted.
+      done < <(jq -r '
+        (.stub_tainted_items // []) as $t
+        | (.bl_items_covered // .stub_tainted_items // [])[] as $b
+        | $b + "\t" + (if ($t | index($b)) then "1" else "0" end)
+      ' "$meta" 2>/dev/null | tr -d '\r' || true)
+    done < <(find "$specclaw_dir_abs/replay/evidence" "$specclaw_dir_abs/changes" \
+                -type f -name run-metadata.json 2>/dev/null || true)
+  fi
+
+  declare -A MS_TAINTED
+  for m in $mod_ids; do MS_TAINTED[$m]=0; done
+  local bl_id
+  for bl_id in "${!ITEM_LATEST_TAINTED[@]}"; do
+    [ "${ITEM_LATEST_TAINTED[$bl_id]}" = "1" ] || continue
+    local owner="${ITEM_MODULE[$bl_id]:-}"
+    [ -n "$owner" ] || continue
+    MS_TAINTED[$owner]=$(( MS_TAINTED[$owner] + 1 ))
+  done
+
+  # ── Which stubs fake THIS module for other people's items ────────────────
+  # The "who is waiting on the real MOD-005" lookup, in one place. An entry
+  # substitutes this module when it names the MOD-### directly, or names a
+  # BL item this module owns.
+  declare -A MS_FAKED_BY
+  local stub_rows="" unbuilt_note_items=""
+  local stubs_file; stubs_file="$(stubs_file_path "$specclaw_dir_abs")"
+  if [ -f "$stubs_file" ]; then
+    mkdir -p "$workdir/stubs"
+    split_blocks "$stubs_file" "$workdir/stubs" "ST"
+    local sid sstatus ssubs sstrat scons schosen starget consumer
+    for f in "$workdir/stubs"/ST-*.md; do
+      [ -f "$f" ] || continue
+      sid="$(block_id "$f")"
+      sstatus="$(stub_status_of "$(block_single_field "$f" "Status")")"
+      [ "$sstatus" = "ACTIVE" ] || continue
+      ssubs="$(block_single_field "$f" "Substitutes")"
+      sstrat="$(block_single_field "$f" "Strategy")"
+      scons="$(block_single_field "$f" "Consumed by")"
+      schosen="$(block_single_field "$f" "Chosen by")"
+      # Which module this entry stands in for: the MOD-### it names, else the
+      # module owning the BL item it names. Never guessed from anything else.
+      starget="$(printf '%s' "$ssubs" | { grep -oE 'MOD-[0-9]{3}' | head -1; } || true)"
+      if [ -z "$starget" ]; then
+        local subs_bl; subs_bl="$(printf '%s' "$ssubs" | { grep -oE 'BL-[0-9]{3}' | head -1; } || true)"
+        [ -n "$subs_bl" ] && starget="${ITEM_MODULE[$subs_bl]:-}"
+      fi
+      [ -n "$starget" ] || starget="—"
+      MS_FAKED_BY[$starget]="${MS_FAKED_BY[$starget]:-}${MS_FAKED_BY[$starget]:+, }${sid}"
+      stub_rows="${stub_rows}| ${sid} | ${starget} | ${ssubs} | ${sstrat} | ${scons} | ${schosen} |
+"
+      # An item consuming an ACTIVE stub that no run has ever exercised is a
+      # different state from a tainted verdict — there is no verdict at all —
+      # and rounding it into the count would overstate what has been checked.
+      for consumer in $(printf '%s' "$scons" | tr ',' ' '); do
+        case "$consumer" in BL-[0-9][0-9][0-9]) ;; *) continue ;; esac
+        [ -n "${ITEM_LATEST_RUN[$consumer]:-}" ] && continue
+        case " ${unbuilt_note_items} " in *" ${consumer} "*) ;; *) unbuilt_note_items="${unbuilt_note_items}${unbuilt_note_items:+ }${consumer}" ;; esac
+      done
+    done
+  fi
+
   # ── Open questions naming a module ───────────────────────────────────────
   declare -A MS_QS
   for m in $mod_ids; do MS_QS[$m]=0; done
@@ -2204,19 +2429,48 @@ cmd_module_status() {
   fi
 
   # ── Render ───────────────────────────────────────────────────────────────
-  local rows="" deps
+  local rows="" deps verdict_cell tainted_cell
   for m in $mod_ids; do
     deps="${MS_DEPS[$m]:-}"
     [ -n "$deps" ] && deps="${deps//,/, }" || deps="none"
-    rows="${rows}| ${m} | ${MS_NAME[$m]} | ${deps} | ${MS_PLANNED[$m]}/${MS_TOTAL[$m]} | ${MS_CAPTURED[$m]}/${MS_DESIGNED[$m]} | ${MS_VERDICT[$m]:-no module-scoped run} | ${MS_QS[$m]} |
+
+    # PASSED* is the whole point of this column pair: a module holding an item
+    # whose latest verdict rested on a stub has not been shown to work — part
+    # of what it was checked against was a placeholder. The asterisk and the
+    # count travel together so neither can be read without the other.
+    verdict_cell="${MS_VERDICT[$m]:-no module-scoped run}"
+    if [ "${MS_TAINTED[$m]}" -gt 0 ] && [ -n "${MS_VERDICT[$m]:-}" ]; then
+      verdict_cell="${verdict_cell/PASS/PASS\*}"
+    fi
+    if [ "${MS_TAINTED[$m]}" -gt 0 ]; then
+      tainted_cell="⚠ ${MS_TAINTED[$m]}"
+    else
+      tainted_cell="0"
+    fi
+
+    rows="${rows}| ${m} | ${MS_NAME[$m]} | ${deps} | ${MS_PLANNED[$m]}/${MS_TOTAL[$m]} | ${MS_CAPTURED[$m]}/${MS_DESIGNED[$m]} | ${verdict_cell} | ${tainted_cell} | ${MS_QS[$m]} |
 "
   done
-  [ -n "$rows" ] || rows="| — | _No active modules in module-map.md._ | — | — | — | — | — |
+  [ -n "$rows" ] || rows="| — | _No active modules in module-map.md._ | — | — | — | — | — | — |
 "
 
-  local table="| Module | Name | Depends on | Backlog items (planned/total) | Scenarios (captured/designed) | Latest replay verdict | Open questions |
-|---|---|---|---|---|---|---|
+  local table="| Module | Name | Depends on | Backlog items (planned/total) | Scenarios (captured/designed) | Latest replay verdict | Stub-tainted items | Open questions |
+|---|---|---|---|---|---|---|---|
 ${rows}"
+
+  # ── Stubs In Effect By Module ────────────────────────────────────────────
+  local stubs_section
+  if [ -n "$stub_rows" ]; then
+    stubs_section="| Stub | Fakes module | Substitutes | Strategy | Consumed by (items waiting on the real thing) | Chosen by |
+|---|---|---|---|---|---|
+${stub_rows}"
+    if [ -n "$unbuilt_note_items" ]; then
+      stubs_section="${stubs_section}
+> **${unbuilt_note_items// /, }** consume an ACTIVE stub but no retained replay run has ever exercised them, so they carry no verdict at all — tainted or otherwise. They are counted in no column above: \"not yet checked\" is a different state from \"checked against a placeholder\", and rounding one into the other would overstate what has been verified."
+    fi
+  else
+    stubs_section="_None — no active dependency bypass stubs. Every module is being built on the real modules it depends on._"
+  fi
 
   local unassigned_note=""
   if [ "$unassigned_n" -gt 0 ]; then
@@ -2235,8 +2489,14 @@ ${rows}"
 "
   [ -f "$manifest_file" ] || notes="${notes}- \`baseline/manifest.json\` does not exist — nothing is captured yet. Run the harness, then \`/specclaw:bf-baseline --record\`.
 "
-  notes="${notes}- A verdict here covers only **module-scoped** replay runs that retained evidence. A change-scoped or \`--all\` run exercises a module's fixtures too, but records no per-module verdict in its metadata — read that run's report's own **Module Rollup** section instead.
+  notes="${notes}- A verdict here covers only **module-scoped** replay runs that retained evidence. A change-scoped or \`--all\` run exercises a module's fixtures too, but records no per-module verdict in its metadata — read that run's report's own **Module Rollup** section instead. The **Stub-tainted items** column has no such limitation: it counts runs at every scope, because which items a run exercised and which of those rested on a stub is a per-item fact no scope distorts.
 - No number here says a module is *done*: specclaw records no built state for a backlog item, so these are planning, capture, and comparison coverage only."
+  local total_tainted=0
+  for m in $mod_ids; do total_tainted=$(( total_tainted + MS_TAINTED[$m] )); done
+  if [ "$total_tainted" -gt 0 ]; then
+    notes="${notes}
+- **A \`PASS*\` is not a PASS you can act on.** ${total_tainted} item(s) have a latest verdict earned while a bypass stub stood in for a module that is not built yet. The comparison ran and matched; part of what it matched against was a placeholder. Those items are re-replayed when the real module lands, and the asterisk clears then — see the stub table below for which stub, and \`.specclaw/analysis/rebuild-backlog.md\`'s **Stub Retirement** section for what it takes to clear each one."
+  fi
 
   local template_file="$SCRIPT_DIR/../templates/module-status.md"
   [ -f "$template_file" ] || die "Template missing: ${template_file}"
@@ -2247,6 +2507,7 @@ ${rows}"
   doc="$(substitute "$doc" '{{map_status}}' "${map_status:-<status line missing>}")"
   doc="$(substitute "$doc" '{{module_table}}' "$table")"
   doc="$(substitute "$doc" '{{unassigned_note}}' "$unassigned_note")"
+  doc="$(substitute "$doc" '{{stubs_by_module}}' "$stubs_section")"
   doc="$(substitute "$doc" '{{notes}}' "$notes")"
 
   local out_file="$analysis_dir/module-status.md"
