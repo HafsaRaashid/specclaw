@@ -95,6 +95,42 @@ Subcommands:
            rendering of documents whose own history is already archived.
            Exits non-zero only when module-map.md is missing.
 
+  bypass-check <specclaw_dir> <BL-###|--title "<item title>">
+           For /specclaw:propose. Classifies each of an item's "Depends on:"
+           entries so a human can be asked about the unmet ones: per
+           dependency, its module, whether it is same-module, whether its
+           own Status notes carry a declared "BUILT:" line, and whether an
+           ACTIVE/RETIRING stub already substitutes it. Emits JSON.
+
+           DECIDES NOTHING. It never picks a strategy and never concludes a
+           bypass is warranted — those are human acts (CONTRACT.md (m.2)).
+
+           Exits 0 with {"applicable": false} when there is no backlog, or
+           no resolvable BL-### — the inert path for a non-brownfield
+           change. An ambiguous --title is REPORTED, never resolved by
+           picking a candidate.
+
+  stub-append <specclaw_dir> --substitutes <BL-###|MOD-###> --strategy <s>
+              --consumed-by <BL-###[,...]> --chosen-by "<name>, <date>"
+              --summary "<one line>" [--fakes ...] [--implementation ...]
+              [--mock-seed <path>]
+           Appends one ### ST-### entry to .specclaw/analysis/module-stubs.md
+           (creating it from the template on first use), allocating the next
+           free id. Strategy must be one of: stub-interface, mock-data,
+           feature-flag, item-split. Prints the new id on stdout.
+
+           Refuses to write a malformed entry: no chooser, no consuming
+           item, or an unknown strategy is an error, not a blank field — an
+           entry that cannot be joined or traced looks like tracking without
+           being it.
+
+  stub-update <specclaw_dir> <ST-###> [--status ACTIVE|RETIRING|RETIRED]
+              [--fakes ...] [--implementation ...] [--mock-seed ...]
+              [--retirement ...] [--consumed-by-add BL-###]
+           Edits named fields of one existing entry IN PLACE. Never rewrites
+           the document and never deletes an entry — retirement is a Status
+           flip (CONTRACT.md (m.1)).
+
 Options:
   -h, --help    Show this help message
 EOF
@@ -463,6 +499,75 @@ mod_depends_on_ids() {
     return 0
   fi
   printf '%s' "$leading" | { grep -oE 'MOD-[0-9]{3}' | awk '!seen[$0]++' | paste -sd, -; } || true
+}
+
+# ─── Stub registry parsing (.specclaw/analysis/module-stubs.md) ─────────────
+#
+# The dependency-bypass registry, per templates/CONTRACT.md (m). Split with
+# the same generic split_blocks (prefix "ST"); fields read with the same
+# block_single_field the backlog and clarifications use.
+#
+# ABSENCE IS A NORMAL STATE. Most projects never bypass anything, so a missing
+# registry is an empty registry — silently. Nothing here warns about it, and
+# no caller degrades because of it.
+
+STUB_STRATEGIES="stub-interface mock-data feature-flag item-split"
+
+stubs_file_path() { printf '%s/analysis/module-stubs.md' "$1"; }
+
+# An entry's status normalized to exactly one of ACTIVE / RETIRING / RETIRED.
+# Only the FIRST token of the Status field is read — the rest is the date and
+# the clearing run id, which are prose to every mechanical reader. An
+# unrecognized value is reported as-is by the caller rather than coerced to
+# ACTIVE: silently treating a typo as "taints everything" or as "taints
+# nothing" are both wrong, and the caller can say which it saw.
+stub_status_of() {
+  local raw="$1" first
+  first="$(printf '%s' "$raw" | awk '{print toupper($1)}')"
+  case "$first" in
+    ACTIVE|RETIRING|RETIRED) printf '%s' "$first" ;;
+    *) printf '%s' "${first:-MISSING}" ;;
+  esac
+}
+
+# Next free ST-### id. Scans for the highest assigned number and adds one —
+# ids are permanent (CONTRACT.md (c)) and never reused, so a retired or
+# malformed entry still holds its number.
+next_stub_id() {
+  local stubs_file="$1" max=0 n
+  if [ -f "$stubs_file" ]; then
+    while IFS= read -r n; do
+      [ -z "$n" ] && continue
+      n=$((10#$n))
+      [ "$n" -gt "$max" ] && max="$n"
+    done < <({ grep -oE '^### ST-[0-9]+' "$stubs_file" 2>/dev/null | grep -oE '[0-9]+'; } || true)
+  fi
+  printf 'ST-%03d' $((max + 1))
+}
+
+# ─── The declared BUILT: signal ─────────────────────────────────────────────
+#
+# specclaw records NO built state for a backlog item. The only thing that can
+# stand in for one is a human saying so — and the only mechanically safe way
+# to read that is a declared token, not prose.
+#
+# So: a line beginning "BUILT:" (optionally bulleted) inside an item's own
+# "**Status notes (human-added):**" block, and nothing else. "done last week",
+# "shipped in #42", "✅" — none of these are parsed, deliberately. Inferring
+# completion from free text is exactly the guess the whole bypass mechanism
+# exists to prevent, and a false positive here silently skips the elicitation
+# that would otherwise have caught an unmet dependency.
+#
+# Prints the text after "BUILT:" when the signal is present; prints nothing
+# and returns 1 when it is not.
+built_signal_of() {
+  local block_file="$1" line
+  line="$(awk '
+    /^\*\*Status notes \(human-added\):\*\*/ { intail=1 }
+    intail && /^(- )?BUILT:/ { sub(/^(- )?BUILT:[[:space:]]*/, ""); print; exit }
+  ' "$block_file" 2>/dev/null || true)"
+  [ -n "$line" ] || return 1
+  printf '%s' "$line"
 }
 
 # ─── Subcommand: collect ─────────────────────────────────────────────────────
@@ -2151,6 +2256,375 @@ ${rows}"
   echo "Wrote $out_file ($(echo "$mod_ids" | wc -w | tr -d ' ') module(s)${unassigned_n:+, ${unassigned_n} unassigned item(s)}). Status view — regenerated in full every run, never archived." >&2
 }
 
+# ─── Subcommand: bypass-check ────────────────────────────────────────────────
+#
+# Answers ONE question for /specclaw:propose, mechanically: does this backlog
+# item depend on anything that is not there yet, and if so, what kind of
+# not-there is it?
+#
+# It decides nothing. It never picks a strategy, never writes a registry
+# entry, and never concludes that a bypass is warranted — those are human acts
+# (CONTRACT.md (m.2)). All it does is turn "Depends on: BL-014, BL-019" into a
+# per-dependency classification a human can be asked about.
+#
+# INERT BY DEFAULT. No backlog, or no resolvable BL id, exits 0 with
+# {"applicable": false} — /specclaw:propose then behaves exactly as it always
+# has. A greenfield project never sees any of this.
+
+cmd_bypass_check() {
+  local specclaw_dir="$1"; shift
+  [ -d "$specclaw_dir" ] || die "specclaw directory not found: $specclaw_dir"
+
+  local want_id="" want_title=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --title) want_title="${2:-}"; shift 2 ;;
+      BL-[0-9][0-9][0-9]) want_id="$1"; shift ;;
+      *) die "bypass-check: unrecognized argument '$1'. Usage: bypass-check <specclaw_dir> <BL-###|--title \"<item title>\">" ;;
+    esac
+  done
+  [ -n "$want_id" ] || [ -n "$want_title" ] || \
+    die "bypass-check: give either a BL-### id or --title \"<item title>\"."
+
+  local specclaw_dir_abs analysis_dir
+  specclaw_dir_abs="$(cd "$specclaw_dir" && pwd)"
+  analysis_dir="$specclaw_dir_abs/analysis"
+  local backlog_file="$analysis_dir/rebuild-backlog.md"
+  local stubs_file; stubs_file="$(stubs_file_path "$specclaw_dir_abs")"
+
+  # ── Inert path 1: no backlog at all. Not an error — this is what every
+  # non-brownfield project looks like. ──────────────────────────────────────
+  if [ ! -f "$backlog_file" ]; then
+    emit_json "{\"applicable\": false, \"reason\": \"no rebuild-backlog.md — this project has no module dependency graph, so there is nothing to bypass\", \"dependencies\": [], \"next_stub_id\": null}"
+    return 0
+  fi
+
+  local workdir; workdir="$(mktemp -d)"
+  # shellcheck disable=SC2064  # expand workdir now, not at trap time
+  trap "rm -rf '$workdir'" RETURN
+  mkdir -p "$workdir/items" "$workdir/stubs"
+  split_blocks "$backlog_file" "$workdir/items" "BL"
+
+  # ── Resolve the item ─────────────────────────────────────────────────────
+  # An id is taken at its word. A title is matched — exactly first, then by
+  # substring — and AMBIGUITY IS REPORTED, never broken by picking the first
+  # candidate. Guessing which item is being proposed would attach a bypass to
+  # the wrong item's dependency graph, which is worse than asking.
+  local item_id="" f id t norm_want norm_t
+  if [ -n "$want_id" ]; then
+    if [ -f "$workdir/items/${want_id}.md" ]; then
+      item_id="$want_id"
+    else
+      emit_json "{\"applicable\": false, \"reason\": \"$(json_escape "${want_id} is not an item in rebuild-backlog.md")\", \"dependencies\": [], \"next_stub_id\": null}"
+      return 0
+    fi
+  else
+    norm_want="$(printf '%s' "$want_title" | tr '[:upper:]' '[:lower:]' | tr -s '[:space:]' ' ' | sed -E 's/^ | $//g')"
+    local exact="" partial="" partial_n=0
+    for f in "$workdir/items"/BL-*.md; do
+      [ -f "$f" ] || continue
+      id="$(block_id "$f")"
+      t="$(block_title_after_dash "$f")"
+      case "$t" in STRUCK*) continue ;; esac
+      norm_t="$(printf '%s' "$t" | tr '[:upper:]' '[:lower:]' | tr -s '[:space:]' ' ' | sed -E 's/^ | $//g')"
+      if [ "$norm_t" = "$norm_want" ]; then exact="$id"; break; fi
+      case "$norm_t" in *"$norm_want"*) partial="${partial}${partial:+, }${id}"; partial_n=$((partial_n + 1)) ;; esac
+    done
+    if [ -n "$exact" ]; then
+      item_id="$exact"
+    elif [ "$partial_n" -eq 1 ]; then
+      item_id="$partial"
+    elif [ "$partial_n" -gt 1 ]; then
+      emit_json "{\"applicable\": false, \"reason\": \"$(json_escape "\"${want_title}\" matches more than one backlog item (${partial}) — re-run naming the BL-### id directly. Picking one would attach any bypass to the wrong item's dependencies.")\", \"dependencies\": [], \"next_stub_id\": null}"
+      return 0
+    else
+      emit_json "{\"applicable\": false, \"reason\": \"$(json_escape "\"${want_title}\" matches no active item in rebuild-backlog.md — this change is not backlog-driven, so no dependency check applies")\", \"dependencies\": [], \"next_stub_id\": null}"
+      return 0
+    fi
+  fi
+
+  local item_file="$workdir/items/${item_id}.md"
+  local item_title item_module item_deps
+  item_title="$(block_title_after_dash "$item_file")"
+  item_module="$(printf '%s' "$(block_single_field "$item_file" "Module")" | { grep -oE 'MOD-[0-9]{3}' | head -1; } || true)"
+  item_deps="$(depends_on_ids "$(block_single_field "$item_file" "Depends on")")"
+
+  # ── Parse the registry (absent = empty, silently) ────────────────────────
+  # Indexed by the id each entry substitutes, so a dependency lookup is a
+  # direct hit rather than a scan.
+  declare -A STUB_STATUS STUB_SUBS STUB_CONSUMED STUB_STRATEGY
+  local stub_ids=""
+  if [ -f "$stubs_file" ]; then
+    split_blocks "$stubs_file" "$workdir/stubs" "ST"
+    for f in "$workdir/stubs"/ST-*.md; do
+      [ -f "$f" ] || continue
+      id="$(block_id "$f")"
+      stub_ids="${stub_ids} ${id}"
+      STUB_STATUS[$id]="$(stub_status_of "$(block_single_field "$f" "Status")")"
+      STUB_SUBS[$id]="$(block_single_field "$f" "Substitutes")"
+      STUB_CONSUMED[$id]="$(block_single_field "$f" "Consumed by")"
+      STUB_STRATEGY[$id]="$(block_single_field "$f" "Strategy")"
+    done
+  fi
+
+  # ── Classify each dependency ─────────────────────────────────────────────
+  local deps_json="" first=true dep
+  local n_needs=0 n_same=0 n_built=0 n_covered=0 n_unknown=0
+  for dep in $(printf '%s' "$item_deps" | tr ',' ' '); do
+    [ -z "$dep" ] && continue
+    local dep_file="$workdir/items/${dep}.md"
+    local dep_title="" dep_module="" dep_state="active" built_note="" action=""
+    local stub_id="null" stub_status="null" stub_strategy="null"
+
+    if [ ! -f "$dep_file" ]; then
+      # A dangling dependency is a backlog integrity problem, not a bypass
+      # decision. Reported so propose can surface it; never silently treated
+      # as either satisfied or unmet.
+      action="dependency-unknown"
+      n_unknown=$((n_unknown + 1))
+    else
+      dep_title="$(block_title_after_dash "$dep_file")"
+      dep_module="$(printf '%s' "$(block_single_field "$dep_file" "Module")" | { grep -oE 'MOD-[0-9]{3}' | head -1; } || true)"
+      case "$dep_title" in STRUCK*) dep_state="struck" ;; esac
+      grep -qE '^\*\*Status:\*\* Deferred' "$dep_file" && dep_state="deferred"
+      built_note="$(built_signal_of "$dep_file" || true)"
+
+      # Does an ACTIVE/RETIRING entry already substitute this dependency for
+      # THIS item? Both halves matter: an entry faking BL-014 for BL-021 says
+      # nothing about BL-030 also depending on BL-014.
+      local s
+      for s in $stub_ids; do
+        case "${STUB_STATUS[$s]}" in ACTIVE|RETIRING) ;; *) continue ;; esac
+        # Substring is sufficient and unambiguous: ids are fixed-width
+        # (BL-014 can never be a prefix of another BL id), and the field's
+        # shape is "BL-014 (MOD-005)" or a bare "MOD-007".
+        case "${STUB_SUBS[$s]}" in
+          *"${dep}"*) ;;
+          *) continue ;;
+        esac
+        stub_id="\"${s}\""; stub_status="\"${STUB_STATUS[$s]}\""
+        stub_strategy="\"$(json_escape "${STUB_STRATEGY[$s]}")\""
+        case " ${STUB_CONSUMED[$s]//,/ } " in
+          *" ${item_id} "*) action="covered-by-active-stub" ;;
+          *) action="stub-exists-not-consumed" ;;
+        esac
+        break
+      done
+
+      if [ -z "$action" ]; then
+        if [ "$dep_state" = "struck" ]; then
+          action="dependency-struck"
+        elif [ -n "$built_note" ]; then
+          action="ok-built"
+        elif [ -n "$item_module" ] && [ "$dep_module" = "$item_module" ]; then
+          # NOT bypassable. A same-module dependency is the item's own
+          # prerequisite, not a cross-boundary wait — stubbing it would be
+          # stubbing part of the thing being built.
+          action="same-module-prerequisite"
+        else
+          action="needs-bypass"
+        fi
+      fi
+    fi
+
+    case "$action" in
+      needs-bypass|stub-exists-not-consumed) n_needs=$((n_needs + 1)) ;;
+      same-module-prerequisite) n_same=$((n_same + 1)) ;;
+      ok-built) n_built=$((n_built + 1)) ;;
+      covered-by-active-stub) n_covered=$((n_covered + 1)) ;;
+    esac
+
+    if $first; then first=false; else deps_json="${deps_json}, "; fi
+    deps_json="${deps_json}{\"id\": \"${dep}\", \"title\": \"$(json_escape "$dep_title")\", \"module\": $([ -n "$dep_module" ] && printf '"%s"' "$dep_module" || printf 'null'), \"same_module\": $([ -n "$item_module" ] && [ "$dep_module" = "$item_module" ] && printf 'true' || printf 'false'), \"state\": \"${dep_state}\", \"built_signal\": \"$([ -n "$built_note" ] && printf 'declared' || printf 'unknown')\", \"built_note\": $([ -n "$built_note" ] && printf '"%s"' "$(json_escape "$built_note")" || printf 'null'), \"existing_stub\": ${stub_id}, \"existing_stub_status\": ${stub_status}, \"existing_stub_strategy\": ${stub_strategy}, \"action\": \"${action}\"}"
+  done
+
+  emit_json "{
+  \"applicable\": true,
+  \"item\": {\"id\": \"${item_id}\", \"title\": \"$(json_escape "$item_title")\", \"module\": $([ -n "$item_module" ] && printf '"%s"' "$item_module" || printf 'null')},
+  \"dependencies\": [${deps_json}],
+  \"summary\": {\"needs_bypass\": ${n_needs}, \"same_module_unmet\": ${n_same}, \"already_built\": ${n_built}, \"covered_by_active_stub\": ${n_covered}, \"unknown_dependency\": ${n_unknown}},
+  \"registry_exists\": $([ -f "$stubs_file" ] && printf 'true' || printf 'false'),
+  \"next_stub_id\": \"$(next_stub_id "$stubs_file")\"
+}"
+}
+
+# ─── Subcommands: stub-append / stub-update ──────────────────────────────────
+#
+# Bash owns this file, exactly as it owns rebuild-backlog.md — for the same
+# reason: an id-stable, append-only corpus is safer enforced deterministically
+# than trusted to an LLM rewriting a whole document repeatedly.
+#
+# stub-append CREATES an entry (allocating the next id); stub-update EDITS
+# named fields of an existing one in place. Neither ever rewrites the file
+# wholesale, and nothing anywhere deletes an entry (CONTRACT.md (m.1)).
+
+stub_set_field() {
+  # Replace a field's line inside one ST block, inserting it after the block's
+  # last field line when it isn't there yet. Value passed via the environment,
+  # not `awk -v`, because -v applies backslash-escape processing and would
+  # mangle a Windows path or any literal backslash in a citation.
+  local file="$1" id="$2" label="$3" value="$4"
+  local tmp; tmp="$(mktemp)"
+  STUB_FIELD_VALUE="$value" awk -v id="$id" -v label="$label" '
+    function emit_block(   i, lastfield) {
+      if (!done) {
+        lastfield = 0
+        for (i = 1; i <= n; i++) if (buf[i] ~ /^- \*\*/) lastfield = i
+        if (lastfield == 0) lastfield = n
+        for (i = 1; i <= n; i++) {
+          print buf[i]
+          if (i == lastfield) print "- **" label ":** " ENVIRON["STUB_FIELD_VALUE"]
+        }
+      } else {
+        for (i = 1; i <= n; i++) print buf[i]
+      }
+      n = 0
+    }
+    $0 ~ ("^### " id "([^0-9]|$)") { inblock = 1; n = 0; buf[++n] = $0; next }
+    inblock && (/^### / || /^## /) { emit_block(); inblock = 0; print; next }
+    inblock {
+      if ($0 ~ ("^- \\*\\*" label ":\\*\\*")) { buf[++n] = "- **" label ":** " ENVIRON["STUB_FIELD_VALUE"]; done = 1 }
+      else buf[++n] = $0
+      next
+    }
+    { print }
+    END { if (inblock) emit_block() }
+  ' "$file" > "$tmp"
+  mv "$tmp" "$file"
+}
+
+cmd_stub_append() {
+  local specclaw_dir="$1"; shift
+  [ -d "$specclaw_dir" ] || die "specclaw directory not found: $specclaw_dir"
+
+  local substitutes="" strategy="" consumed_by="" chosen_by="" summary=""
+  local fakes="not yet implemented" implementation="not yet implemented" mock_seed=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --substitutes)    substitutes="${2:-}"; shift 2 ;;
+      --strategy)       strategy="${2:-}"; shift 2 ;;
+      --consumed-by)    consumed_by="${2:-}"; shift 2 ;;
+      --chosen-by)      chosen_by="${2:-}"; shift 2 ;;
+      --summary)        summary="${2:-}"; shift 2 ;;
+      --fakes)          fakes="${2:-}"; shift 2 ;;
+      --implementation) implementation="${2:-}"; shift 2 ;;
+      --mock-seed)      mock_seed="${2:-}"; shift 2 ;;
+      *) die "stub-append: unrecognized argument '$1'." ;;
+    esac
+  done
+
+  # Every one of these is a refusal to write a malformed entry, not a
+  # convenience check. A registry entry that cannot be joined against
+  # (no Consumed by), cannot be traced to a person (no Chosen by), or names
+  # a strategy nobody defined is worse than no entry: it looks like tracking.
+  [ -n "$substitutes" ] || die "stub-append: --substitutes is required (the BL-### dependency, or MOD-### module, being stood in for)."
+  case "$substitutes" in *BL-[0-9][0-9][0-9]*|*MOD-[0-9][0-9][0-9]*) ;; *) die "stub-append: --substitutes must name a BL-### item or a MOD-### module (got '${substitutes}')." ;; esac
+  [ -n "$strategy" ] || die "stub-append: --strategy is required (one of: ${STUB_STRATEGIES})."
+  case " ${STUB_STRATEGIES} " in *" ${strategy} "*) ;; *) die "stub-append: unknown strategy '${strategy}'. The four are: ${STUB_STRATEGIES}. Never invent a fifth — if none fits, that is a finding to report, not a field to improvise." ;; esac
+  [ -n "$consumed_by" ] || die "stub-append: --consumed-by is required (the BL-### item(s) built against this stub). It is the join key that makes their fixtures report as stub-tainted; an entry without it tracks nothing."
+  case "$consumed_by" in *BL-[0-9][0-9][0-9]*) ;; *) die "stub-append: --consumed-by must name at least one BL-### item (got '${consumed_by}')." ;; esac
+  [ -n "$chosen_by" ] || die "stub-append: --chosen-by is required (name, YYYY-MM-DD). A bypass is always an explicit human choice — an entry with no named chooser is malformed, per CONTRACT.md (m.2)."
+  [ -n "$summary" ] || die "stub-append: --summary is required (the one-line heading: what is faked, for whom)."
+  if [ -n "$mock_seed" ] && [ "$strategy" != "mock-data" ]; then
+    die "stub-append: --mock-seed applies only to the mock-data strategy (got '${strategy}')."
+  fi
+
+  local specclaw_dir_abs project_root analysis_dir
+  specclaw_dir_abs="$(cd "$specclaw_dir" && pwd)"
+  project_root="$(cd "$specclaw_dir_abs/.." && pwd)"
+  analysis_dir="$specclaw_dir_abs/analysis"
+  mkdir -p "$analysis_dir"
+  local stubs_file; stubs_file="$(stubs_file_path "$specclaw_dir_abs")"
+
+  local new_id; new_id="$(next_stub_id "$stubs_file")"
+  local entry="### ${new_id} — ${summary}
+
+- **Status:** ACTIVE
+- **Substitutes:** ${substitutes}
+- **Strategy:** ${strategy}
+- **Consumed by:** ${consumed_by}
+- **Chosen by:** ${chosen_by}
+- **Fakes:** ${fakes}
+- **Implementation:** ${implementation}"
+  [ -n "$mock_seed" ] && entry="${entry}
+- **Mock seed:** ${mock_seed}"
+  entry="${entry}
+- **Retirement:**
+"
+
+  if [ ! -f "$stubs_file" ]; then
+    local template_file="$SCRIPT_DIR/../templates/module-stubs.md"
+    [ -f "$template_file" ] || die "Template missing: ${template_file}"
+    local doc
+    doc="$(cat "$template_file")"
+    doc="$(substitute "$doc" '{{title}}' "$(project_title "$project_root")")"
+    doc="$(substitute "$doc" '{{date}}' "$(date +%Y-%m-%d)")"
+    doc="$(substitute "$doc" '{{stub_entries}}' "$entry")"
+    printf '%s\n' "$doc" > "$stubs_file"
+  elif grep -qF '{{stub_entries}}' "$stubs_file"; then
+    local doc; doc="$(cat "$stubs_file")"
+    doc="$(substitute "$doc" '{{stub_entries}}' "$entry")"
+    printf '%s\n' "$doc" > "$stubs_file"
+  else
+    # APPEND. Never read-modify-write the whole document: another run may have
+    # added an entry this process never saw (same invariant as
+    # pending-questions.md).
+    printf '\n%s\n' "$entry" >> "$stubs_file"
+  fi
+
+  echo "${new_id}"
+  echo "Appended ${new_id} to ${stubs_file} (${strategy}, substitutes ${substitutes}, consumed by ${consumed_by}). Status ACTIVE — every fixture verifying those items now reports as stub-tainted until it is retired." >&2
+}
+
+cmd_stub_update() {
+  local specclaw_dir="$1" stub_id="$2"; shift 2
+  [ -d "$specclaw_dir" ] || die "specclaw directory not found: $specclaw_dir"
+  case "$stub_id" in ST-[0-9][0-9][0-9]) ;; *) die "stub-update: '${stub_id}' is not an ST-### id." ;; esac
+
+  local specclaw_dir_abs; specclaw_dir_abs="$(cd "$specclaw_dir" && pwd)"
+  local stubs_file; stubs_file="$(stubs_file_path "$specclaw_dir_abs")"
+  [ -f "$stubs_file" ] || die "No stub registry at ${stubs_file} — nothing to update."
+  grep -qE "^### ${stub_id}([^0-9]|$)" "$stubs_file" || die "stub-update: ${stub_id} is not in ${stubs_file}."
+
+  local did_any=false consumed_add=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --status)
+        case "$(stub_status_of "${2:-}")" in
+          ACTIVE|RETIRING|RETIRED) ;;
+          *) die "stub-update: --status must be ACTIVE, RETIRING, or RETIRED (got '${2:-}'). See CONTRACT.md (m.4) for why the middle state exists." ;;
+        esac
+        stub_set_field "$stubs_file" "$stub_id" "Status" "${2:-}"; did_any=true; shift 2 ;;
+      --fakes)          stub_set_field "$stubs_file" "$stub_id" "Fakes" "${2:-}"; did_any=true; shift 2 ;;
+      --implementation) stub_set_field "$stubs_file" "$stub_id" "Implementation" "${2:-}"; did_any=true; shift 2 ;;
+      --mock-seed)      stub_set_field "$stubs_file" "$stub_id" "Mock seed" "${2:-}"; did_any=true; shift 2 ;;
+      --retirement)     stub_set_field "$stubs_file" "$stub_id" "Retirement" "${2:-}"; did_any=true; shift 2 ;;
+      --consumed-by-add) consumed_add="${2:-}"; shift 2 ;;
+      *) die "stub-update: unrecognized argument '$1'." ;;
+    esac
+  done
+
+  if [ -n "$consumed_add" ]; then
+    case "$consumed_add" in BL-[0-9][0-9][0-9]) ;; *) die "stub-update: --consumed-by-add takes one BL-### id (got '${consumed_add}')." ;; esac
+    local workdir; workdir="$(mktemp -d)"
+    mkdir -p "$workdir/stubs"
+    split_blocks "$stubs_file" "$workdir/stubs" "ST"
+    local current; current="$(block_single_field "$workdir/stubs/${stub_id}.md" "Consumed by")"
+    rm -rf "$workdir"
+    case " ${current//,/ } " in
+      # Idempotent, not a no-op-that-errors: re-running propose for an item
+      # already listed must succeed quietly, or the skill has to special-case
+      # a failure that means "the thing you asked for is already true".
+      *" ${consumed_add} "*) echo "${consumed_add} is already listed under ${stub_id}'s Consumed by — left unchanged." >&2 ;;
+      *) stub_set_field "$stubs_file" "$stub_id" "Consumed by" "${current}${current:+, }${consumed_add}" ;;
+    esac
+    did_any=true
+  fi
+
+  $did_any || die "stub-update: no fields given. Pass at least one of --status / --fakes / --implementation / --mock-seed / --retirement / --consumed-by-add."
+  echo "Updated ${stub_id} in ${stubs_file}." >&2
+}
+
 # ─── Main ─────────────────────────────────────────────────────────────────────
 
 case "${1:-}" in
@@ -2167,6 +2641,21 @@ case "${1:-}" in
   module-status)
     [ $# -ge 2 ] || die "Usage: specclaw-bf-rebuild-collect module-status <specclaw_dir>"
     cmd_module_status "$2"
+    ;;
+  bypass-check)
+    [ $# -ge 3 ] || die "Usage: specclaw-bf-rebuild-collect bypass-check <specclaw_dir> <BL-###|--title \"<item title>\">"
+    shift
+    cmd_bypass_check "$@"
+    ;;
+  stub-append)
+    [ $# -ge 2 ] || die "Usage: specclaw-bf-rebuild-collect stub-append <specclaw_dir> --substitutes ... --strategy ... --consumed-by ... --chosen-by ... --summary ..."
+    shift
+    cmd_stub_append "$@"
+    ;;
+  stub-update)
+    [ $# -ge 3 ] || die "Usage: specclaw-bf-rebuild-collect stub-update <specclaw_dir> <ST-###> [--status ...] [--fakes ...] [--implementation ...] [--mock-seed ...] [--retirement ...] [--consumed-by-add BL-###]"
+    shift
+    cmd_stub_update "$@"
     ;;
   "")
     usage
