@@ -184,9 +184,16 @@ Each `fixtures[]` entry carries:
 ## (c) ID permanence
 
 `MOD-NNN` (modules), `GM-NNN` (scenarios), `DR-NNN` (business rules),
-`CQ-NNN`/`SQ-NNN`/`UQ-NNN` (clarify questions), `BL-NNN` (backlog items) are
-permanent once assigned — never renumbered, never reformatted, across any
-regeneration or archive cycle.
+`CQ-NNN`/`SQ-NNN`/`UQ-NNN` (clarify questions), `BL-NNN` (backlog items),
+`ST-NNN` (dependency-bypass stubs, section (m)) are permanent once assigned —
+never renumbered, never reformatted, across any regeneration or archive cycle.
+
+`ST-NNN` carries one carve-out from the rest of this section: its document
+(`module-stubs.md`) is **append/update-in-place and is never archived**, on the
+same terms as `pending-questions.md` and `clarifications.md`. So an `ST-NNN`
+never becomes a tombstone — retiring a stub updates that entry's own `Status`
+line and leaves the entry in place, because the record that an item was built
+out of order is the finding, and it outlives the stub.
 
 An id that no longer describes anything becomes a **tombstone** rather than
 disappearing (`### MOD-004 — WITHDRAWN <date>, superseded by MOD-002`, and the
@@ -449,6 +456,12 @@ Computed by `specclaw-bf-replay compare`, in this order, first match wins:
 | 3 | `unmapped-error-code` | The path's last segment is `error_code`, and either side is `null` while that side's `outcome` is `"REJECTED"` — i.e. (h)'s ask-don't-guess case, not a behavioural difference. |
 | 4 | `behavioural` | Everything else. |
 
+**Stub taint is not in this table, deliberately.** A fixture verifying a
+backlog item that consumed an `ACTIVE` bypass stub (section (m)) carries
+`stub_refs` alongside its diffs — it is a statement about what the rebuild was
+*standing on* while it was measured, not about what any field *contained*. It
+adds no `field_class`, matches no path, and is never consulted here.
+
 ### (j.2) Per-row `divergence_class`
 
 The highest-precedence class present among the row's diffs:
@@ -478,6 +491,13 @@ divergence is always FAIL.** No provisional, superseded, or unmapped state ever
 converts it into `PASS-PENDING-DECISIONS`. A *sanctioned* behavioural divergence
 and a representation-only difference both reach `PASS`.
 
+**Stub taint appears in no row of this table and in no exit code.** A run whose
+exercised fixtures rest on an `ACTIVE` stub reaches exactly the verdict it would
+have reached without the registry — and then says so, on the verdict line, in
+its own report section, and in `run-metadata.json`. Taint marks a PASS as
+resting on something unreal; it never converts a FAIL into anything softer, and
+there is no fifth verdict and no third exit code. See (m.3).
+
 ### (j.4) `compare.json` schema
 
 ```jsonc
@@ -488,6 +508,7 @@ and a representation-only difference both reach `PASS`.
     "scenario_id": "GM-019",
     "verdict": "DIVERGES",
     "fixture_status": "VERIFIABLE",
+    "stub_refs": ["ST-001"],
     "divergence_class": "behavioural",
     "diffs": [
       {"field_path": "threw", "expected": true, "actual": false,
@@ -511,7 +532,9 @@ and a representation-only difference both reach `PASS`.
 `seam-mismatch`. `normalization_warnings` never changes a verdict — it reports
 a normalization path that resolved against the fixture but resolves against
 nothing in the actual output, which is precisely the signal that the rebuild
-reshaped the field the path was meant to exclude.
+reshaped the field the path was meant to exclude. `stub_refs` is **carried**
+from `selection.json`, never computed here — an empty array (or an absent
+field, on a row written by an older specclaw) means untainted.
 
 ## (k) Identity and idempotency capture
 
@@ -612,3 +635,140 @@ and evidence retention are all identical across the three selection scopes
 (change / module / corpus). The overall verdict is always computed over the whole
 selected set; a per-module verdict is a reporting view over the same rows and
 gates nothing.
+
+## (m) Module bypass and the stub registry
+
+The module dependency graph (l) is the **recommended** build order, not a lock.
+A team can start any module before its dependencies exist — by explicitly
+choosing, per unmet dependency, something to stand in for it. That substitution
+is called a **bypass**, it is recorded as an `ST-NNN` entry, and everything
+built on top of it is marked as such until the real module lands.
+
+The purpose of this section is not to make out-of-order work possible — that
+was always possible, by simply doing it. It is to make out-of-order work
+**visible**: to guarantee that no report, no module status, and no retained
+evidence package can present a verdict earned against a stub as though it were
+earned against the real thing.
+
+### (m.1) The registry
+
+```
+.specclaw/analysis/module-stubs.md
+```
+
+One `### ST-NNN` entry per bypass. The plugin ships only the document skeleton
+(`templates/module-stubs.md`), which carries the full entry format; the fields
+`specclaw-bf-replay` and `specclaw-bf-rebuild-collect` actually read are:
+
+| Field | Read by | For |
+|---|---|---|
+| `Status` | replay `resolve`, rebuild-plan `render`, `module-status` | `ACTIVE` taints; `RETIRING`/`RETIRED` do not |
+| `Substitutes` | rebuild-plan `render`, `module-status` | which `BL-0##`/`MOD-###` is being stood in for |
+| `Strategy` | reporting only | `stub-interface` \| `mock-data` \| `feature-flag` \| `item-split` |
+| `Consumed by` | replay `resolve` | the `BL-0##` join key that produces `stub_refs` |
+| `Fakes` | reporting only | the one-line human-readable claim, quoted into reports |
+| `Mock seed` | replay `resolve` | (m.5) — a WARN source, never an assertion |
+
+**Three properties, each load-bearing:**
+
+- **One shared corpus.** There is one registry, exactly as there is one
+  `manifest.json`, one `decisions.md`, one `rebuild-backlog.md`. A stub is not
+  a per-module artifact — a bypass is by definition a relationship *between*
+  modules, and splitting the registry would make the interesting ones (a stub
+  faking MOD-005 for three items in MOD-009) unrepresentable.
+- **Append/update-in-place; archive-then-replace does NOT apply.** Same
+  invariant as `clarifications.md` and `pending-questions.md`. Retirement
+  updates an entry's `Status` and fills its `Retirement` line; nothing ever
+  deletes an entry or renumbers an id (c).
+- **Absence is a normal state.** No registry means no stubs. Every reader
+  treats it as empty, silently — no warning, no degradation, no verdict change.
+  A project that never bypasses anything never encounters this section.
+
+### (m.2) Who declares what — one direction per fact
+
+The same discipline as (l.1): declared once, copied thereafter, never
+re-derived downstream.
+
+| Fact | Declared by | Copied to |
+|---|---|---|
+| That a bypass is needed at all | **a human**, at `/specclaw:propose` time | the `ST-NNN` entry |
+| Which strategy substitutes the dependency | **a human**, from the four offered | `Strategy` |
+| Which items consumed the stub | `/specclaw:propose`, from the item being proposed | `Consumed by` |
+| What the stub concretely fakes, and where it lives | the **build agent**, in the rebuild's own stack | `Fakes`, `Implementation` (cited `file:line`) |
+| Which fixtures are tainted | **bash**, joining `Consumed by` → `verifies_backlog_item` | `stub_refs` |
+| Whether a module is honestly PASSED | **bash**, from `stub_refs` on the latest run | the module status view |
+
+**A bypass is never agent-decided and never a silent default.** An agent may
+detect that a dependency is unmet and must present the options; choosing one is
+a human act, recorded with a name and a date. This is the ask-don't-guess rule
+(h) applied to dependencies, and it is the reason `Chosen by` is a required
+field rather than a courtesy.
+
+**Symmetrically, an agent never computes taint.** `stub_refs`, the per-module
+tainted counts, the `PASSED*` rendering, and the retirement block are all bash
+joins over declared data — the same trust model that keeps `divergence_class`,
+the seam-layer verdict, and `PROVISIONAL` out of agent hands (j).
+
+### (m.3) Taint is a marker, exactly like PROVISIONAL
+
+A fixture is **stub-tainted** when the `BL-0##` its `verifies_backlog_item`
+names appears in the `Consumed by` field of an `ACTIVE` registry entry. That
+produces `stub_refs: ["ST-NNN", ...]` on the fixture, which flows:
+
+```
+module-stubs.md  →  selection.json  →  compare.json  →  report + run-metadata.json
+   (Consumed by)      (per fixture)      (per row)        (verdict line, section, metadata)
+```
+
+Every consequence is a **statement**, never a computation:
+
+- The report's overall verdict line appends `(with active stubs: ST-001, ...)`
+  when any *exercised* fixture is tainted. The verdict token itself is
+  unchanged and still comes first, so `PASS` stays parseable as `PASS`.
+- The report gains a **Stubs In Effect** section: each entry, what it fakes,
+  which fixtures it tainted.
+- `run-metadata.json` records `stubs_in_effect`, `stub_tainted_items`,
+  `stub_tainted`, and `counts.stub_tainted_exercised`.
+- A module whose items' latest verdicts include a tainted one renders
+  `PASSED* (stubs active: n)` rather than `PASSED`.
+
+**And nothing else.** Verdict computation is byte-identical: taint enters no
+condition in (j.3), adds no `field_class` (j.1), adds no `divergence_class`
+(j.2), and produces no exit code of its own. It never softens a `FAIL` — a
+stub-tainted `FAIL` is reported as `FAIL`, exit 1, with the taint noted
+alongside. The relationship to `PROVISIONAL` is instructive but not identical:
+`PROVISIONAL` *does* participate in the verdict (rule 3 of (j.3)), because an
+open question means nobody has decided what correct is. A stub is different —
+the comparison genuinely ran and genuinely matched. What is in question is not
+the verdict but its **standing**, and standing is reported, not computed.
+
+### (m.4) Retirement
+
+`ACTIVE` → `RETIRING` → `RETIRED`, and the middle state is not ceremony. With
+only two states the run that proves a stub is gone is itself stamped tainted
+(the entry is still `ACTIVE` while it runs), so the evidence contradicts what
+it demonstrates; flipping to `RETIRED` first means a failing re-replay leaves
+an entry falsely marked retired. `RETIRING` is the only state in which a clean
+run can honestly retire a stub, and a `RETIRING` entry whose re-replay FAILs
+goes back to `ACTIVE` with the failing run id noted.
+
+The trigger for offering retirement is mechanical and narrow: the substituted
+`BL-0##` carries a declared `BUILT:` line in its own **Status notes
+(human-added)** block in `rebuild-backlog.md`. Prose is not parsed. specclaw
+records no built state for a backlog item, and inferring "done last week" from
+free text would be precisely the guess this whole mechanism exists to prevent.
+
+### (m.5) What cannot be asserted, stated plainly
+
+A `mock-data` entry may declare a `Mock seed` path. Recording it is useful; it
+is **not** a guarantee. No specclaw command observes which data a running
+application loaded, so nothing here can assert that a mock seed was inactive
+during an acceptance run. The single mechanical use is a **WARN** — never a
+failure, never a verdict change — when a `mock-data` entry is `RETIRING` or
+`RETIRED` and its declared seed file still exists on disk.
+
+More generally: this section makes a bypass **traceable**, not safe. A tainted
+PASS says "the rebuild matched recorded behaviour while standing on something
+unreal, and here is exactly what." Whether that is acceptable is a human
+judgement about a named, dated, cited decision — which is the most this format
+can honestly offer, and considerably more than an untracked stub offers.
