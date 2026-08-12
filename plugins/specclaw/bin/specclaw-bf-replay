@@ -218,6 +218,75 @@ read_fidelity_policy() {
   esac
 }
 
+# ─── The dependency-bypass stub registry (CONTRACT.md (m)) ──────────────────
+#
+# Reads .specclaw/analysis/module-stubs.md into JSON so `resolve` can join it
+# against the selected fixtures. Nothing here computes, judges, or infers
+# anything: it is a parse of declared data, exactly like reading seam_layer
+# out of the manifest.
+#
+# ABSENCE IS A NORMAL STATE — most projects never bypass anything. A missing
+# registry parses to `[]` and every downstream reader treats the run as
+# untainted, silently. No warning, no degradation, no verdict change.
+#
+# awk emits TSV and jq builds the JSON, rather than awk printing JSON itself:
+# hand-escaping arbitrary prose (an entry's Fakes line is free text) inside
+# awk is exactly the kind of quoting bug that produces a silently truncated
+# field rather than an error.
+stubs_json() {
+  local stubs_file="$1"
+  if [ ! -f "$stubs_file" ]; then printf '[]'; return 0; fi
+  awk '
+    function val(s) {
+      sub(/^- \*\*[^*]+:\*\*[[:space:]]*/, "", s)
+      gsub(/\t/, " ", s)
+      sub(/[[:space:]]+$/, "", s)
+      return s
+    }
+    function flush() {
+      if (id != "")
+        printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+               id, summary, status, substitutes, strategy, consumed, fakes, seed
+      id = ""; summary = ""; status = ""; substitutes = ""
+      strategy = ""; consumed = ""; fakes = ""; seed = ""
+    }
+    /^### ST-[0-9]+/ {
+      flush()
+      match($0, /ST-[0-9]+/); id = substr($0, RSTART, RLENGTH)
+      summary = $0
+      sub(/^### ST-[0-9]+[[:space:]]*(—|-)[[:space:]]*/, "", summary)
+      gsub(/\t/, " ", summary)
+      next
+    }
+    /^## / { flush(); next }
+    id == "" { next }
+    /^- \*\*Status:\*\*/       { status      = val($0); next }
+    /^- \*\*Substitutes:\*\*/  { substitutes = val($0); next }
+    /^- \*\*Strategy:\*\*/     { strategy    = val($0); next }
+    /^- \*\*Consumed by:\*\*/  { consumed    = val($0); next }
+    /^- \*\*Fakes:\*\*/        { fakes       = val($0); next }
+    /^- \*\*Mock seed:\*\*/    { seed        = val($0); next }
+    END { flush() }
+  ' "$stubs_file" 2>/dev/null \
+  | jq -R -s '
+      [ split("\n")[] | select(length > 0) | split("\t")
+        | { id:          .[0],
+            summary:     .[1],
+            # Only the FIRST token of Status is the state; the rest is the
+            # date and clearing run id. An unrecognized value stays verbatim
+            # rather than being coerced — silently reading a typo as ACTIVE
+            # (taints everything) or as RETIRED (taints nothing) are both
+            # wrong, and the caller can report what it actually saw.
+            status:      (.[2] | split(" ")[0] | ascii_upcase),
+            status_raw:  .[2],
+            substitutes: .[3],
+            strategy:    .[4],
+            consumed_by: (.[5] | [scan("BL-[0-9]{3}")]),
+            fakes:       .[6],
+            mock_seed:   .[7] } ]
+    ' 2>/dev/null || printf '[]'
+}
+
 # Extract the markdown block under a "### <heading_id> —" heading, up to (not
 # including) the next "### " heading. Used for both decisions.md (CQ-###) and
 # rebuild-backlog.md (BL-###) — same heading shape in both real documents.
@@ -470,6 +539,67 @@ ${joined}"
   local module_totals_json
   module_totals_json="$(jq '[ .fixtures[] | (.module_ids // [])[] ] | group_by(.) | map({key: .[0], value: length}) | from_entries' "$manifest")"
 
+  # ── Stub taint stamping (CONTRACT.md (m.3)) ──────────────────────────────
+  # A pure join on declared data, in the same tier as the module_ids join
+  # above: a fixture is tainted when the BL item it verifies appears in the
+  # `Consumed by` field of an ACTIVE registry entry. Nothing is inferred, and
+  # NOTHING HERE TOUCHES A VERDICT — stub_refs rides alongside the fixture,
+  # exactly as fixture_status does, and `compare` carries it without reading
+  # it. A tainted run reaches the same verdict and the same exit code it
+  # would have reached with no registry at all; it just says so.
+  local stubs_all stubs_active
+  stubs_all="$(stubs_json "$specclaw_dir_abs/analysis/module-stubs.md")"
+  stubs_active="$(jq '[ .[] | select(.status == "ACTIVE") ]' <<< "$stubs_all")"
+
+  selected_fixtures="$(jq --argjson stubs "$stubs_active" '
+    [ .[] | . as $fx
+      | ($fx.verifies_backlog_item // "" | [scan("BL-[0-9]{3}")][0]) as $bl
+      | $fx + { stub_refs:
+          (if $bl == null then []
+           else [ $stubs[] | select(.consumed_by | index($bl)) | .id ]
+           end) } ]
+  ' <<< "$selected_fixtures")"
+
+  # The entries actually hit by THIS run's selection — not the whole registry.
+  # A stub faking a module nobody in this selection consumes is irrelevant to
+  # this report and naming it would pad the honesty signal into noise.
+  local stubs_in_effect retirement_candidates
+  stubs_in_effect="$(jq --argjson sel "$selected_fixtures" '
+    [ .[] as $s
+      | ([ $sel[] | select((.stub_refs // []) | index($s.id)) | .scenario_id ]) as $hits
+      | select(($hits | length) > 0)
+      | {id: $s.id, summary: $s.summary, substitutes: $s.substitutes,
+         strategy: $s.strategy, fakes: $s.fakes, fixtures: $hits} ]
+  ' <<< "$stubs_active")"
+
+  # RETIRING entries do NOT taint — the stub is genuinely gone. But naming
+  # them is what makes a clean run legible as the run that retires one
+  # (CONTRACT.md (m.4)), rather than an ordinary PASS someone has to correlate
+  # with a registry edit by hand.
+  local selected_bls
+  selected_bls="$(jq '[ .[].verifies_backlog_item // "" | [scan("BL-[0-9]{3}")][0] | select(. != null) ] | unique' <<< "$selected_fixtures")"
+  retirement_candidates="$(jq --argjson all "$stubs_all" --argjson bls "$selected_bls" -n '
+    [ $all[] | select(.status == "RETIRING")
+      | . as $s | select([ $s.consumed_by[] | select(. as $b | $bls | index($b)) ] | length > 0)
+      | {id: $s.id, summary: $s.summary, substitutes: $s.substitutes,
+         strategy: $s.strategy,
+         consumers_in_run: [ $s.consumed_by[] | select(. as $b | $bls | index($b)) ]} ]
+  ')"
+
+  # A declared mock seed is a WARN source, never an assertion (CONTRACT.md
+  # (m.5)): nothing observes which data a running application loaded, so this
+  # can only say "the file you said you were retiring is still on disk."
+  while IFS= read -r seed_line; do
+    [ -z "$seed_line" ] && continue
+    local seed_id="${seed_line%%$'\t'*}" seed_path="${seed_line#*$'\t'}"
+    if [ -n "$seed_path" ] && [ -e "${project_root}/${seed_path}" ]; then
+      warn "${seed_id} is ${seed_path:+}no longer ACTIVE but its declared mock seed still exists at ${seed_path}. Nothing here can tell whether it was loaded during this run — this is a prompt to check, not a finding."
+    fi
+  done < <(jq -r '.[] | select(.status == "RETIRING" or .status == "RETIRED")
+                       | select(.strategy == "mock-data")
+                       | select((.mock_seed // "") != "")
+                       | .id + "\t" + .mock_seed' <<< "$stubs_all")
+
   local dr_rules_json legacy_shas_json
   dr_rules_json="$(jq '[ .[].business_rules_pinned ] | join(" ") | [scan("DR-[0-9]{3}")] | unique' <<< "$selected_fixtures")"
   legacy_shas_json="$(jq '[ .[].legacy_commit_sha ] | unique' <<< "$selected_fixtures")"
@@ -490,6 +620,8 @@ ${joined}"
     --argjson count "$count" \
     --argjson manifest_schema "$manifest_schema" \
     --arg manifest_plugin_version "${manifest_plugin_version:-unknown}" \
+    --argjson stubs_in_effect "$stubs_in_effect" \
+    --argjson retirement_candidates "$retirement_candidates" \
     '{
       target: $target,
       target_kind: $kind,
@@ -502,6 +634,8 @@ ${joined}"
       dr_rules_covered: $dr_rules,
       legacy_commit_shas: $legacy_shas,
       legacy_commit_sha: $legacy_shas[0],
+      stubs_in_effect: $stubs_in_effect,
+      retirement_candidates: $retirement_candidates,
       fixtures: $fixtures
     }' > "$out_path"
 
@@ -511,7 +645,14 @@ ${joined}"
     shared_n="$(jq --arg mod "$module_id" '[ .[] | select(((.module_ids // []) | length) > 1) ] | length' <<< "$selected_fixtures")"
     shared_note=" ${shared_n} of them also belong to another module (shared cross-module flows, selected by both)."
   fi
-  echo "Selected ${count} fixture(s) for ${target}${bl_id:+ (${bl_id})}.${shared_note} DR rules covered: $(jq -r 'join(", ")' <<< "$dr_rules_json"). Legacy commit: $(jq -r '.[0]' <<< "$legacy_shas_json")."
+  local stub_note=""
+  local tainted_n st_ids
+  tainted_n="$(jq '[ .[] | select(((.stub_refs // []) | length) > 0) ] | length' <<< "$selected_fixtures")"
+  if [ "$tainted_n" -gt 0 ]; then
+    st_ids="$(jq -r '[ .[].id ] | join(", ")' <<< "$stubs_in_effect")"
+    stub_note=" ${tainted_n} of them verify an item built against an active bypass stub (${st_ids}) and will be reported as stub-tainted."
+  fi
+  echo "Selected ${count} fixture(s) for ${target}${bl_id:+ (${bl_id})}.${shared_note}${stub_note} DR rules covered: $(jq -r 'join(", ")' <<< "$dr_rules_json"). Legacy commit: $(jq -r '.[0]' <<< "$legacy_shas_json")."
 }
 
 # ─── Subcommand: init-rundir ─────────────────────────────────────────────────
@@ -631,12 +772,22 @@ cmd_compare() {
     sid="$(jq -r '.scenario_id' <<< "$entry")"
     verdict="$(jq -r '.verdict' <<< "$entry")"
 
+    # Carried from selection.json, never computed here and never read by any
+    # verdict expression below — the same treatment fixture_status gets. It
+    # is attached to EVERY row, including NOT REPLAYABLE ones: a fixture
+    # verifying a stub-backed item is stub-backed whether or not this run
+    # managed to exercise it. `render` is what filters to exercised rows.
+    local stub_refs
+    stub_refs="$(jq -c --arg sid "$sid" '(.fixtures[] | select(.scenario_id==$sid) | .stub_refs) // []' "$selection" 2>/dev/null || echo '[]')"
+    [ -n "$stub_refs" ] || stub_refs='[]'
+
     if [ "$verdict" != "REPLAYABLE" ]; then
-      results="$(jq --argjson e "$entry" '. + [{
+      results="$(jq --argjson e "$entry" --argjson st "$stub_refs" '. + [{
         scenario_id: $e.scenario_id, verdict: "NOT REPLAYABLE",
         reason: ($e.reason // "no reason recorded"),
         category: ($e.category // "other"),
-        remediation: ($e.remediation // null)
+        remediation: ($e.remediation // null),
+        stub_refs: $st
       }]' <<< "$results")"
       continue
     fi
@@ -677,9 +828,10 @@ cmd_compare() {
       results="$(jq \
         --arg sid "$sid" --arg status "$fixture_status" \
         --arg legacy "$legacy_layer" --arg replay "$replay_layer" \
+        --argjson st "$stub_refs" \
         --arg reason "$seam_problem" '. + [{
           scenario_id: $sid, verdict: "NOT REPLAYABLE", category: "seam-mismatch",
-          fixture_status: $status,
+          fixture_status: $status, stub_refs: $st,
           legacy_seam_layer: $legacy,
           replay_seam_layer: (if $replay == "" then null else $replay end),
           reason: ("Seam-layer mismatch — " + $reason),
@@ -692,11 +844,11 @@ cmd_compare() {
     local actual_file="${run_dir}/actual/${sid}.json"
 
     if [ ! -f "$actual_file" ]; then
-      results="$(jq --arg sid "$sid" --arg status "$fixture_status" '. + [{scenario_id: $sid, verdict: "ERROR", detail: "No actual-result file written — the generated test crashed or did not run to completion.", fixture_status: $status}]' <<< "$results")"
+      results="$(jq --arg sid "$sid" --arg status "$fixture_status" --argjson st "$stub_refs" '. + [{scenario_id: $sid, verdict: "ERROR", detail: "No actual-result file written — the generated test crashed or did not run to completion.", fixture_status: $status, stub_refs: $st}]' <<< "$results")"
       continue
     fi
     if ! jq -e . "$actual_file" >/dev/null 2>&1; then
-      results="$(jq --arg sid "$sid" --arg status "$fixture_status" '. + [{scenario_id: $sid, verdict: "ERROR", detail: "actual-result file is not valid JSON.", fixture_status: $status}]' <<< "$results")"
+      results="$(jq --arg sid "$sid" --arg status "$fixture_status" --argjson st "$stub_refs" '. + [{scenario_id: $sid, verdict: "ERROR", detail: "actual-result file is not valid JSON.", fixture_status: $status, stub_refs: $st}]' <<< "$results")"
       continue
     fi
 
@@ -707,10 +859,11 @@ cmd_compare() {
 
     results="$(jq \
       --arg sid "$sid" --arg status "$fixture_status" --arg layer "$legacy_layer" \
+      --argjson st "$stub_refs" \
       --argjson a "$analysis" '. + [
         (if ($a.diffs | length) == 0
-         then {scenario_id: $sid, verdict: "MATCH", fixture_status: $status, seam_layer: $layer}
-         else {scenario_id: $sid, verdict: "DIVERGES", fixture_status: $status, seam_layer: $layer,
+         then {scenario_id: $sid, verdict: "MATCH", fixture_status: $status, stub_refs: $st, seam_layer: $layer}
+         else {scenario_id: $sid, verdict: "DIVERGES", fixture_status: $status, stub_refs: $st, seam_layer: $layer,
                divergence_class: $a.divergence_class, diffs: $a.diffs}
          end)
         + (if ($a.normalization_warnings | length) > 0
@@ -734,7 +887,8 @@ cmd_compare() {
         error:               ([$results[] | select(.verdict=="ERROR")] | length),
         seam_mismatch:       ([$results[] | select(.category=="seam-mismatch")] | length),
         not_replayable_other:([$results[] | select(.verdict=="NOT REPLAYABLE" and .category!="seam-mismatch")] | length),
-        normalization_warnings: ([$results[] | (.normalization_warnings // [])[]] | length)
+        normalization_warnings: ([$results[] | (.normalization_warnings // [])[]] | length),
+        stub_tainted: ([$results[] | select(((.stub_refs // []) | length) > 0)] | length)
       }
     }' > "$run_dir/compare.json"
 
@@ -934,7 +1088,10 @@ compute_verdict_summary() {
       seam_mismatch: ([$merged[] | select(.category=="seam-mismatch")] | length),
       not_replayable: ([$merged[] | select(.verdict=="NOT REPLAYABLE")] | length),
       provisional_exercised: ([$merged[] | select(exercised and .fixture_status=="PROVISIONAL")] | length),
-      superseded_exercised: ([$merged[] | select(exercised and .fixture_status=="SUPERSEDED")] | length)
+      superseded_exercised: ([$merged[] | select(exercised and .fixture_status=="SUPERSEDED")] | length),
+      # Recorded, never consulted by the verdict expression below — the
+      # metadata equivalent of the suffix on the rendered verdict line.
+      stub_tainted_exercised: ([$merged[] | select(exercised and (((.stub_refs // []) | length) > 0))] | length)
     }
     # CONTRACT.md (j.3), evaluated strictly in order. FAIL is tested BEFORE the
     # soft-block cases, which is the mechanical guarantee that an unsanctioned
@@ -1009,7 +1166,11 @@ regenerate_evidence_summary() {
       (.counts.diverged|tostring) + " | " + ((.counts.representation // 0)|tostring) + " | " +
       (((.counts.provisional_exercised // 0) + (.counts.superseded_exercised // 0) + (.counts.unmapped_error_code // 0))|tostring) + " | " +
       (.counts.error|tostring) + " | " +
-      (.counts.not_replayable|tostring) + " | " + .overall_verdict + " | `run-" + .run_id + "/` |"
+      (.counts.not_replayable|tostring) + " | " +
+      (if ((.stubs_in_effect // []) | length) > 0
+       then "⚠ " + ((.stubs_in_effect // []) | join(", ")) else "—" end) + " | " +
+      .overall_verdict +
+      (if (.stub_tainted // false) then "*" else "" end) + " | `run-" + .run_id + "/` |"
     ' "$meta" 2>/dev/null || true)"
     [ -n "$row" ] && rows="${rows}${row}
 "
@@ -1109,28 +1270,71 @@ cmd_render() {
     overall="PASS"; exit_code=0
   fi
 
+  # ── Stub taint (CONTRACT.md (m.3)) ───────────────────────────────────────
+  # Counted over EXERCISED rows only, the same filter the provisional and
+  # superseded soft-blocks use: a fixture that never ran produced no verdict
+  # for a stub to have stood behind. Purely a reporting computation — nothing
+  # below feeds the verdict block above, which is unchanged byte for byte.
+  local stub_tainted_exercised stub_ids_in_run stub_taint_suffix=""
+  stub_tainted_exercised=$(jq '[.[] | select((.verdict=="MATCH" or .verdict=="DIVERGES" or .verdict=="ERROR") and (((.stub_refs // []) | length) > 0))] | length' <<< "$merged")
+  stub_ids_in_run=$(jq -c '[ .[] | select(.verdict=="MATCH" or .verdict=="DIVERGES" or .verdict=="ERROR") | (.stub_refs // [])[] ] | unique' <<< "$merged")
+  if [ "$stub_tainted_exercised" -gt 0 ]; then
+    # Appended AFTER the verdict token, never in front of it: "PASS (with
+    # active stubs: ST-001)" still reads as PASS to anything that parses the
+    # leading word, which is the whole reason the suffix is a separate
+    # placeholder rather than a rewritten verdict string.
+    stub_taint_suffix=" (with active stubs: $(jq -r 'join(", ")' <<< "$stub_ids_in_run"))"
+  fi
+
   local table_rows
   table_rows=$(jq -r '
     def statussuffix:
       if .fixture_status == "PROVISIONAL" then "-PROVISIONAL"
       elif .fixture_status == "SUPERSEDED" then "-SUPERSEDED"
       else "" end;
+    def stubcell:
+      if ((.stub_refs // []) | length) == 0 then "—"
+      else "⚠ " + ((.stub_refs // []) | join(", ")) end;
     .[] |
     (if .verdict == "DIVERGES" then
        "| " + .scenario_id + " | DIVERGES" + statussuffix + " | " +
        (.divergence_class // "unclassified") + " | " +
        (if .divergence_class != "behavioural" then "n/a"
         elif .sanctioned == true then "SANCTIONED (" + (.cq_id // "?") + ")"
-        else "UNSANCTIONED" end) + " | " +
+        else "UNSANCTIONED" end) + " | " + stubcell + " | " +
        ((.diffs // []) | map(.field_path) | join("; ")) + " |"
      elif .verdict == "ERROR" then
-       "| " + .scenario_id + " | ERROR" + statussuffix + " | — | — | " + (.detail // "") + " |"
+       "| " + .scenario_id + " | ERROR" + statussuffix + " | — | — | " + stubcell + " | " + (.detail // "") + " |"
      elif .verdict == "NOT REPLAYABLE" then
-       "| " + .scenario_id + " | NOT REPLAYABLE | " + (.category // "other") + " | — | " + (.reason // "") + " |"
+       "| " + .scenario_id + " | NOT REPLAYABLE | " + (.category // "other") + " | — | " + stubcell + " | " + (.reason // "") + " |"
      else
-       "| " + .scenario_id + " | MATCH" + statussuffix + " | — | — | — |"
+       "| " + .scenario_id + " | MATCH" + statussuffix + " | — | — | " + stubcell + " | — |"
      end)
   ' <<< "$merged")
+
+  # ── Stubs In Effect section ──────────────────────────────────────────────
+  # Only the entries this run's selection actually hit (resolve already
+  # filtered), plus any RETIRING entry whose consumers are in this run — the
+  # latter taints nothing but makes a clean run legible as the run that
+  # retires it, rather than an ordinary PASS someone has to correlate with a
+  # registry edit by hand (CONTRACT.md (m.4)).
+  local stubs_in_effect_section
+  stubs_in_effect_section=$(jq -r --argjson ids "$stub_ids_in_run" '
+    ([ (.stubs_in_effect // [])[] | select(.id as $i | $ids | index($i))
+       | "- **" + .id + "** (`" + .strategy + "`) — substitutes " + .substitutes +
+         ". Fakes: " + (if (.fakes // "") == "" or .fakes == "not yet implemented"
+                        then "_not yet implemented — this stub has no recorded implementation, so what it fakes is only the propose-time sketch: " + .summary + "_"
+                        else .fakes end) +
+         "\n  Tainted fixtures in this run: " + (.fixtures | join(", ")) ]) as $active
+    | ([ (.retirement_candidates // [])[]
+       | "- **" + .id + "** (`" + .strategy + "`) — **RETIRING**, substitutes " + .substitutes +
+         ". The stub code is reported removed; this run is its retirement verification for " +
+         (.consumers_in_run | join(", ")) +
+         ". A clean verdict here is what retires it — flip the entry to RETIRED citing this run id. A FAIL sends it back to ACTIVE." ]) as $retiring
+    | if (($active | length) + ($retiring | length)) == 0
+      then "_None — no fixture in this run rests on an active bypass stub._"
+      else (($active + $retiring) | join("\n")) end
+  ' "$selection")
 
   # ── Behavioural detail: the mechanical fact only — field, legacy value,
   # rebuild value. No agent interpretation is added anywhere in this section;
@@ -1369,6 +1573,11 @@ This package contains the generated tests (source), the actual outputs produced 
   content="$(fill_placeholder "$content" "{{open_decisions_blocking_pass}}" "$open_decisions_blocking_pass")"
   content="$(fill_placeholder "$content" "{{dr_uncovered_list}}" "$dr_uncovered_list")"
   content="$(fill_placeholder "$content" "{{module_rollup}}" "$module_rollup")"
+  content="$(fill_placeholder "$content" "{{stubs_in_effect}}" "$stubs_in_effect_section")"
+  # Replaces BOTH occurrences (header line and Verdict section) — fill_placeholder
+  # loops, so the two never drift apart into a report whose header admits a stub
+  # and whose verdict does not.
+  content="$(fill_placeholder "$content" "{{stub_taint_suffix}}" "$stub_taint_suffix")"
 
   # ── Informational footer only. Purely additive: the verdict above and the
   # exit code below are computed exactly as before, and a project whose UI
@@ -1389,7 +1598,7 @@ This package contains the generated tests (source), the actual outputs produced 
   esac
   printf '%s\n' "$content" > "$out_path"
 
-  echo "Replay report written to ${out_path}. Overall verdict: ${overall} (MATCH=${match_n} BEHAVIOURAL=${behav_unsanctioned_n} unsanctioned/${behav_sanctioned_n} sanctioned REPRESENTATION=${repr_n} UNMAPPED_ERROR_CODE=${unmapped_n} ERROR=${error_n} SEAM_MISMATCH=${seam_n} NOT_REPLAYABLE=${nr_other_n})."
+  echo "Replay report written to ${out_path}. Overall verdict: ${overall}${stub_taint_suffix} (MATCH=${match_n} BEHAVIOURAL=${behav_unsanctioned_n} unsanctioned/${behav_sanctioned_n} sanctioned REPRESENTATION=${repr_n} UNMAPPED_ERROR_CODE=${unmapped_n} ERROR=${error_n} SEAM_MISMATCH=${seam_n} NOT_REPLAYABLE=${nr_other_n} STUB_TAINTED=${stub_tainted_exercised})."
   exit "$exit_code"
 }
 
@@ -1495,6 +1704,18 @@ cmd_finalize() {
   counts="$(compute_verdict_summary "$run_dir/compare.json" "$run_dir/sanction-verified.json" "$selected_count")"
   today="$(date +%Y-%m-%d)"
 
+  # Which bypass stubs this run's verdict rests on, and which backlog items
+  # they taint. Recorded IN the evidence package, not merely in the report, so
+  # a retained run can never be cited later as clean proof without the
+  # qualification travelling with it. `module-status` reads stub_tainted_items
+  # across runs to find each item's LATEST verdict.
+  local stubs_effect tainted_items stub_tainted_flag
+  stubs_effect="$(jq -c '[ (.stubs_in_effect // [])[].id ]' "$selection" 2>/dev/null || echo '[]')"
+  tainted_items="$(jq -c '[ .fixtures[] | select(((.stub_refs // []) | length) > 0)
+                            | .verifies_backlog_item // "" | [scan("BL-[0-9]{3}")][0]
+                            | select(. != null) ] | unique' "$selection" 2>/dev/null || echo '[]')"
+  stub_tainted_flag="$(jq -r 'if (.stub_tainted_exercised // 0) > 0 then "true" else "false" end' <<< "$counts")"
+
   jq -n \
     --arg run_id "$run_id" \
     --arg target "$target" \
@@ -1509,6 +1730,9 @@ cmd_finalize() {
     --arg stack "$stack" \
     --argjson selected_count "$selected_count" \
     --argjson counts "$counts" \
+    --argjson stubs_in_effect "$stubs_effect" \
+    --argjson stub_tainted_items "$tainted_items" \
+    --argjson stub_tainted "$stub_tainted_flag" \
     '{
       run_id: $run_id,
       target: $target,
@@ -1523,7 +1747,10 @@ cmd_finalize() {
       stack: $stack,
       selected_count: $selected_count,
       counts: ($counts | del(.overall, .exit_code)),
-      overall_verdict: $counts.overall
+      overall_verdict: $counts.overall,
+      stub_tainted: $stub_tainted,
+      stubs_in_effect: $stubs_in_effect,
+      stub_tainted_items: $stub_tainted_items
     }' > "$evidence_dir/run-metadata.json"
 
   # Committable-by-design: evidence is meant to travel with the change's PR.
