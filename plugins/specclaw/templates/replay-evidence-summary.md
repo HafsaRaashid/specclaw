@@ -12,6 +12,8 @@ This page tracks every automated check comparing the rebuilt application's behav
 
 **Wording differences are counted separately, on purpose.** A rebuilt application on a different framework reports errors under different type names and in different words while making exactly the same business decision. Those are counted under **Wording Only** and never treated as the application behaving differently — the columns that matter for whether the rebuild is faithful are Match, Allowed Change, and Unexplained Change.
 
-| Date | Fixtures Replayed | Match | Allowed Change (documented) | Unexplained Change | Wording Only | Awaiting Decision | Error | Not Replayable | Overall Verdict | Evidence Folder |
-|---|---|---|---|---|---|---|---|---|---|---|
+**A verdict marked `*`, with stub ids in the Stubs column, was earned while part of the system was standing in for another part that had not been built yet.** The comparison genuinely ran and genuinely matched — but some of what it matched against was a deliberate, recorded placeholder rather than the real module. That is not a failure and it is not a warning about quality; it is a statement about how much of the system was real at the time. Those runs are re-run once the real module lands, and the `*` disappears when it does. The placeholders themselves are listed in the run's own report, under **Stubs In Effect**.
+
+| Date | Fixtures Replayed | Match | Allowed Change (documented) | Unexplained Change | Wording Only | Awaiting Decision | Error | Not Replayable | Stubs | Overall Verdict | Evidence Folder |
+|---|---|---|---|---|---|---|---|---|---|---|---|
 {{table_rows}}

@@ -87,6 +87,21 @@ Prints one integer — `min(parallel_tasks, memory_budget)`. Use it as the concu
 
    When `build.dynamic_agents.enabled: false` (default), skip all of the above and use the generic coder exactly as before — no synthesis, no `agents/` directory.
 
+**c'.** **Stub tasks** — only when `spec.md` has a `## Bypassed Dependencies` section. For a task implementing an `ST-###` stub, add `$CLAUDE_PLUGIN_ROOT/references/stub-discipline.md` to that agent's context alongside the usual payload, and hold it to two things:
+
+- **The hard rule: dev/test scope only.** The stub must be *structurally unreachable* from any production code path — a test-only source set, a dev-profile-only registration, a flag that is off by default in production rather than by assertion. Use whatever mechanism the repo already has; inventing a new isolation mechanism for a stub is itself the signal to stop and report. "Unlikely to be hit" is not scoping. A stub that can serve a real user is not a bypass, it is a fabricated response in production.
+- **The stub must match the strategy the human chose.** If implementation shows the chosen strategy is wrong, stop and report it — that is a decision to hand back, not one to make. Never widen a stub's reach to make a test pass.
+
+After the task lands, complete its registry entry with the real citation:
+
+```bash
+specclaw-bf-rebuild-collect stub-update .specclaw ST-### \
+  --fakes "<what it concretely does instead of the real thing>" \
+  --implementation "<path/File.ext:88> — <how it is dev/test scoped>"
+```
+
+Both are citations, not summaries: a reviewer must be able to jump to that `file:line` and see the claim is true. **Never add a stub that has no registry entry** — an unregistered stub is invisible to `/specclaw:bf-replay`'s taint stamping, so a report will later claim a clean PASS that was earned against fabricated behaviour.
+
 **d.** Wait for all agents in the wave to complete.
 
 **e.** For each succeeded agent:

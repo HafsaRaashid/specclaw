@@ -255,6 +255,49 @@ Because the analysis documents are already pinned (Step 3), the resulting
 capability and domain-model rules the backlog item cited — no need to
 re-paste analysis content into the conversation.
 
+### Starting a module before its dependencies exist
+
+The module graph is the **recommended** order, not a lock. Real migrations
+routinely need to start somewhere the graph says isn't ready — a team frees up,
+a stakeholder wants the flow they actually care about, the foundation module is
+blocked on a decision. You can do that, deliberately and on the record.
+
+When a proposed item depends on a *cross-module* item with no completion
+signal, `/specclaw:propose` stops and asks — per dependency — how to stand in
+for it: a **stub-interface**, **mock-data**, a **feature-flag**, or an
+**item-split** (the honest non-stub option: ship the part that doesn't need the
+dependency, and let the rest wait). "It is actually built" and "abort and
+follow the recommended order" are always on the list too.
+
+**The choice is always yours.** Nothing picks a strategy for you and there is
+no default — the entry records your name and the date. That is the point: the
+cost of a bypass isn't the stub, it's forgetting there was one.
+
+Each choice becomes a permanent `ST-###` entry in
+`.specclaw/analysis/module-stubs.md`, and from then on:
+
+- the consuming backlog items carry `⚠ STUB-BACKED`;
+- any `/specclaw:bf-replay` verdict for their fixtures says
+  `(with active stubs: ST-###)`, in the report *and* in the retained evidence;
+- `module-status.md` shows the module as `PASS*`, never a clean `PASSED`, and
+  lists who is waiting on the real module.
+
+**None of that changes a verdict.** A tainted PASS is still PASS with exit 0; a
+tainted FAIL is still FAIL with exit 1. Taint qualifies a verdict's standing, it
+never softens it.
+
+To retire one: write `BUILT: <evidence>` into the real item's **Status notes**
+block, re-run `/specclaw:bf-rebuild-plan --refresh` (its **Stub Retirement**
+section prints the exact commands and who runs each), remove the stub code,
+flip the entry to `RETIRING`, re-replay the consumers, and — only on a clean
+run — flip it to `RETIRED` citing that run id.
+
+Two things this deliberately will not do. It will not let you bypass a
+**same-module** dependency: that is the item's own groundwork, and stubbing it
+means stubbing part of what you are building. And it will not infer that a
+dependency is done from prose — only a literal `BUILT:` line counts, because
+guessing here silently skips the question that would have caught the gap.
+
 ## Step 6 — What to copy into the new repo (the Phase B copy set)
 
 Steps 1–4b all run in the **legacy** repo (Phase A). `/specclaw:bf-replay` and
@@ -278,6 +321,12 @@ backlog item, its fixtures, and its screens by reading these files:
 .specclaw/ui/screens/                        # captured PNGs      ┐ always
 .specclaw/ui/ui-manifest.json                # their hashes       ┘ together
 ```
+
+**`module-stubs.md` is not in the copy set — it is *born* in the rebuild repo.**
+Bypasses are chosen at `/specclaw:propose` time, which runs where the changes
+live, so the registry is created there by the first proposal that elicits one.
+Nothing copies it from the legacy repo, and a rebuild repo without one simply
+has no stubs — every reader treats it as empty, silently.
 
 **`module-map.md` travels too, but is not load-bearing for a verdict.** `/specclaw:bf-replay --module` selects fixtures from `manifest.json`'s own `module_ids`, never from the map — so a replay run works without it. What the map adds in the new repo is readability: the report's module rollup names each module, and `module-status.md` can be regenerated there. Copy it; if it is absent, rollups still compute and simply read as bare `MOD-###` ids.
 

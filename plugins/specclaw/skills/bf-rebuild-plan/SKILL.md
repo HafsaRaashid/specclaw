@@ -56,13 +56,33 @@ This never makes UI a golden-master seam. A cited `SCR-###` is an acceptance ref
 
 PROVISIONAL is soft-block and independent of Gate/Verification — an item can be `CLEAR`/`VERIFIABLE` and still carry the `⚠ PROVISIONAL — pending CQ-NNN` marker right after its heading. Unlike Gate/Verification (which react to any answered/unanswered CQ), PROVISIONAL is recomputed fresh from nothing every run: it never persists from a prior refresh's own rendered marker, so a question answered under `decisions.md`'s `## Decisions` clears it automatically the moment its `CQ-NNN` stops being unanswered — no manual cleanup, and no directive needed to *remove* a marker, only to add one.
 
+`render` also computes the **Stub Retirement** section and each consuming item's `⚠ STUB-BACKED` marker, from `.specclaw/analysis/module-stubs.md` (the dependency-bypass registry, `templates/CONTRACT.md` (m)). Both are recomputed from nothing every run, the same tier as `PROVISIONAL` — retiring a stub clears every marker automatically, and no directive is ever needed to remove one. A project with no registry gets neither, silently.
+
+The marker is deliberately **not** folded into the `Verification:` line. `Verification:` answers "is there a fixture for this?"; taint answers "was the thing under test real?" — orthogonal, and collapsing them would let a `VERIFIABLE` item read as fully proven when part of what it was checked against was a placeholder.
+
+**Retirement is a human/Claude handoff, and the rendered block names the actor for every step.** The trigger is narrow and declared: a stub is only listed as *ready to retire* when the item it substitutes carries a line beginning `BUILT:` in its own `**Status notes (human-added):**` block. Prose is never parsed — specclaw records no built state, and reading "done last week" as completion would be exactly the guess this mechanism prevents. Who does what:
+
+| Step | Actor |
+|---|---|
+| Write the `BUILT:` note once the real item is merged | **human** |
+| List retirable stubs + the exact replay commands | **Claude** (this command, bash-computed) |
+| Remove or disable the stub code | **human** decides; Claude may make the edit when asked |
+| Flip `ACTIVE` → `RETIRING` | **human**, or Claude at their explicit word |
+| Re-run the printed replays for every consumer | **Claude** |
+| Flip → `RETIRED` citing the clean run id | **Claude**, and *only* on a clean run |
+| Decide what a FAIL means (stub back in, or fix the real module) | **human** |
+
+**Never retire a stub on an unclean run, and never remove stub code on your own initiative.** The three-state flow exists because with only `ACTIVE`/`RETIRED` the run that proves a stub is gone is itself stamped tainted, and flipping early leaves a failing re-replay falsely marked retired.
+
 ## Step 4 — Regenerate the module status view
 
 ```bash
 specclaw-bf-rebuild-collect module-status .specclaw
 ```
 
-Deterministic, read-only, cheap. Writes `.specclaw/analysis/module-status.md`: one row per module — backlog items planned/total, baseline scenarios captured/designed, the latest module-scoped replay verdict with its date, and the count of open questions naming that module. Run it here because this is the moment its inputs are freshest; an operator can also run it any time on its own.
+Deterministic, read-only, cheap. Writes `.specclaw/analysis/module-status.md`: one row per module — backlog items planned/total, baseline scenarios captured/designed, the latest module-scoped replay verdict with its date, the count of **stub-tainted items**, and the count of open questions naming that module. Run it here because this is the moment its inputs are freshest; an operator can also run it any time on its own.
+
+The stub-tainted column counts this module's items whose **latest** retained replay run rested on an `ACTIVE` bypass stub, and the verdict cell reads `PASS*` rather than `PASS` while that count is non-zero. Unlike the verdict column — which only sees module-scoped runs — this one counts runs at every scope, because which items a run exercised and which of those rested on a stub is a per-item fact no scope distorts. A `## Stubs In Effect By Module` section lists, per module, the `ST-###` entries faking **that** module for other people's items, so "who is waiting on the real MOD-005" is one lookup.
 
 It is a **status view, not evidence**: regenerated in full every invocation and deliberately exempt from archive-then-replace, because every number in it is recomputed from documents whose own history is already archived. Nothing reads it and nothing computes from it.
 
@@ -76,6 +96,7 @@ It is a **status view, not evidence**: regenerated in full every invocation and 
   - If the map is unconfirmed, repeat the one-sentence reason: this backlog's grouping and sequencing rest on a proposal no human has signed off, and confirming it is an edit to `module-map.md`'s own `**Status:**` line.
 - **Module-scoped run (`--module`):** say explicitly which module was re-planned and that every other module's items, coverage lines, and human-added status notes were preserved untouched. If the agent reported a new item belonging to a *different* module, relay that — it was deliberately not drafted this run, and it needs its own scoped run.
 - **Either mode, if the UI fidelity workstream is active:** relay the status header's UI fidelity block. If `render` emitted the missing-artifacts warning, **surface it verbatim and name the affected items** — that warning is the whole reason the check exists, and burying it in the file defeats it. Name any unmapped `SCR-###` from the UI Screen Coverage subsection too. Say nothing about UI when the policy is `REINTERPRET`.
+- **Either mode, if any bypass stub is active:** relay the **Stub Retirement** section's *Ready to retire* entries directly, with the replay commands — that is a work list someone can act on today, and burying it in the file wastes it. Name any `⚠ STUB-BACKED` items and say plainly that their replay verdicts carry the marker until the stub is retired. Say nothing about stubs when there is no registry.
 - **Refresh:** the rendered Change Report section verbatim — items newly unblocked, newly verifiable, struck/deferred/revised/added, and the recommended next item. Name any currently-`PROVISIONAL` item directly (from the status header's count and the Coverage Check's "Open Questions Blocking Readiness" subsection) — don't make the user go find it in the rendered file themselves.
 
 **Remind the user to `git add .specclaw/analysis/*.md`** (including the refreshed `rebuild-backlog.md`) if these files aren't already tracked — grounding the lifecycle in them via `context.pin` only works once `git ls-files` can see them, since `specclaw-discover-context` enumerates candidates that way. See `docs/rebuild-workflow.md` for the full pin/grounding recipe.
@@ -87,5 +108,7 @@ It is a **status view, not evidence**: regenerated in full every invocation and 
 The backlog is an acceptance basis plus a computed Gate/Verification state — it does not, and cannot, replace golden-master outputs or human-supplied external-format/DLL/COM semantics for verifying a truly faithful rebuild. A `VERIFIABLE` item has a matching captured fixture; it does not mean the fixture's assertions were exhaustive. See each item's "Verification inputs needed" field, its computed `**Verification:**` line, and `docs/rebuild-workflow.md`'s Fidelity limitation section.
 
 `/specclaw:bf-rebuild-plan` never regenerates an existing backlog from scratch on a bare re-run, never renumbers a `BL-###` id, never deletes a struck or deferred item, and never touches a `**Status notes (human-added):**` block a human wrote into an item — those are the one hard invariant this command protects across every `--refresh`.
+
+It never writes to `module-stubs.md`. Creating an entry is `/specclaw:propose`'s job (from a human's explicit choice), completing one is `/specclaw:build`'s, and retiring one is a human decision Claude executes step by step. This command only *reads* the registry — it lists what could be retired and marks what is stub-backed, and it never flips a status, never edits stub code, and never concludes a stub is retirable from anything but a declared `BUILT:` note.
 
 It never **derives** an item's module from that item's rules. A module is declared by the planner agent in the item's own `**Module:**` field and read mechanically from there; an item with no usable declaration is rendered under `## Unassigned` with a warning, never quietly filed into whichever module happens to own its rules. It never collapses a module into a single backlog item — a module groups items that already exist at capability-bullet granularity, and item granularity rules are untouched by this hierarchy. It never orders modules by anything but the map's own `Depends on` fields, and when those describe a cycle it says so and recommends no module rather than printing a rank the iteration cap happened to stop at. It never writes into `module-map.md`: confirming, renaming, or regrouping a module is `/specclaw:bf-domain`'s job and a human's decision, and a `--module` run against an unconfirmed map still runs — it just says, on the backlog's own face, that the grouping is unconfirmed.

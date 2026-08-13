@@ -130,6 +130,24 @@
   automatically once decisions.md answers the underlying question, no
   manual cleanup.
 
+  STUB-BACKED marker: an item built against a dependency-bypass stub (see
+  templates/CONTRACT.md (m) and .specclaw/analysis/module-stubs.md) carries
+  its own line right after the heading, alongside any PROVISIONAL marker:
+  "⚠ STUB-BACKED — built against ST-001 (stub-interface, faking BL-014
+  (MOD-005)). Any replay verdict for this item says so until the stub is
+  retired."
+
+  It is deliberately NOT folded into the Verification: line. Verification
+  answers "is there a fixture for this?"; taint answers "was the thing under
+  test real?" — orthogonal axes, and collapsing them would let a
+  VERIFIABLE item read as fully proven when part of what it was checked
+  against was a placeholder. Like PROVISIONAL, it is recomputed from the
+  registry on every run and never persisted, so retiring a stub clears every
+  consuming item's marker automatically with no manual cleanup.
+
+  A stub is only ever created by a human choosing one at /specclaw:propose
+  time. Nothing in this document creates, edits, or retires one.
+
   BL-NNN IDs are permanent identifiers, not position — assigned once in
   dependency order on the first-ever run and never renumbered afterward.
   A later /specclaw:bf-rebuild-plan --refresh may append a genuinely new item
@@ -186,6 +204,42 @@
 -->
 
 {{coverage_check}}
+
+## Stub Retirement
+
+<!--
+  Bash-computed every run from .specclaw/analysis/module-stubs.md, never
+  agent-narrated. For every ACTIVE or RETIRING dependency-bypass stub
+  (templates/CONTRACT.md (m)): is the thing it substitutes built yet, and if
+  so, exactly what does it take to retire it?
+
+  THE TRIGGER IS A DECLARED SIGNAL, NOT PROSE. A stub becomes "ready to
+  retire" only when the item it substitutes carries a line beginning "BUILT:"
+  inside its own "**Status notes (human-added):**" block — e.g.
+  "BUILT: PR #42, merged 2026-08-10". Free text is not parsed: specclaw
+  records no built state of its own, and reading "done last week" as a
+  completion signal would be exactly the guess the bypass mechanism exists
+  to prevent. When a stub substitutes a whole MOD-###, EVERY active item of
+  that module must carry the signal — a module is not built because one of
+  its items is.
+
+  WHO DOES WHAT. Retirement is a human/Claude handoff, and each step below
+  names its actor. In short: a human decides the stub is gone and removes
+  the code; Claude re-runs the replays and, only on a clean run, flips the
+  registry entry to RETIRED citing that run id; a human decides what to do
+  with a FAIL. Claude never removes stub code on its own initiative and
+  never retires an entry on an unclean run.
+
+  The three-state flow (ACTIVE -> RETIRING -> RETIRED) exists because with
+  only two states the run that PROVES a stub is gone is itself stamped
+  tainted, and flipping to RETIRED first leaves a failing re-replay falsely
+  marked retired. See CONTRACT.md (m.4).
+
+  This section changes no Gate, no Verification, and no ordering. It is a
+  work list.
+-->
+
+{{stub_retirement}}
 
 ## Change Report
 

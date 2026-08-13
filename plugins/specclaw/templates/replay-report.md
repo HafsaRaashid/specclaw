@@ -5,7 +5,7 @@
 **Legacy commit:** {{legacy_commit_sha}}
 **Backlog item:** {{bl_item}}
 **Selected fixtures:** {{selected_count}}
-**Overall verdict:** {{overall_verdict}}
+**Overall verdict:** {{overall_verdict}}{{stub_taint_suffix}}
 **Rendered by:** specclaw v{{plugin_version}} — baseline recorded by specclaw v{{manifest_plugin_version}} (manifest schema {{manifest_schema}})
 
 {{evidence_block}}
@@ -70,10 +70,37 @@
 
 {{module_rollup}}
 
+## Stubs In Effect
+
+<!--
+  The dependency bypasses this run's verdict rests on (templates/CONTRACT.md
+  (m)). An ACTIVE entry listed here means: some of what these fixtures were
+  compared against was a deliberate placeholder for a module that has not been
+  built yet, chosen by a named human on a recorded date.
+
+  WHAT THIS DOES AND DOES NOT MEAN. The comparison genuinely ran and genuinely
+  produced the verdict above — taint changes no verdict, no divergence class,
+  and no exit code. What it qualifies is the verdict's STANDING: a PASS here
+  says the rebuild matched recorded behaviour while standing on something
+  unreal, and names exactly what. Whether that is acceptable is a human
+  judgement about a traceable decision, which is the most this format can
+  honestly offer.
+
+  A RETIRING entry taints nothing — the stub code is reported removed and this
+  run is its retirement verification. A clean verdict retires it; a FAIL sends
+  it back to ACTIVE.
+
+  Computed in bash by `specclaw-bf-replay resolve`/`render` from the registry's
+  own declared `Consumed by` field joined against each fixture's
+  `verifies_backlog_item`. No agent asserts any of it.
+-->
+
+{{stubs_in_effect}}
+
 ## Fixtures
 
-| Scenario | Verdict | Class | Sanction | Detail |
-|---|---|---|---|---|
+| Scenario | Verdict | Class | Sanction | Stubs | Detail |
+|---|---|---|---|---|---|
 {{fixture_table_rows}}
 
 ## Behavioural Divergences
@@ -152,7 +179,7 @@ _Business rules from domain-model.md not exercised by any REPLAYABLE fixture in 
 
 ## Verdict
 
-**{{overall_verdict}}**
+**{{overall_verdict}}**{{stub_taint_suffix}}
 
 Evaluated in this order, mechanically (`templates/CONTRACT.md` (j.3)):
 
@@ -162,5 +189,7 @@ Evaluated in this order, mechanically (`templates/CONTRACT.md` (j.3)):
 4. **PASS** — everything else: every exercised fixture matched, or diverged behaviourally under a decided CQ. Representation-only differences do not hold a run back from PASS. Exit code 0.
 
 Order matters: an unsanctioned behavioural divergence is **always** FAIL. No provisional, superseded, or unmapped state ever converts it into PASS-PENDING-DECISIONS.
+
+**Stub taint appears in none of the four rules and in no exit code** (`CONTRACT.md` (m.3)). An `(with active stubs: …)` suffix on the verdict above marks a result as resting on a recorded placeholder; it never softens a FAIL, and a stub-tainted FAIL is reported as FAIL with exit code 1 exactly as any other. Unlike PROVISIONAL — which *does* hold a run at PASS-PENDING-DECISIONS, because an open question means nobody has decided what correct is — a stub leaves the comparison itself sound. What is qualified is its standing, and standing is reported rather than computed.
 
 {{ui_fidelity_footer}}
