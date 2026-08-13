@@ -1303,39 +1303,44 @@ run_id_from_dir() {
 # .specclaw/changes/<name>/ to live under, and giving it a parallel tree would
 # fork the evidence layout for a selection dimension — the module is a
 # property of the run, not a new place to keep runs.
+# An ITEM run shares the corpus-wide pool for exactly the same reason a module
+# run does: a backlog item is not a change. It has no
+# .specclaw/changes/<name>/ to live under, and giving it a parallel tree would
+# fork the evidence layout for a third selection dimension. The item it covered
+# is recorded in that run's own run-metadata.json.
 evidence_dir_rel() {
   local target="$1" run_id="$2"
   case "$(target_kind "$target")" in
-    all|module) printf '.specclaw/replay/evidence/run-%s' "$run_id" ;;
-    *)          printf '.specclaw/changes/%s/replay-evidence/run-%s' "$target" "$run_id" ;;
+    all|module|item) printf '.specclaw/replay/evidence/run-%s' "$run_id" ;;
+    *)               printf '.specclaw/changes/%s/replay-evidence/run-%s' "$target" "$run_id" ;;
   esac
 }
 
 evidence_dir_abs() {
   local specclaw_dir_abs="$1" target="$2" run_id="$3"
   case "$(target_kind "$target")" in
-    all|module) printf '%s/replay/evidence/run-%s' "$specclaw_dir_abs" "$run_id" ;;
-    *)          printf '%s/changes/%s/replay-evidence/run-%s' "$specclaw_dir_abs" "$target" "$run_id" ;;
+    all|module|item) printf '%s/replay/evidence/run-%s' "$specclaw_dir_abs" "$run_id" ;;
+    *)               printf '%s/changes/%s/replay-evidence/run-%s' "$specclaw_dir_abs" "$target" "$run_id" ;;
   esac
 }
 
 evidence_root_abs() {
   local specclaw_dir_abs="$1" target="$2"
   case "$(target_kind "$target")" in
-    all|module) printf '%s/replay/evidence' "$specclaw_dir_abs" ;;
-    *)          printf '%s/changes/%s/replay-evidence' "$specclaw_dir_abs" "$target" ;;
+    all|module|item) printf '%s/replay/evidence' "$specclaw_dir_abs" ;;
+    *)               printf '%s/changes/%s/replay-evidence' "$specclaw_dir_abs" "$target" ;;
   esac
 }
 
-# The report path for a run. A module run gets its own suffixed filename in the
-# shared replay directory so several modules' reports coexist without one
-# overwriting another, and so the filename itself says which module it covers.
+# The report path for a run. A module or item run gets its own suffixed
+# filename in the shared replay directory so several of them coexist without
+# one overwriting another, and so the filename itself says what it covers.
 report_path_abs() {
   local specclaw_dir_abs="$1" target="$2" run_id="$3"
   case "$(target_kind "$target")" in
-    all)    printf '%s/replay/report-%s.md' "$specclaw_dir_abs" "$run_id" ;;
-    module) printf '%s/replay/report-%s-%s.md' "$specclaw_dir_abs" "$run_id" "$target" ;;
-    *)      printf '%s/changes/%s/replay-report.md' "$specclaw_dir_abs" "$target" ;;
+    all)         printf '%s/replay/report-%s.md' "$specclaw_dir_abs" "$run_id" ;;
+    module|item) printf '%s/replay/report-%s-%s.md' "$specclaw_dir_abs" "$run_id" "$target" ;;
+    *)           printf '%s/changes/%s/replay-report.md' "$specclaw_dir_abs" "$target" ;;
   esac
 }
 
@@ -1349,7 +1354,13 @@ report_path_abs() {
 compute_verdict_summary() {
   local compare_file="$1" sanction_file="$2" selected_count="$3"
   local merged
-  if [ -n "$sanction_file" ] && [ -f "$sanction_file" ]; then
+  if [ ! -f "$compare_file" ]; then
+    # A 0-fixture selection never reached `compare`, so there is nothing to
+    # read. Same reasoning as cmd_render's own empty-selection branch, reached
+    # independently here — these two readers must agree on the verdict without
+    # sharing code, which is the whole point of keeping them separate.
+    merged='[]'
+  elif [ -n "$sanction_file" ] && [ -f "$sanction_file" ]; then
     merged=$(jq --slurpfile s "$sanction_file" '
       (.results) as $r
       | ($s[0].sanctions // []) as $sc
@@ -1386,7 +1397,12 @@ compute_verdict_summary() {
     # behavioural divergence can never be downgraded to PASS-PENDING-DECISIONS
     # by a provisional, superseded, or unmapped state sitting alongside it.
     | . + {
-        overall: (if ($selected > 0 and .not_replayable == $selected) then "INCOMPLETE"
+        # `$selected == 0` is INCOMPLETE for the same reason a fully
+        # unreplayable selection is: nothing was exercised. Without it the
+        # counts are all 0, no rule fires, and the metadata would record PASS
+        # for a run that compared nothing — disagreeing with the report the
+        # same run wrote.
+        overall: (if ($selected == 0 or ($selected > 0 and .not_replayable == $selected)) then "INCOMPLETE"
                   elif (.error > 0 or .diverged > 0) then "FAIL"
                   elif (.provisional_exercised > 0 or .superseded_exercised > 0 or .unmapped_error_code > 0) then "PASS-PENDING-DECISIONS"
                   else "PASS" end)
@@ -1494,10 +1510,24 @@ cmd_render() {
   local selection="$run_dir/selection.json" compare="$run_dir/compare.json"
   local sanction="$run_dir/sanction-verified.json"
   [ -f "$selection" ] || die "selection.json missing in ${run_dir}."
-  [ -f "$compare" ] || die "compare.json missing in ${run_dir}."
+
+  # THE EMPTY-SELECTION CONTRACT (resolve's other half). A 0-fixture selection
+  # never reached an agent, a test run, or `compare`, so there is no
+  # compare.json to require — demanding one would turn the contract's clean
+  # result back into the precondition failure it exists to replace. Every count
+  # below then computes to 0 over an empty results set, so this stays ONE
+  # rendering path rather than a second, separately-drifting one.
+  local empty_selection=false
+  [ "$(jq -r '.selected_count // 0' "$selection")" -eq 0 ] && empty_selection=true
+  if ! $empty_selection; then
+    [ -f "$compare" ] || die "compare.json missing in ${run_dir}."
+  fi
 
   local legacy_sha bl_item selected_count manifest_pv manifest_schema this_version
-  legacy_sha=$(jq -r '.legacy_commit_sha' "$selection")
+  # `// "—"` covers the empty-selection case only: with no fixtures selected
+  # there is no captured commit to name. A non-empty selection always carries
+  # one, so this changes nothing for any run that compares anything.
+  legacy_sha=$(jq -r '.legacy_commit_sha // "—"' "$selection")
   bl_item=$(jq -r '.bl_item // "—"' "$selection")
   selected_count=$(jq '.selected_count' "$selection")
   manifest_pv=$(jq -r '.manifest_plugin_version // "unknown"' "$selection")
@@ -1508,7 +1538,9 @@ cmd_render() {
   # same business decision expressed differently and was never put to the
   # auditor at all (CONTRACT.md (j.2)).
   local merged
-  if [ -f "$sanction" ]; then
+  if $empty_selection; then
+    merged='[]'
+  elif [ -f "$sanction" ]; then
     merged=$(jq --slurpfile s "$sanction" '
       (.results) as $r
       | ($s[0].sanctions // []) as $sc
@@ -1548,7 +1580,15 @@ cmd_render() {
   # soft-block case: an unsanctioned behavioural divergence is always FAIL and
   # is never downgraded by a provisional/superseded/unmapped state beside it.
   local overall exit_code
-  if [ "$selected_count" -gt 0 ] && [ "$nr_total_n" -eq "$selected_count" ]; then
+  if $empty_selection; then
+    # Nothing was exercised because there was nothing to exercise. That is the
+    # SAME state rule 1 describes — a non-empty selection where nothing ran —
+    # and it takes the same verdict and the same exit code. Without this
+    # branch the counts would all be 0, no rule would fire, and the run would
+    # fall through to PASS/exit 0: a clean pass asserting a comparison that
+    # never happened, which is the one outcome this contract must never allow.
+    overall="INCOMPLETE"; exit_code=2
+  elif [ "$selected_count" -gt 0 ] && [ "$nr_total_n" -eq "$selected_count" ]; then
     overall="INCOMPLETE"; exit_code=2
   elif [ "$error_n" -gt 0 ] || [ "$behav_unsanctioned_n" -gt 0 ]; then
     overall="FAIL"; exit_code=1
@@ -1840,6 +1880,21 @@ This package contains the generated tests (source), the actual outputs produced 
   content="$(fill_placeholder "$content" "{{bl_item}}" "$bl_item")"
   content="$(fill_placeholder "$content" "{{selected_count}}" "$selected_count")"
   content="$(fill_placeholder "$content" "{{evidence_block}}" "$evidence_block")"
+  # The empty-selection contract's own statement, on the report's face rather
+  # than only in resolve's stdout — a retained report has to explain its own
+  # INCOMPLETE without the reader going back to a run log that no longer exists.
+  local empty_notice=""
+  if $empty_selection; then
+    empty_notice="
+> **NO BASELINE DATA — 0 fixtures mapped to ${bl_item}.** This item is active and
+> its acceptance basis is recorded, but no fixture in the baseline manifest pins
+> any of the \`DR-###\` rules that basis cites — so there was nothing to compare
+> the rebuild against. Nothing failed here and nothing passed: the verdict is
+> **INCOMPLETE** (exit code 2). Design and capture scenarios covering this
+> item's rules (\`/specclaw:bf-baseline\`), then replay it again.
+"
+  fi
+  content="$(fill_placeholder "$content" "{{empty_selection_notice}}" "$empty_notice")"
   content="$(fill_placeholder "$content" "{{plugin_version}}" "$this_version")"
   content="$(fill_placeholder "$content" "{{manifest_plugin_version}}" "$manifest_pv")"
   content="$(fill_placeholder "$content" "{{manifest_schema}}" "$manifest_schema")"
@@ -1882,7 +1937,7 @@ This package contains the generated tests (source), the actual outputs produced 
   local out_path
   out_path="$(report_path_abs "$specclaw_dir_abs" "$target" "$evidence_run_id")"
   case "$(target_kind "$target")" in
-    all|module) mkdir -p "${specclaw_dir_abs}/replay" ;;
+    all|module|item) mkdir -p "${specclaw_dir_abs}/replay" ;;
   esac
   printf '%s\n' "$content" > "$out_path"
 
@@ -1997,16 +2052,30 @@ cmd_finalize() {
   # a retained run can never be cited later as clean proof without the
   # qualification travelling with it. `module-status` reads stub_tainted_items
   # across runs to find each item's LATEST verdict.
+  # Both read selection.json's `bl_items_resolved` — the acceptance-basis-derived
+  # attribution — not the manifest's `verifies_backlog_item`, which on a
+  # correctly-run project holds the placeholder and left both of these
+  # permanently empty, so `module-status` had no item verdicts to read at all.
   local stubs_effect tainted_items covered_items stub_tainted_flag
   stubs_effect="$(jq -c '[ (.stubs_in_effect // [])[].id ]' "$selection" 2>/dev/null || echo '[]')"
   tainted_items="$(jq -c '[ .fixtures[] | select(((.stub_refs // []) | length) > 0)
-                            | .verifies_backlog_item // "" | [scan("BL-[0-9]{3}")][0]
-                            | select(. != null) ] | unique' "$selection" 2>/dev/null || echo '[]')"
+                            | (.bl_items_resolved // [])[] ] | unique' "$selection" 2>/dev/null || echo '[]')"
   # Every BL item this run touched, tainted or not. Without it, "this item's
   # LATEST verdict is stub-tainted" is not computable: a later clean run would
   # be invisible, and the item would read as tainted forever.
-  covered_items="$(jq -c '[ .fixtures[] | .verifies_backlog_item // ""
-                            | [scan("BL-[0-9]{3}")][0] | select(. != null) ] | unique' "$selection" 2>/dev/null || echo '[]')"
+  #
+  # An ITEM-scoped run records EXACTLY the item it was asked about. Its
+  # fixtures can legitimately resolve to other items too (two acceptance bases
+  # sharing a rule), but this run is a statement about the one item named on the
+  # command line — letting a shared fixture silently enter a second item's
+  # verdict history would make `--item BL-020` quietly claim something about
+  # BL-014. That is exactly the false-verdict problem the module rollup's
+  # PARTIAL marking exists to prevent, applied to the item dimension.
+  if [ "$(target_kind "$target")" = "item" ]; then
+    covered_items="$(jq -nc --arg bl "$target" '[$bl]')"
+  else
+    covered_items="$(jq -c '[ .fixtures[] | (.bl_items_resolved // [])[] ] | unique' "$selection" 2>/dev/null || echo '[]')"
+  fi
   stub_tainted_flag="$(jq -r 'if (.stub_tainted_exercised // 0) > 0 then "true" else "false" end' <<< "$counts")"
 
   jq -n \

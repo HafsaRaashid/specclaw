@@ -7,7 +7,7 @@
 **Selected fixtures:** {{selected_count}}
 **Overall verdict:** {{overall_verdict}}{{stub_taint_suffix}}
 **Rendered by:** specclaw v{{plugin_version}} — baseline recorded by specclaw v{{manifest_plugin_version}} (manifest schema {{manifest_schema}})
-
+{{empty_selection_notice}}
 {{evidence_block}}
 
 ## Summary
@@ -183,7 +183,7 @@ _Business rules from domain-model.md not exercised by any REPLAYABLE fixture in 
 
 Evaluated in this order, mechanically (`templates/CONTRACT.md` (j.3)):
 
-1. **INCOMPLETE** — the selected fixture set was non-empty but every fixture in it came back NOT REPLAYABLE (nothing was actually exercised). Exit code 2.
+1. **INCOMPLETE** — nothing was actually exercised. Either the selected fixture set was non-empty and every fixture in it came back NOT REPLAYABLE, or the selection was empty in the first place: a valid, active backlog item with genuinely no fixtures mapped to it (see the header notice). Both are the same fact about this run — no comparison happened — so both take this verdict and exit code 2. An empty selection is a clean result, not a broken precondition, and it is never reported as a PASS. Exit code 2.
 2. **FAIL** — at least one ERROR, or at least one **behavioural** divergence with no sanctioning decided CQ. "Looks more correct" is never a sanction. Exit code 1.
 3. **PASS-PENDING-DECISIONS** — no failure above, but at least one exercised fixture is PROVISIONAL (an open pending question still blocks the rule it pins), SUPERSEDED (its scenario definition changed since capture — recapture it), or carries an unmapped error code. Gates CI/PR exactly like FAIL (exit code 1); analysis and build keep moving, but this run is not yet citable as final proof.
 4. **PASS** — everything else: every exercised fixture matched, or diverged behaviourally under a decided CQ. Representation-only differences do not hold a run back from PASS. Exit code 0.
