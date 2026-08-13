@@ -176,8 +176,23 @@ Each `fixtures[]` entry carries:
 - `normalized_fields_resolved`: `[{"path": "…", "matches": N}]` — proof that
   every declared normalization path actually resolved against this fixture's
   output. `record` refuses to write a manifest where any `matches` is `0`.
+- `verifies_backlog_item`: **metadata, and a cross-check only — never a join
+  key.** `/specclaw:bf-replay` resolves a `BL-0##` to its fixtures through the
+  item's own acceptance-basis `DR-###` citations in `rebuild-backlog.md`
+  matched against `business_rules_pinned` — the same chain
+  `/specclaw:bf-rebuild-plan` computes each item's `**Verification:**` line
+  from, so the two are testably equal. This field cannot carry that join: the
+  pipeline's order records a baseline (A4) *before* the backlog exists (A5), so
+  a first-recorded manifest necessarily holds the designer's `not yet
+  backlog-linked` placeholder on every entry. `resolve` therefore ignores the
+  placeholder silently and, when the field *is* populated and disagrees with
+  the join, emits a `WARN` naming both sets without changing its selection —
+  one of the two documents is stale and bash cannot know which. `record` fills
+  it in best-effort from `rebuild-backlog.md` when that document exists,
+  **never overwriting a value a scenario declares itself**, and nothing
+  downstream may require the result.
 - plus the existing `scenario_id`, `seam`, `business_rules_pinned`,
-  `verifies_backlog_item`, `fixture_path`, `content_hash`,
+  `fixture_path`, `content_hash`,
   `scenario_content_hash`, `provisional_ref`, `captured_at`, `anchor_date`,
   `legacy_commit_sha`, `runtime_version`, `normalized_fields`.
 
@@ -695,7 +710,7 @@ re-derived downstream.
 | Which strategy substitutes the dependency | **a human**, from the four offered | `Strategy` |
 | Which items consumed the stub | `/specclaw:propose`, from the item being proposed | `Consumed by` |
 | What the stub concretely fakes, and where it lives | the **build agent**, in the rebuild's own stack | `Fakes`, `Implementation` (cited `file:line`) |
-| Which fixtures are tainted | **bash**, joining `Consumed by` → `verifies_backlog_item` | `stub_refs` |
+| Which fixtures are tainted | **bash**, joining `Consumed by` → each fixture's `bl_items_resolved` (its acceptance-basis-derived BL set, per (b)) | `stub_refs` |
 | Whether a module is honestly PASSED | **bash**, from `stub_refs` on the latest run | the module status view |
 
 **A bypass is never agent-decided and never a silent default.** An agent may
@@ -711,8 +726,8 @@ the seam-layer verdict, and `PROVISIONAL` out of agent hands (j).
 
 ### (m.3) Taint is a marker, exactly like PROVISIONAL
 
-A fixture is **stub-tainted** when the `BL-0##` its `verifies_backlog_item`
-names appears in the `Consumed by` field of an `ACTIVE` registry entry. That
+A fixture is **stub-tainted** when any `BL-0##` in its `bl_items_resolved`
+appears in the `Consumed by` field of an `ACTIVE` registry entry. That
 produces `stub_refs: ["ST-NNN", ...]` on the fixture, which flows:
 
 ```

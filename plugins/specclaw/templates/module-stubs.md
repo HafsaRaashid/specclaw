@@ -74,10 +74,14 @@
     MOD-### alone when the whole module is stood in for>
   - **Strategy:** stub-interface | mock-data | feature-flag | item-split
   - **Consumed by:** <BL-0##, ... — the items built against this stub. THIS
-    IS THE JOIN KEY everything downstream keys off: a fixture whose
-    verifies_backlog_item names one of these is stamped stub_refs: [ST-###]
-    by /specclaw:bf-replay, and its verdict says so. An entry consumed by
-    nothing taints nothing — which is correct, and visible.>
+    IS THE JOIN KEY everything downstream keys off: a fixture that verifies
+    one of these items is stamped stub_refs: [ST-###] by
+    /specclaw:bf-replay, and its verdict says so. Which item a fixture
+    verifies is derived from that item's own acceptance-basis DR-### rules
+    against the fixture's business_rules_pinned — never from the manifest's
+    verifies_backlog_item field, which on a first-recorded baseline holds a
+    placeholder and left this join matching nothing at all. An entry
+    consumed by nothing taints nothing — which is correct, and visible.>
   - **Chosen by:** <human name>, <YYYY-MM-DD>
   - **Fakes:** <what it concretely does instead of the real thing, in the
     project's own language. Agent-written AT BUILD TIME, once the stub
@@ -122,9 +126,10 @@
   Does:
     - /specclaw:propose  reads it to see whether a dependency already has an
       entry, and appends the entry a human chose.
-    - /specclaw:bf-replay resolve  joins Consumed by -> the selected
-      fixtures' verifies_backlog_item, stamping stub_refs on each tainted
-      fixture and carrying it through compare.json into the report and
+    - /specclaw:bf-replay resolve  joins Consumed by -> each selected
+      fixture's bl_items_resolved (the BL items whose acceptance-basis DR
+      rules that fixture pins), stamping stub_refs on each tainted fixture
+      and carrying it through compare.json into the report and
       run-metadata.json.
     - /specclaw:bf-rebuild-plan  marks consuming items ⚠ STUB-BACKED, and
       computes the Stub Retirement block from Substitutes vs. the
