@@ -510,6 +510,365 @@ assert_eq "an untagged current manifest also refuses a --module run" "1" "$rc"
 assert_contains "that refusal points at design mode, not just record" "$out" "design mode"
 
 # ─────────────────────────────────────────────────────────────────────────────
+echo "== item scope and the acceptance-basis join (CONTRACT.md (b)) =="
+
+# A fixture repo built in the PIPELINE'S OWN ORDER: /specclaw:bf-baseline (A4)
+# designs and records BEFORE /specclaw:bf-rebuild-plan (A5) exists, so every
+# scenario carries the placeholder agents/bf-baseline-designer.md instructs the
+# designer to write when rebuild-backlog.md is absent. That is the state of
+# every correctly-run project's first manifest, and it is the state in which a
+# join on `verifies_backlog_item` selected nothing at all.
+#
+# rebuild-backlog.md is then produced by a REAL specclaw-bf-rebuild-collect
+# render run, never hand-written. Its "**Verification:** VERIFIABLE — fixtures:"
+# lines are the independent oracle these tests compare selection against; a
+# hand-written backlog would only assert this suite's own assumption about the
+# format, which is exactly what the oracle exists to avoid.
+COLLECT_BIN="$PLUGIN_ROOT/bin/specclaw-bf-rebuild-collect"
+
+seed_item() {
+  local root="$1"
+  rm -rf "$root"
+  mkdir -p "$root/.specclaw/baseline/fixtures" "$root/.specclaw/analysis" \
+           "$root/.specclaw/changes/credit-notes"
+  cat > "$root/.specclaw/baseline/scenarios.md" <<'SCEOF'
+### GM-001 — issue a credit note
+
+- **Seam:** Svc.Issue
+- **Seam layer:** service
+- **Business rules pinned:** DR-001
+- **Modules:** MOD-001
+- **Verifies backlog item:** not yet backlog-linked — rebuild-backlog.md does not exist yet
+
+### GM-002 — reject a re-issue
+
+- **Seam:** Svc.Issue
+- **Seam layer:** service
+- **Business rules pinned:** DR-001, DR-002
+- **Modules:** MOD-001, MOD-002
+- **Verifies backlog item:** not yet backlog-linked — rebuild-backlog.md does not exist yet
+
+### GM-003 — post to the ledger
+
+- **Seam:** Svc.Post
+- **Seam layer:** service
+- **Business rules pinned:** DR-003
+- **Modules:** MOD-002
+- **Verifies backlog item:** not yet backlog-linked — rebuild-backlog.md does not exist yet
+SCEOF
+  printf '### INVOICE_ALREADY_ISSUED\n\n- **Condition:** x\n- **Legacy source:** a.ext:1\n' \
+    > "$root/.specclaw/baseline/error-map.md"
+  local i
+  for i in 1 2 3; do
+    cat > "$root/.specclaw/baseline/fixtures/GM-00$i.json" <<FXEOF
+{"scenario_id":"GM-00$i","captured_at":"2026-08-07T10:1${i}:00Z","anchor_date":"2026-08-07",
+ "legacy_commit_sha":"abc","runtime_version":"1","normalized_fields":[],
+ "input":{},"output":{"outcome":"OK","error_code":null,"threw":false,"n":$i}}
+FXEOF
+  done
+  cat > "$root/.specclaw/analysis/module-map.md" <<'MAPEOF'
+# Module Map: t
+
+**Status:** CONFIRMED by tester, 2026-08-11
+
+## Modules
+
+### MOD-001 — Billing
+
+- **Business rules:** DR-001, DR-002
+- **Depends on:** None
+
+### MOD-002 — Ledger
+
+- **Business rules:** DR-003
+- **Depends on:** MOD-001
+MAPEOF
+  printf '### DR-001 — a\n### DR-002 — b\n### DR-003 — c\n' \
+    > "$root/.specclaw/analysis/domain-model.md"
+  printf 'Rebuild-backlog item 20 — credit notes.\n' \
+    > "$root/.specclaw/changes/credit-notes/proposal.md"
+  bash "$BASELINE_BIN" record "$root/.specclaw" >/dev/null 2>&1
+
+  # A5 runs AFTER: the backlog is rendered by its own tool, from a draft.
+  cat > "$root/draft.md" <<'DREOF'
+STRIKE: BL-023 | superseded by BL-020, 2026-08-12
+
+### BL-020 — Credit note issuance
+
+**Module:** MOD-001
+**Maps to capability:** Issue credit notes
+**Depends on:** None
+**Acceptance basis (domain-model.md):**
+- DR-001: a credit note is issued for a settled invoice.
+- DR-002: a credit note is never issued twice.
+
+**Verification inputs needed:**
+- golden-master capture of the issuance seam
+
+### BL-021 — Ledger posting
+
+**Module:** MOD-002
+**Maps to capability:** Post to ledger
+**Depends on:** BL-020
+**Acceptance basis (domain-model.md):**
+- DR-003: every issued note posts to the ledger.
+
+**Verification inputs needed:**
+- golden-master capture of the posting seam
+
+### BL-022 — Ledger export
+
+**Module:** MOD-002
+**Maps to capability:** Export
+**Depends on:** None
+**Acceptance basis (domain-model.md):**
+- DR-777: export totals must reconcile.
+
+**Verification inputs needed:**
+- none beyond the acceptance criteria above
+DREOF
+  bash "$COLLECT_BIN" render "$root/.specclaw" "$root/draft.md" >/dev/null 2>&1
+}
+
+# The backlog's OWN claim about which fixtures verify an item, read back off the
+# rendered "**Verification:**" line. GM ids only, sorted — the line also carries
+# each fixture's legacy commit in parentheses, and ordering is not the claim.
+oracle_fixtures() {
+  local backlog="$1" bl="$2"
+  awk -v id="$bl" '$0 ~ "^### " id " " {f=1} f && /^\*\*Verification:/ {print; exit}' "$backlog" \
+    | grep -oE 'GM-[0-9]{3}' | sort -u | paste -sd, - | tr -d '\r'
+}
+selected_ids() {
+  jq -r '[.fixtures[].scenario_id] | sort | join(",")' "$1" | tr -d '\r'
+}
+
+I="$WORK/item"
+seed_item "$I"
+IBL="$I/.specclaw/analysis/rebuild-backlog.md"
+
+# ── A. The tool-internal consistency oracle ─────────────────────────────────
+# --item's selection must equal the backlog's own Verification fixture list,
+# because both are the same BL → DR → GM chain. If these two ever disagree,
+# one of them is lying to a human reading a report.
+bash "$REPLAY_BIN" resolve "$I/.specclaw" BL-020 "$I/.specclaw/replay/run-a1/selection.json" >/dev/null 2>&1
+assert_eq "--item BL-020 selects exactly the backlog's own Verification list" \
+  "$(oracle_fixtures "$IBL" BL-020)" "$(selected_ids "$I/.specclaw/replay/run-a1/selection.json")"
+bash "$REPLAY_BIN" resolve "$I/.specclaw" BL-021 "$I/.specclaw/replay/run-a2/selection.json" >/dev/null 2>&1
+assert_eq "--item BL-021 selects exactly the backlog's own Verification list" \
+  "$(oracle_fixtures "$IBL" BL-021)" "$(selected_ids "$I/.specclaw/replay/run-a2/selection.json")"
+assert_eq "the oracle is a real claim, not an empty string" "GM-001,GM-002" \
+  "$(oracle_fixtures "$IBL" BL-020)"
+assert_eq "an item run records its own scope and item" "item BL-020" \
+  "$(jq -r '.target_kind + " " + .bl_item' "$I/.specclaw/replay/run-a1/selection.json" | tr -d '\r')"
+assert_eq "--item needs no change directory" "no" \
+  "$([ -d "$I/.specclaw/changes/BL-020" ] && echo yes || echo no)"
+
+# ── B. The placeholder manifest is the normal case, and is silent ────────────
+assert_eq "the manifest under test really does carry the placeholder" "3" \
+  "$(jq '[.fixtures[] | select(.verifies_backlog_item | test("not yet backlog-linked"))] | length' \
+     "$I/.specclaw/baseline/manifest.json" | tr -d '\r')"
+out="$(bash "$REPLAY_BIN" resolve "$I/.specclaw" BL-020 "$I/.specclaw/replay/run-b/selection.json" 2>&1 >/dev/null)"
+assert_eq "a placeholder manifest still selects correctly" "GM-001,GM-002" \
+  "$(selected_ids "$I/.specclaw/replay/run-b/selection.json")"
+assert_eq "and says nothing about verifies_backlog_item — there is no disagreement" "0" \
+  "$(printf '%s' "$out" | grep -c 'verifies_backlog_item' || true)"
+# The same join drives a change-scoped run, via the item the change cites.
+bash "$REPLAY_BIN" resolve "$I/.specclaw" credit-notes "$I/.specclaw/replay/run-b2/selection.json" >/dev/null 2>&1
+assert_eq "a change-scoped run resolves through the same join" "GM-001,GM-002" \
+  "$(selected_ids "$I/.specclaw/replay/run-b2/selection.json")"
+assert_eq "per-fixture BL attribution is derived, not read from the placeholder" "BL-020" \
+  "$(jq -r '[.fixtures[] | (.bl_items_resolved // [])[]] | unique | join(",")' \
+     "$I/.specclaw/replay/run-b/selection.json" | tr -d '\r')"
+
+# ── C. A populated field that disagrees is a WARN naming both sets ───────────
+seed_item "$I"
+jq '.fixtures[0].verifies_backlog_item = "BL-099 — something else"' "$I/.specclaw/baseline/manifest.json" \
+  > "$I/m" && mv "$I/m" "$I/.specclaw/baseline/manifest.json"
+# Re-hash is unnecessary: content_hash covers the FIXTURE file, not the manifest.
+out="$(bash "$REPLAY_BIN" resolve "$I/.specclaw" BL-020 "$I/.specclaw/replay/run-c/selection.json" 2>&1 >/dev/null)"
+assert_contains "a disagreeing verifies_backlog_item warns" "$out" "WARN"
+assert_contains "the warning names what the DR join selected" "$out" "selects: GM-001, GM-002"
+assert_contains "the warning names what the field claims instead" "$out" "field names: none"
+assert_contains "the warning names the stale-document fix" "$out" "re-run /specclaw:bf-baseline --record"
+assert_eq "but selection is unchanged — the field is never load-bearing" "GM-001,GM-002" \
+  "$(selected_ids "$I/.specclaw/replay/run-c/selection.json")"
+
+# ── D. A valid item with genuinely zero fixtures ────────────────────────────
+# The empty-selection contract: a clean INCOMPLETE, never a precondition crash
+# and never an invented fixture. The backlog's own Verification line agrees.
+seed_item "$I"
+assert_contains "the backlog itself reports BL-022 as NO BASELINE DATA" \
+  "$(awk '$0 ~ "^### BL-022 " {f=1} f && /^\*\*Verification:/ {print; exit}' "$IBL")" \
+  "NO BASELINE DATA"
+out="$(bash "$REPLAY_BIN" resolve "$I/.specclaw" BL-022 "$I/.specclaw/replay/run-d/selection.json" 2>&1)"; rc=$?
+assert_eq "a zero-fixture item resolves cleanly, not as a precondition failure" "0" "$rc"
+assert_contains "resolve states the contract's message verbatim" "$out" \
+  "NO BASELINE DATA — 0 fixtures mapped to BL-022"
+assert_eq "selection.json is still written, with nothing invented in it" "0" \
+  "$(jq -r '.selected_count' "$I/.specclaw/replay/run-d/selection.json" | tr -d '\r')"
+assert_eq "and no fixtures at all" "0" \
+  "$(jq -r '.fixtures | length' "$I/.specclaw/replay/run-d/selection.json" | tr -d '\r')"
+bash "$REPLAY_BIN" init-rundir "$I/.specclaw" "$I/.specclaw/replay/run-d" >/dev/null 2>&1
+out="$(bash "$REPLAY_BIN" render "$I/.specclaw" BL-022 "$I/.specclaw/replay/run-d" 2>&1)"; rc=$?
+assert_eq "an empty selection renders INCOMPLETE" "2" "$rc"
+# Deterministic by construction: run_id is the run directory's name minus its
+# "run-" prefix, so a run dir of run-d reports to report-d-BL-022.md.
+DREPORT="$I/.specclaw/replay/report-d-BL-022.md"
+assert_eq "an item run writes its report to the run-id + BL-### suffixed path" "yes" \
+  "$([ -f "$DREPORT" ] && echo yes || echo no)"
+assert_contains "the verdict is INCOMPLETE, never PASS" "$(cat "$DREPORT")" '**INCOMPLETE**'
+assert_contains "and the report carries the contract's message on its face" "$(cat "$DREPORT")" \
+  "NO BASELINE DATA — 0 fixtures mapped to BL-022"
+# A malformed manifest keeps its LOUD failure — the placeholder and an empty
+# selection are neither of these, and must not be confused with them.
+seed_item "$I"
+printf 'not json at all' > "$I/.specclaw/baseline/manifest.json"
+out="$(bash "$REPLAY_BIN" resolve "$I/.specclaw" BL-020 "$I/.specclaw/replay/run-d2/selection.json" 2>&1)"; rc=$?
+assert_eq "a malformed manifest still fails loudly" "1" "$rc"
+assert_contains "and says so" "$out" "not valid JSON"
+
+# ── E. Item validation ──────────────────────────────────────────────────────
+seed_item "$I"
+out="$(bash "$REPLAY_BIN" resolve "$I/.specclaw" BL-404 "$I/.specclaw/replay/run-e1/selection.json" 2>&1)"; rc=$?
+assert_eq "--item on an unknown BL fails" "1" "$rc"
+assert_contains "and names the items that do exist" "$out" "Items that do exist:"
+assert_eq "nothing is created on disk when it fails" "no" \
+  "$([ -d "$I/.specclaw/replay/run-e1" ] && echo yes || echo no)"
+out="$(bash "$REPLAY_BIN" resolve "$I/.specclaw" BL-023 "$I/.specclaw/replay/run-e2/selection.json" 2>&1)"; rc=$?
+assert_eq "--item on a STRUCK tombstone fails" "1" "$rc"
+assert_contains "and says it is a tombstone, not an item" "$out" "STRUCK tombstone"
+assert_eq "nothing is created for a tombstone either" "no" \
+  "$([ -d "$I/.specclaw/replay/run-e2" ] && echo yes || echo no)"
+# A struck id is also never attributed to a fixture by the reverse join.
+bash "$REPLAY_BIN" resolve "$I/.specclaw" --all "$I/.specclaw/replay/run-e3/selection.json" >/dev/null 2>&1
+assert_eq "a STRUCK item never appears in any fixture's attribution" "0" \
+  "$(jq -r '[.fixtures[] | (.bl_items_resolved // [])[] | select(. == "BL-023")] | length' \
+     "$I/.specclaw/replay/run-e3/selection.json" | tr -d '\r')"
+
+# ── F. Module scope against the new join, and the cross-module fixture ──────
+seed_item "$I"
+bash "$REPLAY_BIN" resolve "$I/.specclaw" MOD-001 "$I/.specclaw/replay/run-f1/selection.json" >/dev/null 2>&1
+assert_eq "MOD-001 selects every fixture tagged with it" "GM-001,GM-002" \
+  "$(selected_ids "$I/.specclaw/replay/run-f1/selection.json")"
+bash "$REPLAY_BIN" resolve "$I/.specclaw" MOD-002 "$I/.specclaw/replay/run-f2/selection.json" >/dev/null 2>&1
+assert_eq "MOD-002 selects every fixture tagged with it" "GM-002,GM-003" \
+  "$(selected_ids "$I/.specclaw/replay/run-f2/selection.json")"
+# THE CROSS-MODULE RULE: GM-002 carries ["MOD-001","MOD-002"] and is selected by
+# BOTH, because a shared fixture is the flow that breaks when one module is
+# rebuilt alone. A module run that hid it would be a false verdict.
+assert_eq "the cross-module fixture is selected by MOD-001" "1" \
+  "$(jq -r '[.fixtures[] | select(.scenario_id == "GM-002")] | length' \
+     "$I/.specclaw/replay/run-f1/selection.json" | tr -d '\r')"
+assert_eq "the cross-module fixture is selected by MOD-002 as well" "1" \
+  "$(jq -r '[.fixtures[] | select(.scenario_id == "GM-002")] | length' \
+     "$I/.specclaw/replay/run-f2/selection.json" | tr -d '\r')"
+
+# ── G. --all is the full corpus; a change-scoped run is unchanged ───────────
+bash "$REPLAY_BIN" resolve "$I/.specclaw" --all "$I/.specclaw/replay/run-g1/selection.json" >/dev/null 2>&1
+assert_eq "--all selects the whole manifest" "GM-001,GM-002,GM-003" \
+  "$(selected_ids "$I/.specclaw/replay/run-g1/selection.json")"
+assert_eq "--all matches the manifest's own fixture count" \
+  "$(jq -r '.fixtures | length' "$I/.specclaw/baseline/manifest.json" | tr -d '\r')" \
+  "$(jq -r '.selected_count' "$I/.specclaw/replay/run-g1/selection.json" | tr -d '\r')"
+# Byte-identity for the pre-existing change scope, on the populated-manifest
+# fixture the rest of this suite uses (where the field and the join agree):
+# resolving twice must produce the same selection.json byte for byte, and the
+# per-fixture payload must still carry every field a downstream step reads.
+seed_replay "$WORK/g"
+bash "$REPLAY_BIN" resolve "$WORK/g/.specclaw" thing "$WORK/g/.specclaw/replay/run-g2/selection.json" >/dev/null 2>&1
+bash "$REPLAY_BIN" resolve "$WORK/g/.specclaw" thing "$WORK/g/.specclaw/replay/run-g3/selection.json" >/dev/null 2>&1
+assert_eq "a change-scoped selection is byte-identical across runs" \
+  "$(sha256sum < "$WORK/g/.specclaw/replay/run-g2/selection.json" | awk '{print $1}')" \
+  "$(sha256sum < "$WORK/g/.specclaw/replay/run-g3/selection.json" | awk '{print $1}')"
+assert_eq "and still carries every field the pipeline reads off a fixture" "true" \
+  "$(jq -r '[.fixtures[0] | has("scenario_id"), has("seam_layer"), has("status"),
+              has("content_hash"), has("normalized_fields"), has("business_rules_pinned"),
+              has("stub_refs"), has("bl_items_resolved")] | all' \
+     "$WORK/g/.specclaw/replay/run-g2/selection.json" | tr -d '\r')"
+
+# ── H. Illegal scope combinations, mechanically refused ─────────────────────
+# parse-target is where this is enforced: deciding whether an invocation is
+# legal is a mechanical job, so it is not left to the skill's prose.
+assert_eq "a bare change name is legal" "my-change" \
+  "$(bash "$REPLAY_BIN" parse-target my-change 2>&1)"
+assert_eq "--item BL-### is legal" "BL-020" \
+  "$(bash "$REPLAY_BIN" parse-target --item BL-020 2>&1)"
+assert_eq "--module MOD-### is legal" "MOD-001" \
+  "$(bash "$REPLAY_BIN" parse-target --module MOD-001 2>&1)"
+assert_eq "--all is legal" "--all" "$(bash "$REPLAY_BIN" parse-target --all 2>&1)"
+assert_eq "a retention flag qualifies a run rather than selecting one" "my-change" \
+  "$(bash "$REPLAY_BIN" parse-target my-change --discard 2>&1)"
+assert_eq "--prune-evidence's count is never mistaken for a change name" "MOD-001" \
+  "$(bash "$REPLAY_BIN" parse-target --module MOD-001 --prune-evidence 3 2>&1)"
+illegal() {
+  local desc="$1"; shift
+  local out; out="$(bash "$REPLAY_BIN" parse-target "$@" 2>&1)"; local rc=$?
+  if [ "$rc" -eq 0 ]; then bad "$desc" "expected a refusal, got [${out}]"; return; fi
+  case "$out" in ERROR:*) ok "$desc" ;; *) bad "$desc" "refused but not loudly: [${out}]" ;; esac
+}
+illegal "--item with --module is refused"        --item BL-020 --module MOD-001
+illegal "--item with --all is refused"           --item BL-020 --all
+illegal "--module with --all is refused"         --module MOD-001 --all
+illegal "two --item flags are refused"           --item BL-020 --item BL-021
+illegal "a change name with --item is refused"   my-change --item BL-020
+illegal "a change name with --module is refused" my-change --module MOD-001
+illegal "a change name with --all is refused"    my-change --all
+illegal "two positional targets are refused"     my-change other-change
+illegal "--item with no id is refused"           --item
+illegal "--item with a non-BL id is refused"     --item 20
+illegal "--module with a malformed id is refused" --module MOD-1
+illegal "an unknown option is refused"           --bogus
+illegal "no scope at all is refused"
+
+# ── I is in run-stub-registry-tests.sh (taint is that suite's subject) ──────
+
+# ── J. Selection is the ONLY thing a scope changes ─────────────────────────
+# The same fixture set, the same mapping, the same actual outputs, run once
+# item-scoped and once change-scoped, must produce the same verdict and the
+# same exit code. Anything else would mean a scope had leaked into the verdict.
+seed_item "$I"
+run_scope() {
+  local root="$1" target="$2" tag="$3" a1="$4"
+  local rd="$root/.specclaw/replay/run-$tag"
+  rm -rf "$rd"; mkdir -p "$rd/actual"
+  bash "$REPLAY_BIN" resolve "$root/.specclaw" "$target" "$rd/selection.json" >/dev/null 2>&1
+  printf '{"stack":"t","build_command":null,"test_command":"true","results_dir":"actual","evidence_exclusions":[]}' > "$rd/run-config.json"
+  cat > "$rd/mapping.json" <<'MPEOF'
+[{"scenario_id":"GM-001","verdict":"REPLAYABLE","test_file":"a","legacy_seam_layer":"service","replay_seam_layer":"service"},
+ {"scenario_id":"GM-002","verdict":"REPLAYABLE","test_file":"b","legacy_seam_layer":"service","replay_seam_layer":"service"}]
+MPEOF
+  printf '%s' "$a1" > "$rd/actual/GM-001.json"
+  printf '{"output":{"outcome":"OK","error_code":null,"threw":false,"n":2}}' > "$rd/actual/GM-002.json"
+  bash "$REPLAY_BIN" compare "$root/.specclaw" "$rd" >/dev/null 2>&1
+  bash "$REPLAY_BIN" render "$root/.specclaw" "$target" "$rd" >/dev/null 2>&1
+  local rc=$?
+  local rp; rp="$(report_path_for "$root" "$target" "$tag")"
+  printf '%s|%s' "$rc" "$(grep -m1 '^\*\*Overall verdict:\*\*' "$rp" | sed 's/.*\*\* //' | tr -d '\r')"
+}
+report_path_for() {
+  local root="$1" target="$2" tag="$3"
+  case "$target" in
+    BL-*) printf '%s/.specclaw/replay/report-%s-%s.md' "$root" "$tag" "$target" ;;
+    *)    printf '%s/.specclaw/changes/%s/replay-report.md' "$root" "$target" ;;
+  esac
+}
+A_MATCH='{"output":{"outcome":"OK","error_code":null,"threw":false,"n":1}}'
+A_DIVERGE='{"output":{"outcome":"REJECTED","error_code":null,"threw":false,"n":1}}'
+for pair in "clean:$A_MATCH" "diverged:$A_DIVERGE"; do
+  case_name="${pair%%:*}"; actual="${pair#*:}"
+  item_r="$(run_scope "$I" BL-020 "j-$case_name-i" "$actual")"
+  chg_r="$(run_scope "$I" credit-notes "j-$case_name-c" "$actual")"
+  assert_eq "an item-scoped ${case_name} run reaches the same verdict as change-scoped" \
+    "${chg_r#*|}" "${item_r#*|}"
+  assert_eq "an item-scoped ${case_name} run exits the same as change-scoped" \
+    "${chg_r%%|*}" "${item_r%%|*}"
+done
+# And the verdicts under test are genuinely different from each other —
+# otherwise the two assertions above would pass on any constant.
+assert_eq "the two J cases really do produce different verdicts" "PASS FAIL" \
+  "$(run_scope "$I" BL-020 j-x1 "$A_MATCH" | sed 's/.*|//') $(run_scope "$I" BL-020 j-x2 "$A_DIVERGE" | sed 's/.*|//')"
+
+# ─────────────────────────────────────────────────────────────────────────────
 echo
 echo "Passed: ${PASS}   Failed: ${FAIL}"
 [ "$FAIL" -eq 0 ] || exit 1
