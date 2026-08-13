@@ -657,7 +657,15 @@ cmd_record() {
   # which — so it names both and warns. Never a hard failure: the manifest is
   # still valid evidence, and blocking it would make a documentation
   # disagreement destroy a capture run.
-  local -A BL_MODULE=()
+  # BL_RULES is the same index keyed the other way — each item's own
+  # acceptance-basis DR rules — used to fill in a scenario's `Verifies backlog
+  # item` when the scenario itself declares none. BEST-EFFORT METADATA ONLY:
+  # /specclaw:bf-replay re-derives this join from these same two documents at
+  # replay time and never depends on what is stamped here (CONTRACT.md (b)).
+  # The point is that a manifest recorded after the backlog exists carries a
+  # real BL tag instead of the designer's "not yet backlog-linked" placeholder
+  # — not that anything downstream may start trusting the field.
+  local -A BL_MODULE=() BL_RULES=()
   if [ -f "$backlog_file" ]; then
     local blworkdir; blworkdir="$(mktemp -d)"
     awk -v dir="$blworkdir" '
@@ -668,14 +676,71 @@ cmd_record() {
     shopt -s nullglob
     local -a bl_files=("$blworkdir"/BL-*.md)
     shopt -u nullglob
-    local blf blid blmod
+    local blf blid blmod bltitle blrules
     for blf in "${bl_files[@]}"; do
       blid="$(basename "$blf" .md)"
       blmod="$({ grep -m1 -- '^\*\*Module:\*\*' "$blf" 2>/dev/null | grep -oE 'MOD-[0-9]{3}' | head -1; } || true)"
       [ -n "$blmod" ] && BL_MODULE["$blid"]="$blmod"
+      # A STRUCK tombstone is an id kept claimed, not an item anything can
+      # verify — it must never become a fixture's BL tag.
+      bltitle="$(head -1 "$blf" | sed -E 's/^### BL-[0-9]+[[:space:]]*(—|-)[[:space:]]*//' | tr -d '\r')"
+      case "$bltitle" in STRUCK*) continue ;; esac
+      # The bash-RECOMPUTED lines are dropped before reading DR ids, mirroring
+      # exactly what specclaw-bf-replay's own backlog_item_dr_ids and
+      # specclaw-bf-rebuild-collect's ITEM_RULES exclude. Copied rather than
+      # shared across the three scripts, per repo convention — but the rule
+      # must stay identical in all three or the joins disagree.
+      blrules="$(tail -n +2 "$blf" | awk '
+          /^\*\*Gate:\*\*/ { skip=1; next }
+          /^\*\*Verification:\*\*/ { skip=1; next }
+          /^\*\*UI fidelity:\*\*/ { skip=1; next }
+          /^\*\*Status:\*\* Deferred/ { skip=1; next }
+          /^\*\*Status notes \(human-added\):\*\*/ { intail=1; next }
+          intail { next }
+          /^\*\*Settled constraints/ { skip=0 }
+          skip { next }
+          { print }
+        ' | { grep -oE 'DR-[0-9]{3}' | awk '!seen[$0]++' | paste -sd, -; } || true)"
+      [ -n "$blrules" ] && BL_RULES["$blid"]="$blrules"
     done
     rm -rf "$blworkdir"
   fi
+
+  # MOD -> the DR rules that module owns, for filling in a scenario's `Modules`
+  # when it declares none. Same best-effort tier as BL_RULES above.
+  local -A MOD_RULES=()
+  if [ -f "$map_file" ]; then
+    local mrworkdir; mrworkdir="$(mktemp -d)"
+    awk -v dir="$mrworkdir" '
+      /^### MOD-[0-9]+/ { match($0, /MOD-[0-9]+/); id = substr($0, RSTART, RLENGTH); outfile = dir "/" id ".md" }
+      /^## / && !/^### MOD-[0-9]+/ { id = "" }
+      id != "" { print $0 >> outfile }
+    ' "$map_file"
+    shopt -s nullglob
+    local -a mr_files=("$mrworkdir"/MOD-*.md)
+    shopt -u nullglob
+    local mrf mrid mrtitle mrrules
+    for mrf in "${mr_files[@]}"; do
+      mrid="$(basename "$mrf" .md)"
+      mrtitle="$(head -1 "$mrf" | sed -E 's/^### MOD-[0-9]+[[:space:]]*(—|-)[[:space:]]*//' | tr -d '\r')"
+      case "$mrtitle" in WITHDRAWN*) continue ;; esac
+      mrrules="$({ grep -oE 'DR-[0-9]{3}' "$mrf" | awk '!seen[$0]++' | paste -sd, -; } || true)"
+      [ -n "$mrrules" ] && MOD_RULES["$mrid"]="$mrrules"
+    done
+    rm -rf "$mrworkdir"
+  fi
+
+  # Any shared token between two comma-joined id lists.
+  csv_intersects() {
+    local tok
+    local -a _toks=()
+    IFS=',' read -ra _toks <<< "$1"
+    for tok in ${_toks[@]+"${_toks[@]}"}; do
+      [ -z "$tok" ] && continue
+      [[ ",$2," == *",${tok},"* ]] && return 0
+    done
+    return 1
+  }
 
   local plugin_version
   plugin_version="$(jq -r '.version // "unknown"' "$PLUGIN_ROOT/.claude-plugin/plugin.json" 2>/dev/null || echo "unknown")"
@@ -741,6 +806,45 @@ cmd_record() {
     modules="$(scenario_block_modules "$f")"
     fixture_path="$fixtures_dir/${id}.json"
     scenario_hash="sha256:$(scenario_block_hash "$f")"
+
+    # ── Best-effort metadata fill-in ────────────────────────────────────────
+    # The pipeline's own order runs /specclaw:bf-baseline (A4) BEFORE
+    # /specclaw:bf-rebuild-plan (A5), so on a first design the scenarios
+    # genuinely cannot name a backlog item and the designer writes the
+    # documented "not yet backlog-linked" placeholder. Every re-record AFTER
+    # the backlog exists can do better, and does so here.
+    #
+    # FILL-IN ONLY, NEVER OVERWRITE: a value the scenario declares itself is a
+    # deliberate statement by the design agent and stands verbatim, exactly as
+    # CONTRACT.md (l) requires for `Modules`. And absence stays legal — no
+    # project is required to have either document at record time, and nothing
+    # downstream may require the result: this is metadata, and
+    # /specclaw:bf-replay's own join re-derives it from these same documents.
+    local rule_toks
+    rule_toks="$(printf '%s' "$rules" | { grep -oE 'DR-[0-9]{3}' | awk '!seen[$0]++' | paste -sd, -; } || true)"
+
+    if [ -n "$rule_toks" ] && [ "${#BL_RULES[@]}" -gt 0 ] \
+       && ! printf '%s' "$backlog_item" | grep -qE 'BL-[0-9]{3}'; then
+      local derived_bls="" blk
+      # Sorted, so the recorded value is deterministic across runs rather than
+      # dependent on bash's associative-array ordering.
+      while IFS= read -r blk; do
+        [ -z "$blk" ] && continue
+        csv_intersects "$rule_toks" "${BL_RULES[$blk]}" || continue
+        derived_bls="${derived_bls}${derived_bls:+, }${blk}"
+      done < <(printf '%s\n' "${!BL_RULES[@]}" | sort)
+      [ -n "$derived_bls" ] && backlog_item="$derived_bls"
+    fi
+
+    if [ -n "$rule_toks" ] && [ "${#MOD_RULES[@]}" -gt 0 ] && [ -z "$modules" ]; then
+      local derived_mods="" mrk
+      while IFS= read -r mrk; do
+        [ -z "$mrk" ] && continue
+        csv_intersects "$rule_toks" "${MOD_RULES[$mrk]}" || continue
+        derived_mods="${derived_mods}${derived_mods:+,}${mrk}"
+      done < <(printf '%s\n' "${!MOD_RULES[@]}" | sort)
+      [ -n "$derived_mods" ] && modules="$derived_mods"
+    fi
 
     # A declared module that names nothing in the map is a hard error, on the
     # same grounds as an error_code with no error-map heading: it looks like a

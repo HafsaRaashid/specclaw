@@ -254,7 +254,23 @@ seed_replay() {
   local root="$1"
   seed_baseline "$root"
   mkdir -p "$root/.specclaw/changes/thing"
-  printf '### BL-002 — thing\n' > "$root/.specclaw/analysis/rebuild-backlog.md"
+  # The item carries a real **Acceptance basis** citing the DR-### rules its
+  # scenarios pin, because that is what rebuild-backlog.md's own format
+  # requires ("the ID itself must be textually present, not just implied by the
+  # quoted prose") and what /specclaw:bf-replay's selection join reads. A bare
+  # heading with no acceptance basis is not a thinner version of a real item —
+  # it is an item rebuild-backlog.md's own Verification engine would report as
+  # NO BASELINE DATA, so selecting fixtures for it was only ever an artifact of
+  # the old join on verifies_backlog_item.
+  cat > "$root/.specclaw/analysis/rebuild-backlog.md" <<'BLEOF'
+### BL-002 — thing
+
+- **Module:** MOD-001
+- **Acceptance basis (domain-model.md):**
+  - DR-001: the thing is issued.
+  - DR-002: the thing is not issued twice.
+- **Depends on:** None
+BLEOF
   printf 'DR-001 DR-002\n' > "$root/.specclaw/analysis/domain-model.md"
   printf 'Rebuild-backlog item 2 — thing.\n' > "$root/.specclaw/changes/thing/proposal.md"
   bash "$BASELINE_BIN" record "$root/.specclaw" >/dev/null 2>&1
