@@ -15,12 +15,35 @@ usage() {
 Usage: specclaw-bf-replay <subcommand> [options]
 
 Subcommands:
-  resolve       <specclaw_dir> <change_name|MOD-###|--all> <out_selection_json>
-                Change -> BL -> DR -> GM join; MOD-### for one module's
-                fixtures (a pure jq join on manifest module_ids, ANY-of, so a
-                cross-module fixture is selected by every module it touches);
-                or --all for the full manifest. Three selection scopes,
-                smallest to largest: change, module, corpus.
+  parse-target  [<change_name>] [--item BL-###] [--module MOD-###] [--all]
+                [--keep|--discard|--prune-evidence <n>]
+                Validates a raw invocation's selection scope and prints the ONE
+                canonical target token every subcommand below takes. The four
+                scopes are mutually exclusive: a positional <change_name>
+                combines with no flag, and the flags combine with nothing.
+                Retention qualifiers are accepted and ignored — they qualify a
+                run rather than selecting one. Fails loudly, naming the
+                conflict, on any illegal combination.
+
+  resolve       <specclaw_dir> <change_name|BL-###|MOD-###|--all> <out_selection_json>
+                BL -> DR -> GM join for a change (via its cited backlog item)
+                or a literal BL-### item; MOD-### for one module's fixtures (a
+                pure jq join on manifest module_ids, ANY-of, so a cross-module
+                fixture is selected by every module it touches); or --all for
+                the full manifest. Four selection scopes, smallest to largest:
+                item, change, module, corpus.
+                The change/item join is on the backlog item's own
+                acceptance-basis DR-### citations against each manifest entry's
+                business_rules_pinned — the same chain rebuild-backlog.md's own
+                "Verification: ... fixtures:" line is computed from, so the two
+                are testably equal. verifies_backlog_item is a cross-check only:
+                a populated value disagreeing with the join is a WARN naming
+                both sets, a placeholder is ignored silently, and neither is
+                ever load-bearing for selection.
+                A BL-### target needs no change directory. An active item with
+                genuinely zero fixtures is a clean 0-fixture selection that
+                renders INCOMPLETE (exit 2), never a precondition failure; an
+                unknown item and a STRUCK tombstone are both refused.
                 A MOD-### target additionally hard-fails on a manifest older
                 than the schema that first carried module_ids, or one whose
                 fixtures carry none at all — each naming its own fix, rather
@@ -146,14 +169,16 @@ MANIFEST_SCHEMA_MIN=2
 # says so with the same fix instruction the older guard uses.
 MODULE_SCHEMA_MIN=3
 
-# Three selection scopes, smallest to largest: one change's BL item(s), one
-# module, the whole corpus. A module target is the literal MOD-### token, so
-# every subcommand keeps its existing `<change_name|--all>` argument shape and
+# Four selection scopes, smallest to largest: one backlog item, one change's
+# BL item(s), one module, the whole corpus. A module target is the literal
+# MOD-### token and an item target the literal BL-### token, so every
+# subcommand keeps its existing `<change_name|--all>` argument shape and
 # nothing needs a new flag threaded through five call sites.
 target_kind() {
   case "$1" in
     --all)          printf 'all' ;;
     MOD-[0-9][0-9][0-9]) printf 'module' ;;
+    BL-[0-9][0-9][0-9]) printf 'item' ;;
     *)              printf 'change' ;;
   esac
 }
@@ -297,6 +322,86 @@ extract_heading_block() {
     found && /^### / {exit}
     found {print}
   ' "$file" 2>/dev/null || true
+}
+
+# ─── The BL → DR → GM join (CONTRACT.md (b)) ──────────────────────────────────
+#
+# THE AUTHORITATIVE JOIN for change- and item-scoped selection: a backlog
+# item's own acceptance-basis DR-### citations, matched against each manifest
+# entry's `business_rules_pinned`. This is deliberately the SAME chain
+# /specclaw:bf-rebuild-plan walks to compute each item's
+# "**Verification:** VERIFIABLE — fixtures: …" line (see
+# specclaw-bf-rebuild-collect's ITEM_RULES ∩ GM_RULES join), which is what
+# makes tool-internal consistency testable: `--item BL-020`'s selection must
+# equal the backlog's own Verification fixture list for BL-020.
+#
+# It replaces a join on the manifest's `verifies_backlog_item`, which could
+# never work: the pipeline's own order runs /specclaw:bf-baseline (A4) BEFORE
+# /specclaw:bf-rebuild-plan (A5), so on a first-recorded manifest that field
+# holds the designer's "not yet backlog-linked — rebuild-backlog.md does not
+# exist yet" placeholder on EVERY entry, and change- and item-scoped selection
+# matched nothing on every correctly-run project. The field is now a
+# cross-check only (see cmd_resolve) and is never load-bearing for selection.
+#
+# DR ids are matched as textual DR-### tokens — the join key the backlog format
+# itself guarantees is present (templates/rebuild-backlog.md requires the ID to
+# be "textually present, not just implied by the quoted prose"). Never a
+# substring or prefix match, so DR-01 can never match DR-010.
+
+# The title text of a "### BL-### — <title>" heading, for the STRUCK check.
+backlog_item_title() {
+  local backlog_file="$1" bl_id="$2"
+  extract_heading_block "$backlog_file" "$bl_id" | head -1 \
+    | sed -E "s/^### ${bl_id}[[:space:]]*(—|-)[[:space:]]*//" | tr -d '\r'
+}
+
+# Every DR-### token in a backlog item's own body, comma-joined, first-seen
+# order. The bash-RECOMPUTED lines are dropped first — Gate/Verification/UI
+# fidelity/the deferred marker/the human status-notes tail — mirroring exactly
+# what specclaw-bf-rebuild-collect excludes when it reads an item's body for
+# ITEM_RULES. Reading them back in would join on ids that document this run's
+# own output rather than the item's acceptance basis. (Copied rather than
+# shared across the two scripts, per repo convention.)
+backlog_item_dr_ids() {
+  local backlog_file="$1" bl_id="$2"
+  extract_heading_block "$backlog_file" "$bl_id" | tail -n +2 | awk '
+      /^\*\*Gate:\*\*/ { skip=1; next }
+      /^\*\*Verification:\*\*/ { skip=1; next }
+      /^\*\*UI fidelity:\*\*/ { skip=1; next }
+      /^\*\*Status:\*\* Deferred/ { skip=1; next }
+      /^\*\*Status notes \(human-added\):\*\*/ { intail=1; next }
+      intail { next }
+      /^\*\*Settled constraints/ { skip=0 }
+      skip { next }
+      { print }
+    ' | { grep -oE 'DR-[0-9]{3}' | awk '!seen[$0]++' | paste -sd, -; } || true
+}
+
+# Every active backlog item's DR set, as a JSON object:
+#   {"BL-014": ["DR-002"], "BL-020": ["DR-001","DR-002"]}
+# The reverse of the selection join, used to attribute each selected fixture to
+# the item(s) whose acceptance basis rests on the rules it pins
+# (`bl_items_resolved`). A STRUCK tombstone is excluded: it is an id kept
+# claimed, not an item anything can verify. An absent backlog is an empty map,
+# silently — the same treatment a missing stub registry gets.
+backlog_dr_map() {
+  local backlog_file="$1"
+  [ -f "$backlog_file" ] || { printf '{}'; return 0; }
+  local id title drs
+  {
+    while IFS= read -r id; do
+      [ -z "$id" ] && continue
+      title="$(backlog_item_title "$backlog_file" "$id")"
+      case "$title" in STRUCK*) continue ;; esac
+      drs="$(backlog_item_dr_ids "$backlog_file" "$id")"
+      [ -n "$drs" ] || continue
+      printf '%s\t%s\n' "$id" "$drs"
+    done < <({ grep -oE '^### BL-[0-9]{3}' "$backlog_file" 2>/dev/null \
+               | grep -oE 'BL-[0-9]{3}' | awk '!seen[$0]++'; } || true)
+  } | tr -d '\r' | jq -R -s '
+    split("\n") | map(select(length > 0) | split("\t")
+                      | {key: .[0], value: (.[1] | [scan("DR-[0-9]{3}")])})
+    | from_entries'
 }
 
 # ─── Subcommand: resolve ─────────────────────────────────────────────────────
@@ -453,6 +558,23 @@ Fix: re-run /specclaw:bf-baseline --record"
       bl_id="$(resolve_bl_id "$change_dir" "$backlog_file")"
       [ -n "$bl_id" ] || die "Change '${target}' cites no backlog (BL-###) item in proposal.md/spec.md — replay only makes sense for backlog-driven changes."
       ;;
+    item)
+      # An item run needs NO change directory: it is the smallest scope, for
+      # accepting one backlog item's behaviour on its own. What it does need is
+      # the backlog itself — that document is the join's left-hand side.
+      bl_id="$target"
+      [ -f "$backlog_file" ] || die "--item ${bl_id} needs .specclaw/analysis/rebuild-backlog.md, which does not exist at ${backlog_file} — there is no backlog item to replay, and nothing to join fixtures against.
+Fix: run /specclaw:bf-rebuild-plan first."
+      grep -qE "^### ${bl_id}([[:space:]]|$)" "$backlog_file" \
+        || die "--item ${bl_id} names no item in ${backlog_file} — it has no '### ${bl_id} —' heading. Items that do exist: $({ grep -oE '^### BL-[0-9]{3}' "$backlog_file" | grep -oE 'BL-[0-9]{3}' | awk '!seen[$0]++' | paste -sd, - | sed 's/,/, /g'; } || echo none)."
+      local item_title
+      item_title="$(backlog_item_title "$backlog_file" "$bl_id")"
+      case "$item_title" in
+        STRUCK*)
+          die "--item ${bl_id} is a STRUCK tombstone in ${backlog_file} (${item_title}), not an active backlog item. Its id stays claimed forever so nothing reuses it, but there is no behaviour to accept: a struck item was removed from the rebuild deliberately. Nothing was created on disk."
+          ;;
+      esac
+      ;;
     module)
       module_id="$target"
       # ── Module-metadata guards. Both fire here, before anything is created
@@ -473,9 +595,24 @@ Fix: re-run /specclaw:bf-baseline (design mode) so each scenario declares the mo
       ;;
   esac
 
+  # The item→rules map, read once and reused for both the selection join
+  # (item/change scopes) and the per-fixture BL attribution (every scope).
+  local dr_map item_drs=""
+  dr_map="$(backlog_dr_map "$backlog_file")"
+
   local selected_fixtures
   if [ -n "$bl_id" ]; then
-    selected_fixtures="$(jq --arg bl "$bl_id" '[ .fixtures[] | select(.verifies_backlog_item | startswith($bl)) ]' "$manifest")"
+    # ── The authoritative join: BL-### → its acceptance-basis DR-### ids →
+    # every manifest entry pinning any of them. ANY-of, exactly like the
+    # module_ids join below and for the same reason: a fixture pinning two
+    # rules is the record of a flow resting on both, and an item resting on
+    # either cannot be accepted without it.
+    item_drs="$(backlog_item_dr_ids "$backlog_file" "$bl_id")"
+    selected_fixtures="$(jq --arg drs "$item_drs" '
+      ($drs | [scan("DR-[0-9]{3}")]) as $want
+      | [ .fixtures[]
+          | select( ((.business_rules_pinned // "") | [scan("DR-[0-9]{3}")])
+                    | any(. as $p | $want | index($p)) ) ]' "$manifest")"
   elif [ -n "$module_id" ]; then
     # Pure jq join on declared manifest data — no agent, no re-derivation from
     # scenarios.md prose. ANY-of semantics: a fixture whose rules span modules
@@ -487,12 +624,50 @@ Fix: re-run /specclaw:bf-baseline (design mode) so each scenario declares the mo
     selected_fixtures="$(jq '.fixtures' "$manifest")"
   fi
 
+  # ── verifies_backlog_item: a CROSS-CHECK, never load-bearing ─────────────
+  # When the field is populated and disagrees with the DR join, both sets are
+  # named: one of the two documents is stale and bash cannot know which. The
+  # DR join wins regardless — that is what the report's selection reflects.
+  # When it holds the designer's placeholder (the normal state of a
+  # first-recorded manifest), it is ignored in silence: there is no
+  # disagreement to report, only a field that was written before the backlog
+  # it would have referenced existed.
+  if [ -n "$bl_id" ]; then
+    local field_populated field_set join_set
+    field_populated="$(jq '[ .fixtures[] | select((.verifies_backlog_item // "") | test("BL-[0-9]{3}")) ] | length' "$manifest")"
+    if [ "$field_populated" -gt 0 ]; then
+      field_set="$(jq -r --arg bl "$bl_id" '[ .fixtures[]
+                     | select(((.verifies_backlog_item // "") | [scan("BL-[0-9]{3}")]) | index($bl))
+                     | .scenario_id ] | sort | join(", ")' "$manifest")"
+      join_set="$(jq -r '[ .[].scenario_id ] | sort | join(", ")' <<< "$selected_fixtures")"
+      if [ "$field_set" != "$join_set" ]; then
+        warn "Manifest metadata disagrees with the acceptance-basis join for ${bl_id}, and the join is what selection used. The join (${bl_id}'s acceptance basis pins ${item_drs:-no DR rule at all} in rebuild-backlog.md → manifest business_rules_pinned) selects: ${join_set:-none}. The manifest's own verifies_backlog_item field names: ${field_set:-none}. One of the two documents is stale — re-run /specclaw:bf-baseline --record to refresh the field, or fix whichever document is wrong. This changed nothing about this run's selection."
+      fi
+    fi
+  fi
+
   local count
   count="$(jq 'length' <<< "$selected_fixtures")"
-  if [ "$count" -eq 0 ] && [ -n "$module_id" ]; then
-    die "No fixture in ${manifest} is tagged with module ${module_id}. Modules that do appear: $(jq -r '[ .fixtures[] | (.module_ids // [])[] ] | unique | join(", ")' "$manifest"). Check the id against .specclaw/analysis/module-map.md, or design and record that module's scenarios first."
+  if [ "$count" -eq 0 ]; then
+    case "$kind" in
+      module)
+        die "No fixture in ${manifest} is tagged with module ${module_id}. Modules that do appear: $(jq -r '[ .fixtures[] | (.module_ids // [])[] ] | unique | join(", ")' "$manifest"). Check the id against .specclaw/analysis/module-map.md, or design and record that module's scenarios first."
+        ;;
+      item)
+        # THE EMPTY-SELECTION CONTRACT. A valid, active backlog item with
+        # genuinely no fixtures behind it is a clean result, not a broken
+        # precondition: the item exists, the join ran, and it found nothing to
+        # compare against. It flows through as a 0-fixture selection and
+        # renders as INCOMPLETE (exit 2) — never a crash, and never an
+        # invented fixture. A malformed manifest still fails loudly above;
+        # the placeholder is neither of these.
+        :
+        ;;
+      *)
+        die "No fixtures matched selection for '${target}'${bl_id:+ (${bl_id})} in ${manifest}."
+        ;;
+    esac
   fi
-  [ "$count" -gt 0 ] || die "No fixtures matched selection for '${target}'${bl_id:+ (${bl_id})} in ${manifest}."
 
   # Hash-verify every selected fixture against the manifest's recorded hash.
   # Collect ALL problems before failing — never stop at the first.
@@ -531,6 +706,43 @@ Fix: re-run /specclaw:bf-baseline (design mode) so each scenario declares the mo
 ${joined}"
   fi
 
+  # ── Per-fixture BL attribution (`bl_items_resolved`) ─────────────────────
+  # Which backlog item(s) each selected fixture actually verifies, derived from
+  # the same acceptance-basis join as selection — a SET, never a scalar, because
+  # two items' acceptance bases legitimately share a rule. This is what stub
+  # taint and the evidence metadata join on from here.
+  #
+  # It replaces reading `verifies_backlog_item`, which on a correctly-run
+  # project holds the placeholder and therefore yielded null for every fixture
+  # — silently disabling ST-### taint stamping and leaving
+  # `bl_items_covered`/`stub_tainted_items` permanently empty, so
+  # `module-status` had nothing to read for any item's latest verdict.
+  #
+  # The DR join wins wherever it speaks; the field's own BL token is the
+  # fallback for a fixture the join can say nothing about — no backlog on disk,
+  # or a backlog whose items carry no rule citations to join against.
+  #
+  # THIS IS NOT THE SELECTION RULE, and the asymmetry is deliberate. For
+  # selection the query is one item's own known-good DR set, so an empty result
+  # is a real answer ("nothing pins these rules") and the empty-selection
+  # contract reports it as such. For attribution the query is the whole
+  # backlog, and an empty result means that document carries no rule data at
+  # all — an absence of information, not a finding that the fixture verifies
+  # nothing. Discarding the recorded field there would lose the only signal
+  # left and silently disable taint, which is the very failure mode this whole
+  # change exists to fix. Attribution feeds taint and coverage reporting only;
+  # it can never move a verdict or a selection.
+  selected_fixtures="$(jq --argjson drmap "$dr_map" '
+    [ .[] | . as $fx
+      | ((.business_rules_pinned // "") | [scan("DR-[0-9]{3}")]) as $pinned
+      | ([ $drmap | to_entries[]
+           | select(.value | any(. as $d | $pinned | index($d)))
+           | .key ] | unique) as $via_dr
+      | (($fx.verifies_backlog_item // "") | [scan("BL-[0-9]{3}")] | unique) as $via_field
+      | $fx + { bl_items_resolved:
+                  (if ($via_dr | length) > 0 then $via_dr else $via_field end) } ]
+  ' <<< "$selected_fixtures")"
+
   # How many fixtures each module has IN THE WHOLE MANIFEST, not just in this
   # selection. The report needs it to say whether a module's rollup row is a
   # full picture of that module or a partial one — a change-scoped or
@@ -551,13 +763,13 @@ ${joined}"
   stubs_all="$(stubs_json "$specclaw_dir_abs/analysis/module-stubs.md")"
   stubs_active="$(jq '[ .[] | select(.status == "ACTIVE") ]' <<< "$stubs_all")"
 
+  # Joins on `bl_items_resolved` (above), ANY-of: a fixture verifying either of
+  # two items is tainted by a stub either of them consumed.
   selected_fixtures="$(jq --argjson stubs "$stubs_active" '
     [ .[] | . as $fx
-      | ($fx.verifies_backlog_item // "" | [scan("BL-[0-9]{3}")][0]) as $bl
+      | ($fx.bl_items_resolved // []) as $bls
       | $fx + { stub_refs:
-          (if $bl == null then []
-           else [ $stubs[] | select(.consumed_by | index($bl)) | .id ]
-           end) } ]
+          [ $stubs[] | select(.consumed_by | any(. as $c | $bls | index($c))) | .id ] } ]
   ' <<< "$selected_fixtures")"
 
   # The entries actually hit by THIS run's selection — not the whole registry.
@@ -577,7 +789,7 @@ ${joined}"
   # (CONTRACT.md (m.4)), rather than an ordinary PASS someone has to correlate
   # with a registry edit by hand.
   local selected_bls
-  selected_bls="$(jq '[ .[].verifies_backlog_item // "" | [scan("BL-[0-9]{3}")][0] | select(. != null) ] | unique' <<< "$selected_fixtures")"
+  selected_bls="$(jq '[ .[] | (.bl_items_resolved // [])[] ] | unique' <<< "$selected_fixtures")"
   retirement_candidates="$(jq --argjson all "$stubs_all" --argjson bls "$selected_bls" -n '
     [ $all[] | select(.status == "RETIRING")
       | . as $s | select([ $s.consumed_by[] | select(. as $b | $bls | index($b)) ] | length > 0)
@@ -639,6 +851,13 @@ ${joined}"
       fixtures: $fixtures
     }' > "$out_path"
 
+  # The empty-selection contract's own summary line. Stated before any of the
+  # notes below, none of which can apply to a selection of nothing.
+  if [ "$count" -eq 0 ]; then
+    echo "NO BASELINE DATA — 0 fixtures mapped to ${bl_id}. The item is active and its acceptance basis pins ${item_drs:-no DR rule at all}, but no recorded fixture pins any of those rules — so there is nothing to compare against. This run will report INCOMPLETE (exit 2) rather than a PASS with nothing behind it."
+    return 0
+  fi
+
   local shared_note=""
   if [ -n "$module_id" ]; then
     local shared_n
@@ -652,7 +871,76 @@ ${joined}"
     st_ids="$(jq -r '[ .[].id ] | join(", ")' <<< "$stubs_in_effect")"
     stub_note=" ${tainted_n} of them verify an item built against an active bypass stub (${st_ids}) and will be reported as stub-tainted."
   fi
-  echo "Selected ${count} fixture(s) for ${target}${bl_id:+ (${bl_id})}.${shared_note}${stub_note} DR rules covered: $(jq -r 'join(", ")' <<< "$dr_rules_json"). Legacy commit: $(jq -r '.[0]' <<< "$legacy_shas_json")."
+  # An item run's target IS its BL id — "for BL-020 (BL-020)" would be noise.
+  local bl_note=""
+  [ -n "$bl_id" ] && [ "$bl_id" != "$target" ] && bl_note=" (${bl_id})"
+  echo "Selected ${count} fixture(s) for ${target}${bl_note}.${shared_note}${stub_note} DR rules covered: $(jq -r 'join(", ")' <<< "$dr_rules_json"). Legacy commit: $(jq -r '.[0]' <<< "$legacy_shas_json")."
+}
+
+# ─── Subcommand: parse-target ────────────────────────────────────────────────
+# The four selection scopes are MUTUALLY EXCLUSIVE, and deciding whether an
+# invocation is legal is a mechanical job — so it happens here, in bash, rather
+# than being left to the skill's prose to remember. Given the raw invocation it
+# either prints the ONE canonical target token every other subcommand takes
+# (`<change-name>` | `BL-###` | `MOD-###` | `--all`) or fails loudly naming the
+# conflict. Retention flags are accepted and ignored: `--keep`/`--discard`/
+# `--prune-evidence <n>` qualify a run, they do not select one, and they
+# legitimately combine with any scope.
+
+cmd_parse_target() {
+  local -a argv=("$@")
+  local -a scopes=() scope_flags=()
+  local positional="" a v i=0 n="${#argv[@]}"
+
+  while [ "$i" -lt "$n" ]; do
+    a="${argv[$i]}"
+    case "$a" in
+      --all)
+        scopes+=("--all"); scope_flags+=("--all")
+        ;;
+      --item)
+        i=$((i + 1))
+        [ "$i" -lt "$n" ] || die "--item requires a BL-### backlog item id (e.g. --item BL-020); none was given."
+        v="${argv[$i]}"
+        [[ "$v" =~ ^BL-[0-9]{3}$ ]] || die "--item expects a BL-### id with exactly three digits; got '${v}'."
+        scopes+=("$v"); scope_flags+=("--item ${v}")
+        ;;
+      --module)
+        i=$((i + 1))
+        [ "$i" -lt "$n" ] || die "--module requires a MOD-### module id (e.g. --module MOD-001); none was given."
+        v="${argv[$i]}"
+        [[ "$v" =~ ^MOD-[0-9]{3}$ ]] || die "--module expects a MOD-### id with exactly three digits; got '${v}'."
+        scopes+=("$v"); scope_flags+=("--module ${v}")
+        ;;
+      --keep|--discard) ;;
+      --prune-evidence)
+        # Consume its count so a bare number is never mistaken for a change
+        # name. Its validity is prune-evidence's own business, not this one's.
+        i=$((i + 1))
+        ;;
+      -*)
+        die "Unknown option '${a}'. Valid scopes: <change-name> | --item BL-### | --module MOD-### | --all. Valid qualifiers: --keep, --discard, --prune-evidence <n>."
+        ;;
+      *)
+        [ -z "$positional" ] || die "Two positional targets given ('${positional}' and '${a}'), but a run has exactly one scope. Pass a single <change-name>, or one of --item BL-### / --module MOD-### / --all."
+        positional="$a"
+        ;;
+    esac
+    i=$((i + 1))
+  done
+
+  # Flags combine with nothing — not with each other, and not with a positional.
+  if [ "${#scopes[@]}" -gt 1 ]; then
+    die "The four selection scopes are mutually exclusive, but ${#scopes[@]} were given: ${scope_flags[*]}. Pick one — <change-name> for a change's own backlog item, --item BL-### for one backlog item, --module MOD-### for one module, --all for the whole corpus."
+  fi
+  if [ -n "$positional" ] && [ "${#scopes[@]}" -gt 0 ]; then
+    die "A positional <change-name> ('${positional}') combines with no scope flag, but ${scope_flags[*]} was also given. A change already names its own backlog item; pass either the change or the flag, never both."
+  fi
+  if [ -z "$positional" ] && [ "${#scopes[@]}" -eq 0 ]; then
+    die "No selection scope given. Pass one of: <change-name> | --item BL-### | --module MOD-### | --all."
+  fi
+
+  printf '%s\n' "${positional:-${scopes[0]}}"
 }
 
 # ─── Subcommand: init-rundir ─────────────────────────────────────────────────
@@ -1015,39 +1303,44 @@ run_id_from_dir() {
 # .specclaw/changes/<name>/ to live under, and giving it a parallel tree would
 # fork the evidence layout for a selection dimension — the module is a
 # property of the run, not a new place to keep runs.
+# An ITEM run shares the corpus-wide pool for exactly the same reason a module
+# run does: a backlog item is not a change. It has no
+# .specclaw/changes/<name>/ to live under, and giving it a parallel tree would
+# fork the evidence layout for a third selection dimension. The item it covered
+# is recorded in that run's own run-metadata.json.
 evidence_dir_rel() {
   local target="$1" run_id="$2"
   case "$(target_kind "$target")" in
-    all|module) printf '.specclaw/replay/evidence/run-%s' "$run_id" ;;
-    *)          printf '.specclaw/changes/%s/replay-evidence/run-%s' "$target" "$run_id" ;;
+    all|module|item) printf '.specclaw/replay/evidence/run-%s' "$run_id" ;;
+    *)               printf '.specclaw/changes/%s/replay-evidence/run-%s' "$target" "$run_id" ;;
   esac
 }
 
 evidence_dir_abs() {
   local specclaw_dir_abs="$1" target="$2" run_id="$3"
   case "$(target_kind "$target")" in
-    all|module) printf '%s/replay/evidence/run-%s' "$specclaw_dir_abs" "$run_id" ;;
-    *)          printf '%s/changes/%s/replay-evidence/run-%s' "$specclaw_dir_abs" "$target" "$run_id" ;;
+    all|module|item) printf '%s/replay/evidence/run-%s' "$specclaw_dir_abs" "$run_id" ;;
+    *)               printf '%s/changes/%s/replay-evidence/run-%s' "$specclaw_dir_abs" "$target" "$run_id" ;;
   esac
 }
 
 evidence_root_abs() {
   local specclaw_dir_abs="$1" target="$2"
   case "$(target_kind "$target")" in
-    all|module) printf '%s/replay/evidence' "$specclaw_dir_abs" ;;
-    *)          printf '%s/changes/%s/replay-evidence' "$specclaw_dir_abs" "$target" ;;
+    all|module|item) printf '%s/replay/evidence' "$specclaw_dir_abs" ;;
+    *)               printf '%s/changes/%s/replay-evidence' "$specclaw_dir_abs" "$target" ;;
   esac
 }
 
-# The report path for a run. A module run gets its own suffixed filename in the
-# shared replay directory so several modules' reports coexist without one
-# overwriting another, and so the filename itself says which module it covers.
+# The report path for a run. A module or item run gets its own suffixed
+# filename in the shared replay directory so several of them coexist without
+# one overwriting another, and so the filename itself says what it covers.
 report_path_abs() {
   local specclaw_dir_abs="$1" target="$2" run_id="$3"
   case "$(target_kind "$target")" in
-    all)    printf '%s/replay/report-%s.md' "$specclaw_dir_abs" "$run_id" ;;
-    module) printf '%s/replay/report-%s-%s.md' "$specclaw_dir_abs" "$run_id" "$target" ;;
-    *)      printf '%s/changes/%s/replay-report.md' "$specclaw_dir_abs" "$target" ;;
+    all)         printf '%s/replay/report-%s.md' "$specclaw_dir_abs" "$run_id" ;;
+    module|item) printf '%s/replay/report-%s-%s.md' "$specclaw_dir_abs" "$run_id" "$target" ;;
+    *)           printf '%s/changes/%s/replay-report.md' "$specclaw_dir_abs" "$target" ;;
   esac
 }
 
@@ -1061,7 +1354,13 @@ report_path_abs() {
 compute_verdict_summary() {
   local compare_file="$1" sanction_file="$2" selected_count="$3"
   local merged
-  if [ -n "$sanction_file" ] && [ -f "$sanction_file" ]; then
+  if [ ! -f "$compare_file" ]; then
+    # A 0-fixture selection never reached `compare`, so there is nothing to
+    # read. Same reasoning as cmd_render's own empty-selection branch, reached
+    # independently here — these two readers must agree on the verdict without
+    # sharing code, which is the whole point of keeping them separate.
+    merged='[]'
+  elif [ -n "$sanction_file" ] && [ -f "$sanction_file" ]; then
     merged=$(jq --slurpfile s "$sanction_file" '
       (.results) as $r
       | ($s[0].sanctions // []) as $sc
@@ -1098,7 +1397,12 @@ compute_verdict_summary() {
     # behavioural divergence can never be downgraded to PASS-PENDING-DECISIONS
     # by a provisional, superseded, or unmapped state sitting alongside it.
     | . + {
-        overall: (if ($selected > 0 and .not_replayable == $selected) then "INCOMPLETE"
+        # `$selected == 0` is INCOMPLETE for the same reason a fully
+        # unreplayable selection is: nothing was exercised. Without it the
+        # counts are all 0, no rule fires, and the metadata would record PASS
+        # for a run that compared nothing — disagreeing with the report the
+        # same run wrote.
+        overall: (if ($selected == 0 or ($selected > 0 and .not_replayable == $selected)) then "INCOMPLETE"
                   elif (.error > 0 or .diverged > 0) then "FAIL"
                   elif (.provisional_exercised > 0 or .superseded_exercised > 0 or .unmapped_error_code > 0) then "PASS-PENDING-DECISIONS"
                   else "PASS" end)
@@ -1206,10 +1510,24 @@ cmd_render() {
   local selection="$run_dir/selection.json" compare="$run_dir/compare.json"
   local sanction="$run_dir/sanction-verified.json"
   [ -f "$selection" ] || die "selection.json missing in ${run_dir}."
-  [ -f "$compare" ] || die "compare.json missing in ${run_dir}."
+
+  # THE EMPTY-SELECTION CONTRACT (resolve's other half). A 0-fixture selection
+  # never reached an agent, a test run, or `compare`, so there is no
+  # compare.json to require — demanding one would turn the contract's clean
+  # result back into the precondition failure it exists to replace. Every count
+  # below then computes to 0 over an empty results set, so this stays ONE
+  # rendering path rather than a second, separately-drifting one.
+  local empty_selection=false
+  [ "$(jq -r '.selected_count // 0' "$selection")" -eq 0 ] && empty_selection=true
+  if ! $empty_selection; then
+    [ -f "$compare" ] || die "compare.json missing in ${run_dir}."
+  fi
 
   local legacy_sha bl_item selected_count manifest_pv manifest_schema this_version
-  legacy_sha=$(jq -r '.legacy_commit_sha' "$selection")
+  # `// "—"` covers the empty-selection case only: with no fixtures selected
+  # there is no captured commit to name. A non-empty selection always carries
+  # one, so this changes nothing for any run that compares anything.
+  legacy_sha=$(jq -r '.legacy_commit_sha // "—"' "$selection")
   bl_item=$(jq -r '.bl_item // "—"' "$selection")
   selected_count=$(jq '.selected_count' "$selection")
   manifest_pv=$(jq -r '.manifest_plugin_version // "unknown"' "$selection")
@@ -1220,7 +1538,9 @@ cmd_render() {
   # same business decision expressed differently and was never put to the
   # auditor at all (CONTRACT.md (j.2)).
   local merged
-  if [ -f "$sanction" ]; then
+  if $empty_selection; then
+    merged='[]'
+  elif [ -f "$sanction" ]; then
     merged=$(jq --slurpfile s "$sanction" '
       (.results) as $r
       | ($s[0].sanctions // []) as $sc
@@ -1260,7 +1580,15 @@ cmd_render() {
   # soft-block case: an unsanctioned behavioural divergence is always FAIL and
   # is never downgraded by a provisional/superseded/unmapped state beside it.
   local overall exit_code
-  if [ "$selected_count" -gt 0 ] && [ "$nr_total_n" -eq "$selected_count" ]; then
+  if $empty_selection; then
+    # Nothing was exercised because there was nothing to exercise. That is the
+    # SAME state rule 1 describes — a non-empty selection where nothing ran —
+    # and it takes the same verdict and the same exit code. Without this
+    # branch the counts would all be 0, no rule would fire, and the run would
+    # fall through to PASS/exit 0: a clean pass asserting a comparison that
+    # never happened, which is the one outcome this contract must never allow.
+    overall="INCOMPLETE"; exit_code=2
+  elif [ "$selected_count" -gt 0 ] && [ "$nr_total_n" -eq "$selected_count" ]; then
     overall="INCOMPLETE"; exit_code=2
   elif [ "$error_n" -gt 0 ] || [ "$behav_unsanctioned_n" -gt 0 ]; then
     overall="FAIL"; exit_code=1
@@ -1552,6 +1880,21 @@ This package contains the generated tests (source), the actual outputs produced 
   content="$(fill_placeholder "$content" "{{bl_item}}" "$bl_item")"
   content="$(fill_placeholder "$content" "{{selected_count}}" "$selected_count")"
   content="$(fill_placeholder "$content" "{{evidence_block}}" "$evidence_block")"
+  # The empty-selection contract's own statement, on the report's face rather
+  # than only in resolve's stdout — a retained report has to explain its own
+  # INCOMPLETE without the reader going back to a run log that no longer exists.
+  local empty_notice=""
+  if $empty_selection; then
+    empty_notice="
+> **NO BASELINE DATA — 0 fixtures mapped to ${bl_item}.** This item is active and
+> its acceptance basis is recorded, but no fixture in the baseline manifest pins
+> any of the \`DR-###\` rules that basis cites — so there was nothing to compare
+> the rebuild against. Nothing failed here and nothing passed: the verdict is
+> **INCOMPLETE** (exit code 2). Design and capture scenarios covering this
+> item's rules (\`/specclaw:bf-baseline\`), then replay it again.
+"
+  fi
+  content="$(fill_placeholder "$content" "{{empty_selection_notice}}" "$empty_notice")"
   content="$(fill_placeholder "$content" "{{plugin_version}}" "$this_version")"
   content="$(fill_placeholder "$content" "{{manifest_plugin_version}}" "$manifest_pv")"
   content="$(fill_placeholder "$content" "{{manifest_schema}}" "$manifest_schema")"
@@ -1594,7 +1937,7 @@ This package contains the generated tests (source), the actual outputs produced 
   local out_path
   out_path="$(report_path_abs "$specclaw_dir_abs" "$target" "$evidence_run_id")"
   case "$(target_kind "$target")" in
-    all|module) mkdir -p "${specclaw_dir_abs}/replay" ;;
+    all|module|item) mkdir -p "${specclaw_dir_abs}/replay" ;;
   esac
   printf '%s\n' "$content" > "$out_path"
 
@@ -1709,16 +2052,30 @@ cmd_finalize() {
   # a retained run can never be cited later as clean proof without the
   # qualification travelling with it. `module-status` reads stub_tainted_items
   # across runs to find each item's LATEST verdict.
+  # Both read selection.json's `bl_items_resolved` — the acceptance-basis-derived
+  # attribution — not the manifest's `verifies_backlog_item`, which on a
+  # correctly-run project holds the placeholder and left both of these
+  # permanently empty, so `module-status` had no item verdicts to read at all.
   local stubs_effect tainted_items covered_items stub_tainted_flag
   stubs_effect="$(jq -c '[ (.stubs_in_effect // [])[].id ]' "$selection" 2>/dev/null || echo '[]')"
   tainted_items="$(jq -c '[ .fixtures[] | select(((.stub_refs // []) | length) > 0)
-                            | .verifies_backlog_item // "" | [scan("BL-[0-9]{3}")][0]
-                            | select(. != null) ] | unique' "$selection" 2>/dev/null || echo '[]')"
+                            | (.bl_items_resolved // [])[] ] | unique' "$selection" 2>/dev/null || echo '[]')"
   # Every BL item this run touched, tainted or not. Without it, "this item's
   # LATEST verdict is stub-tainted" is not computable: a later clean run would
   # be invisible, and the item would read as tainted forever.
-  covered_items="$(jq -c '[ .fixtures[] | .verifies_backlog_item // ""
-                            | [scan("BL-[0-9]{3}")][0] | select(. != null) ] | unique' "$selection" 2>/dev/null || echo '[]')"
+  #
+  # An ITEM-scoped run records EXACTLY the item it was asked about. Its
+  # fixtures can legitimately resolve to other items too (two acceptance bases
+  # sharing a rule), but this run is a statement about the one item named on the
+  # command line — letting a shared fixture silently enter a second item's
+  # verdict history would make `--item BL-020` quietly claim something about
+  # BL-014. That is exactly the false-verdict problem the module rollup's
+  # PARTIAL marking exists to prevent, applied to the item dimension.
+  if [ "$(target_kind "$target")" = "item" ]; then
+    covered_items="$(jq -nc --arg bl "$target" '[$bl]')"
+  else
+    covered_items="$(jq -c '[ .fixtures[] | (.bl_items_resolved // [])[] ] | unique' "$selection" 2>/dev/null || echo '[]')"
+  fi
   stub_tainted_flag="$(jq -r 'if (.stub_tainted_exercised // 0) > 0 then "true" else "false" end' <<< "$counts")"
 
   jq -n \
@@ -1839,8 +2196,12 @@ case "${1:-}" in
     usage
     exit 0
     ;;
+  parse-target)
+    shift
+    cmd_parse_target "$@"
+    ;;
   resolve)
-    [ $# -ge 4 ] || die "Usage: specclaw-bf-replay resolve <specclaw_dir> <change_name|MOD-###|--all> <out_selection_json>"
+    [ $# -ge 4 ] || die "Usage: specclaw-bf-replay resolve <specclaw_dir> <change_name|BL-###|MOD-###|--all> <out_selection_json>"
     cmd_resolve "$2" "$3" "$4"
     ;;
   init-rundir)

@@ -83,6 +83,8 @@ EOF
 
 **Module:** MOD-005
 **Depends on:** None
+**Acceptance basis (domain-model.md):**
+- DR-002: a session is authenticated before any action.
 
 ---
 
@@ -90,6 +92,8 @@ EOF
 
 **Module:** MOD-005
 **Depends on:** BL-014
+**Acceptance basis (domain-model.md):**
+- DR-005: a role grants exactly its declared permissions.
 
 ---
 
@@ -99,6 +103,8 @@ EOF
 
 **Module:** MOD-009
 **Depends on:** BL-014, BL-099
+**Acceptance basis (domain-model.md):**
+- DR-001: an invoice is approved once.
 
 ---
 EOF
@@ -270,6 +276,46 @@ assert_not_contains "${R_CLEAN#*|}" "with active stubs" "an untainted run says n
 assert_contains "${R_TAINT#*|}" "PASS (with active stubs" "the verdict token still comes first"
 assert_eq "1" "$(jq '[.results[]|select((.stub_refs//[])|length>0)]|length' "$PT/.specclaw/replay/run-t/compare.json" 2>/dev/null || echo x)" \
   "only the fixture verifying the stub-backed item is stamped"
+
+echo "== replay: taint renders identically in an item-scoped run =="
+# Taint is a property of the fixtures selected, never of how they were selected.
+# An --item run over the stub-backed item must report the same taint, the same
+# way, as the --all run above — a scope that changed how honestly a run reported
+# its own standing would defeat the point of having scopes.
+run_replay_item() {
+  local root="$1" bl="$2" rd=".specclaw/replay/run-i"
+  ( cd "$root" || return 1
+    rm -rf "$rd"
+    bash "$REPLAY_BIN" resolve .specclaw "$bl" "$rd/selection.json" >/dev/null 2>&1
+    bash "$REPLAY_BIN" init-rundir .specclaw "$rd" >/dev/null 2>&1
+    cat > "$rd/mapping.json" <<'EOF'
+[{"scenario_id":"GM-001","verdict":"REPLAYABLE","legacy_seam_layer":"service","replay_seam_layer":"service"}]
+EOF
+    jq '{output:.output}' .specclaw/baseline/fixtures/GM-001.json > "$rd/actual/GM-001.json"
+    bash "$REPLAY_BIN" compare .specclaw "$rd" >/dev/null 2>&1
+    local out rc
+    out="$(bash "$REPLAY_BIN" render .specclaw "$bl" "$rd" 2>&1)"; rc=$?
+    printf '%s|%s' "$rc" "$(printf '%s' "$out" | tail -1)"
+  )
+}
+# ST-001 is RETIRING by the end of this file, so re-assert it ACTIVE first.
+(cd "$PT" && bash "$COLLECT_BIN" stub-update .specclaw ST-001 --status ACTIVE >/dev/null 2>&1)
+R_ITEM="$(run_replay_item "$PT" BL-021)"
+assert_eq "0" "${R_ITEM%%|*}" "an item-scoped run over a stub-backed item still exits 0"
+assert_contains "${R_ITEM#*|}" "with active stubs: ST-001" \
+  "an item-scoped run reports the same taint as an --all run"
+assert_contains "${R_ITEM#*|}" "PASS (with active stubs" \
+  "and the verdict token still comes first in an item-scoped run"
+assert_eq "1" "$(jq '[.results[]|select((.stub_refs//[])|length>0)]|length' "$PT/.specclaw/replay/run-i/compare.json" 2>/dev/null || echo x)" \
+  "the item-scoped selection stamps the same fixture"
+# The taint travels into the evidence metadata, and an item run records EXACTLY
+# the item it was asked about — module-status reads both.
+(cd "$PT" && bash "$REPLAY_BIN" finalize .specclaw BL-021 ".specclaw/replay/run-i" >/dev/null 2>&1)
+IMETA="$(find "$PT/.specclaw/replay/evidence" -name run-metadata.json | head -1)"
+assert_eq '["BL-021"]' "$(jq -c '.bl_items_covered' "$IMETA" 2>/dev/null | tr -d '\r')" \
+  "an item run records exactly the item it was asked about"
+assert_eq '["BL-021"]' "$(jq -c '.stub_tainted_items' "$IMETA" 2>/dev/null | tr -d '\r')" \
+  "and records that item as stub-tainted"
 
 echo "== replay: RETIRING stops tainting =="
 (cd "$PT" && bash "$COLLECT_BIN" stub-update .specclaw ST-001 --status "RETIRING 2026-08-12" >/dev/null 2>&1)

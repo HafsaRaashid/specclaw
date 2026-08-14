@@ -4,6 +4,71 @@ All notable changes to specclaw are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.0] — 2026-08-13
+
+### Fixed
+- **`/specclaw:bf-replay` selected no fixtures at all on any correctly-run
+  project.** `resolve` joined fixtures to backlog items solely through the
+  manifest's `verifies_backlog_item`. The pipeline's own order runs
+  `/specclaw:bf-baseline` (A4) *before* `/specclaw:bf-rebuild-plan` (A5), so on
+  a first-recorded manifest that field necessarily holds the designer's
+  documented `not yet backlog-linked` placeholder on every entry — which means
+  change-scoped replay failed with `No fixtures matched selection` on every
+  project that followed the documented sequence. A resolve design defect, not
+  bad project data, and **no project needs its baseline re-recorded to get the
+  fix**.
+- **`ST-###` stub taint had never fired.** The taint join, and
+  `run-metadata.json`'s `bl_items_covered` / `stub_tainted_items`, read the same
+  placeholder field and so resolved to nothing — leaving
+  `/specclaw:bf-rebuild-plan module-status` with no per-item verdicts to read.
+  Taint now joins on the derived attribution, so it fires where it always
+  should have. **Expect a first run after upgrading to report taint that
+  earlier runs silently omitted.**
+
+### Changed
+- **The authoritative fixture join is now the backlog item's own acceptance
+  basis.** A `BL-0##` resolves to its fixtures through the `DR-###` ids its
+  acceptance basis cites, matched against each manifest entry's
+  `business_rules_pinned` (ANY-of, as the `module_ids` join already was). This
+  is deliberately the same chain `/specclaw:bf-rebuild-plan` walks to compute
+  each item's `**Verification:** VERIFIABLE — fixtures: …` line, which makes the
+  two testably equal — the suite asserts `--item BL-020`'s selection against a
+  backlog rendered by that other tool, so a disagreement between them cannot
+  ship silently.
+- **`verifies_backlog_item` is demoted to a cross-check and is never
+  load-bearing for selection again.** Populated and disagreeing with the join →
+  a `WARN` naming both sets and the fix, with selection unchanged (one of the
+  two documents is stale and bash cannot know which). Holding the placeholder →
+  ignored in silence, because there is no disagreement to report.
+- **`/specclaw:bf-baseline --record` now fills `verifies_backlog_item` and
+  `module_ids`** from `rebuild-backlog.md` and `module-map.md` when those
+  documents exist at record time, retiring the placeholder on any re-record.
+  Fill-in only: a value a scenario declares itself always stands verbatim, and
+  nothing downstream may require the result.
+
+### Added
+- **`/specclaw:bf-replay --item BL-###`** — a fourth selection scope for
+  accepting one backlog item's behaviour on its own, **with no change directory
+  required**. Validates that the item exists and is not a `STRUCK` tombstone,
+  reports the item id and its fixture count, writes its report to
+  `.specclaw/replay/report-<run_id>-BL-###.md`, keeps its evidence in the
+  corpus-wide pool, and records `bl_items_covered` as exactly that one id — a
+  shared fixture never quietly enters a second item's verdict history. Verdict
+  logic, exit codes, `PROVISIONAL` semantics and taint mechanics are identical
+  to every other scope; only selection differs.
+- **The empty-selection contract.** A valid, active item with genuinely zero
+  fixtures mapped to it is a *clean result*: `resolve` exits 0 with
+  `NO BASELINE DATA — 0 fixtures mapped to BL-###`, and the run renders
+  `INCOMPLETE` with the existing exit code 2, stating the same message on the
+  report's face. Never a precondition crash, never an invented fixture, and
+  never a `PASS` — a malformed manifest keeps its loud failure, and the
+  placeholder is neither of these.
+- **`specclaw-bf-replay parse-target`** — the four scopes are mutually
+  exclusive (a positional `<change-name>` combines with no flag; the flags
+  combine with nothing), and deciding whether an invocation is legal is now a
+  mechanical bash job rather than something the skill's prose has to remember.
+  Retention qualifiers still combine with any scope.
+
 ## [0.11.0] — 2026-08-12
 
 ### Added
