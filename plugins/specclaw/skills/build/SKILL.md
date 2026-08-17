@@ -102,6 +102,19 @@ specclaw-bf-rebuild-collect stub-update .specclaw ST-### \
 
 Both are citations, not summaries: a reviewer must be able to jump to that `file:line` and see the claim is true. **Never add a stub that has no registry entry** — an unregistered stub is invisible to `/specclaw:bf-replay`'s taint stamping, so a report will later claim a clean PASS that was earned against fabricated behaviour.
 
+**c''.** **Split changes** — only when `spec.md` has a `## Item Split` or `## Resumed From Split` section. Add `$CLAUDE_PLUGIN_ROOT/references/split-discipline.md` to the relevant agents' context, and hold the build to three things:
+
+- **Never build deferred scope.** The spec's now-slice is the whole job. If a task cannot be completed without the deferred scope, **stop and report** — that means the partition is wrong, which is a decision to hand back, not a boundary to move. Widening the slice to make a test pass is the same failure as widening a stub's reach.
+- **On a resume, never rebuild what the earlier slice already built.** Read the `IS-###`'s `Implemented now`, `Rules implemented` and `Change`/`Evidence` fields and treat that code as existing — you are integrating with it. Criteria labelled `[already built: IS-###]` are out of scope and must not be re-implemented.
+- **Complete the entry's evidence fields** once the change lands:
+
+```bash
+specclaw-bf-rebuild-collect split-update .specclaw IS-### \
+  --change "<change-name>" --evidence "<PR url or merge sha>"
+```
+
+**Never flip a split's Status yourself.** `READY-TO-RESUME` is computed by bash during `/specclaw:bf-rebuild-plan --refresh` from the blocked-until items' own declared `BUILT:` notes; `COMPLETE` requires a clean `/specclaw:bf-replay --item BL-###` run to cite, and `split-update` refuses `COMPLETE` straight from `ACTIVE`.
+
 **d.** Wait for all agents in the wave to complete.
 
 **e.** For each succeeded agent:

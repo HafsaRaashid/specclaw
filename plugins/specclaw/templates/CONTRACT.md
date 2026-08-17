@@ -1,11 +1,14 @@
 # Golden-Master Contract
 
-This is the **only** stack-related artifact in the specclaw plugin. `bf-baseline`
-and `bf-replay`'s bash collectors are 100% stack-blind — they never detect a
-framework, never glob for a project file, never invoke a toolchain by name.
-All stack intelligence lives in the `bf-baseline-designer` and `bf-replay-mapper`
-agents, which identify the legacy/rebuild stack themselves, per run, by reading
-the repo. Every generated artifact — harness code, replay tests, manifests —
+This is the **only** stack-related artifact in the specclaw plugin. The
+`bf-baseline`, `bf-replay` and `bf-bootstrap` bash collectors are 100%
+stack-blind — they never detect a framework, never glob for a project file,
+never invoke a toolchain by name. All stack intelligence lives in the
+`bf-baseline-designer`, `bf-replay-mapper` and `bf-bootstrap-architect` agents,
+which identify the legacy/rebuild stack themselves, per run — the first two by
+reading the repo, the third by reading the decisions that chose it (section
+(n.2)). Every generated artifact — harness code, replay tests, the target
+foundation's own scaffold, manifests —
 must conform to the field names and schemas below regardless of which
 language or framework produced it. Never rename, reshape, or reformat any of
 these; a rename breaks a downstream reader silently (the field just reads
@@ -200,15 +203,17 @@ Each `fixtures[]` entry carries:
 
 `MOD-NNN` (modules), `GM-NNN` (scenarios), `DR-NNN` (business rules),
 `CQ-NNN`/`SQ-NNN`/`UQ-NNN` (clarify questions), `BL-NNN` (backlog items),
-`ST-NNN` (dependency-bypass stubs, section (m)) are permanent once assigned —
-never renumbered, never reformatted, across any regeneration or archive cycle.
+`ST-NNN` (dependency-bypass stubs, section (m)), `IS-NNN` (item splits,
+section (o)) are permanent once assigned — never renumbered, never
+reformatted, across any regeneration or archive cycle.
 
-`ST-NNN` carries one carve-out from the rest of this section: its document
-(`module-stubs.md`) is **append/update-in-place and is never archived**, on the
-same terms as `pending-questions.md` and `clarifications.md`. So an `ST-NNN`
-never becomes a tombstone — retiring a stub updates that entry's own `Status`
-line and leaves the entry in place, because the record that an item was built
-out of order is the finding, and it outlives the stub.
+`ST-NNN` and `IS-NNN` carry the same carve-out from the rest of this section:
+their documents (`module-stubs.md`, `item-splits.md`) are **append/update-in-
+place and are never archived**, on the same terms as `pending-questions.md` and
+`clarifications.md`. So neither id ever becomes a tombstone — retiring a stub
+or completing a split updates that entry's own `Status` line and leaves the
+entry in place, because the record that an item was built out of order, or
+built in halves, is the finding, and it outlives the stub or the split.
 
 An id that no longer describes anything becomes a **tombstone** rather than
 disappearing (`### MOD-004 — WITHDRAWN <date>, superseded by MOD-002`, and the
@@ -787,3 +792,367 @@ PASS says "the rebuild matched recorded behaviour while standing on something
 unreal, and here is exactly what." Whether that is acceptable is a human
 judgement about a named, dated, cited decision — which is the most this format
 can honestly offer, and considerably more than an untracked stub offers.
+
+### (m.6) `item-split` is not one of these
+
+`item-split` used to be listed here as a fourth strategy. It is not one, and
+treating it as one cost a real project an entire layer of a real feature.
+
+The other three **fake a dependency**, which puts the *standing of a verdict* in
+question — hence `stub_refs`, hence taint, hence retirement. A split fakes
+nothing; it defers real scope, which puts something else entirely in question:
+**whether the item is finished**. An `ST-NNN` entry has no field for what was
+deferred, which rules each half covers, or what unblocks the remainder — so a
+split recorded here lost every fact a resume would later need, while tainting
+fixtures that nothing unreal was ever standing on.
+
+Splits now live in section (o). `stub-append --strategy item-split` is refused
+by name. Entries recorded before that registry existed keep
+`Strategy: item-split` in `module-stubs.md` forever — ids are permanent and
+entries are never deleted — and every reader **excludes them from taint and
+from the retirement block**, which is what the three documents describing them
+always claimed and no code ever implemented.
+
+## (n) The target foundation and `bootstrap-manifest.json`
+
+Every section above describes work done *against* an application. This one
+describes the application's own existence.
+
+The pipeline used to have no owner for creating the target application
+skeleton. `bf-analyze`/`bf-architecture`/`bf-domain`/`bf-clarify`/`bf-baseline`
+are read-only and run in the legacy repo; `bf-rebuild-plan` writes one document
+and calls no lifecycle command; `bf-replay` assumes the rebuild's "real
+service/entity files" already exist. The only writer of application source was
+`/specclaw:build`, which is scoped to one change — so the first backlog item
+proposed inherited responsibility for inventing the skeleton, and when that
+item's scope was split, an entire layer of it disappeared with no record that
+it ever should have been there.
+
+`/specclaw:bf-bootstrap` owns that work, once per rebuild repo, before any
+backlog item is developed.
+
+### (n.1) The manifest
+
+```
+.specclaw/bootstrap/bootstrap-manifest.json
+```
+
+Written by `specclaw-bf-bootstrap record` — bash-derived from the agent's own
+declaration, the gate result and the smoke run, never agent-authored.
+
+```jsonc
+{
+  "bootstrap_schema": 1,
+  "plugin_version": "0.13.0",
+  "generated": "2026-08-14",
+  "generated_at": "2026-08-14T09:12:00Z",
+  "project_root": "…",
+  "not_applicable": null,
+  "foundation_ready": true,
+  "stack": { "frontend": "…", "backend": "…", "orm": "…", "database": "…",
+             "frontend_test_runner": "…", "backend_test_runner": "…" },
+  "decisions_consumed": [
+    { "id": "SQ-014", "decision": "…", "source": ".specclaw/analysis/decisions.md" }
+  ],
+  "pillars": [
+    { "id": "frontend-shell", "status": "present", "evidence": "web/src/main.tsx:1" },
+    { "id": "cors", "status": "absent-by-decision", "reason": "SQ-003 …" }
+  ],
+  "files_created": [ { "path": "…", "purpose": "shell" } ],
+  "route_census":  [ { "route": "/health", "kind": "health", "file": "…:42" } ],
+  "screen_census": [ { "screen": "app shell", "kind": "shell", "file": "…:10" } ],
+  "ui_tokens_imported": ["TK-001"],
+  "ui_tokens_skipped_reason": null,
+  "plan": ".specclaw/bootstrap/bootstrap-plan.md",
+  "gate": { "result": "PASS", "checks_run": 7, "checks": [], "problems": [],
+            "limits": "…" },
+  "smoke": [ { "check": "api-build", "result": "PASS", "required": true,
+               "log": ".specclaw/bootstrap/smoke/api-build.log" } ],
+  "smoke_summary": { "total": 6, "passed": 5, "failed": 0, "skipped": 1 }
+}
+```
+
+- `bootstrap_schema` — integer, currently `1`. `foundation-check` refuses a
+  manifest that lacks it or carries a different one, naming a re-run as the fix,
+  rather than reading unknown fields under assumed defaults. Same reasoning as
+  (c')'s manifest floor.
+- `stack` — free-form, per project, and **stack-neutral in this document**: the
+  keys name roles, the values are whatever the project decided. No framework
+  name appears in the plugin, only in a rendered manifest.
+- `not_applicable` — `{reason, declared_by}` when a repo has declared once that
+  it is not a rebuild target (see (n.5)); `null` otherwise.
+- `smoke[].log` is a repo-relative path to a capped log. A `SKIPPED` entry
+  carries its reason in `detail`; a skip with no reason is refused at record
+  time, because "skipped" without a reason is indistinguishable from "never
+  considered".
+
+**New-repo-born, and never copied.** `bootstrap-manifest.json` is created in the
+rebuild repo, on exactly the same terms as `module-stubs.md` (m.1) and
+`item-splits.md` (o.1): it is not part of the Phase A copy set, nothing copies
+it from the legacy repo, and no legacy-repo command reads it.
+
+### (n.2) Bootstrap consumes decided architecture; it never decides architecture
+
+Seven decisions are **required** and have no default anywhere: `SQ-001` (target
+platform), `SQ-002` (database engine/hosting), `SQ-003` (hosting model),
+`SQ-004` (auth approach), `SQ-006` (UI framework), `SQ-013` (UI fidelity
+policy), `SQ-014` (target backend stack).
+
+- A required decision that is neither decided nor declared not-applicable is a
+  **hard stop naming the exact id**, before anything is created. This is the
+  ask-don't-guess rule (h) applied to scaffolding, and it is stricter than
+  (h)'s soft-block on purpose: a pending question leaves one fixture
+  provisional, whereas a guessed stack is inherited by every backlog item built
+  on top of it and cannot be corrected without discarding the work.
+- **"Not applicable" is an answer**, and it lives in exactly one place:
+  `clarifications.md`'s own `## Not Applicable` section. A rebuild with no
+  server side has no backend stack to choose, and demanding one would be
+  demanding a decision that does not exist.
+- A decision is read **heading-anchored** — a decided `### SQ-0NN —` block with
+  a non-empty `- **Decision:**` line. Headings appear only under
+  `## Decisions`, never under `## Outstanding Questions` (which lists open ids
+  as plain bullets), so this cannot mistake an open question for a decided one.
+  The same single-grep proof `sanction-check` rests on.
+- An **accepted** ADR in the rebuild repo is a legitimate source. A `proposed`
+  one is context, never an answer. `record` verifies that every cited source
+  file exists and greps it for the id; where it cannot confirm the citation it
+  emits a `WARN` naming it rather than passing silently. Bash cannot judge
+  whether an ADR is accepted in whatever format a repo writes ADRs in, and it
+  says so instead of pretending.
+
+### (n.3) Pillars, and who computes readiness
+
+A **pillar** is a role the foundation plays. The enum is closed and names no
+technology, on the same terms as (i)'s seam layers:
+
+`frontend-shell` · `frontend-routing` · `api-client` · `backend-solution` ·
+`di` · `config` · `cors` · `error-handling` · `persistence` · `migrations` ·
+`health-check` · `test-frontend` · `test-backend` · `theme-plumbing`
+
+Each is `present` | `absent-by-decision` | `failed`, and **anything other than
+`present` carries a stated reason**. An absent pillar is either decided away,
+with the decision named, or it is a failure — never a silent skip, which is how
+a half-built foundation reads as a finished one.
+
+`foundation_ready` is computed by `record`, from declared data, and is **never
+agent-asserted**: every pillar `present` or `absent-by-decision`, every
+*required* smoke check `PASS` or `SKIPPED` with a reason, `gate.result == PASS`,
+and every required decision recorded as consumed with a source path that
+exists. `record` is fallible by design on the same terms as
+`specclaw-bf-baseline record`: it collects every problem in one pass and, if
+there are any, writes no manifest **and archives nothing** — a run that
+produced an invalid state must not also destroy the last valid one.
+
+### (n.4) The foundation-only gate, and exactly what it cannot prove
+
+`specclaw-bf-bootstrap gate` checks the agent's declared census against the
+closed vocabularies plus narrow id greps:
+
+1. Every pillar id and status is in its enum, and every non-`present` pillar
+   states a reason.
+2. No file is declared with purpose `capability`. The purpose exists in the
+   vocabulary **solely so the gate can name what it is rejecting**.
+3. Every file purpose is in the closed set (`shell`, `routing`, `api-client`,
+   `di`, `config`, `cors`, `error-handling`, `persistence`, `migrations`,
+   `health`, `test-harness`, `theme`, `build`, `docs`).
+4. At most one `health` route; every other route and every screen is
+   `shell`/`error`/`layout`.
+5. No created file cites a `DR-###`, `BL-###` or `SCR-###` id.
+6. Only the `TK-` groups the declaration says it imported appear in the
+   scaffold.
+7. Every declared smoke check id is in the closed set.
+
+**What this gate cannot prove, stated plainly.** It is a declared-census check
+plus id greps. **A business rule implemented without citing its `DR-###`
+passes it.** Nothing here reads the scaffold's logic, and nothing here could:
+doing so would require judging, per stack, whether a given function encodes a
+domain rule — which is exactly the kind of judgement this plugin keeps out of
+bash and out of agents' verdicts alike.
+
+What it does buy is real and worth having: a scaffold that names a specific
+rule, backlog item or legacy screen is unambiguously over the line and is
+caught; a capability file cannot be declared without rejection; and the census
+itself makes the boundary claim **reviewable by a human** rather than merely
+asserted. A gate that overclaimed here would be worse than no gate, because
+the report would read as proof.
+
+### (n.5) The propose gate
+
+`/specclaw:propose` reads `specclaw-bf-bootstrap foundation-check` before it
+creates anything, and stops when the foundation is not ready — naming the
+command that fixes it, the same UX every other precondition gate in the
+pipeline uses.
+
+- **Inert by default.** No `rebuild-backlog.md` means `applicable: false`, and
+  propose behaves exactly as it always has. A greenfield project never sees
+  this, on the same terms as `bypass-check` (m).
+- **Fails closed.** A manifest that cannot be parsed, carries an unknown
+  schema, or claims `foundation_ready` while recording a failed smoke check
+  (a combination `record` never writes, so the file has been hand-edited) all
+  report not-ready with the reason. Passing a gate on a file nobody could read
+  would defeat its purpose.
+- **The legacy-repo escape hatch is a declaration, not an inference.** A legacy
+  repo carries a `rebuild-backlog.md` too, so the gate would fire there. Rather
+  than guessing which repo it is in — there is no honest signal for that —
+  `specclaw-bf-bootstrap not-applicable` records the answer once, with a
+  reason and a named human, and the gate passes on that declaration
+  thereafter. `--declared-by` is required for the same reason `Chosen by` is
+  (m.2): a declaration that switches off a gate is attributable or it is
+  malformed.
+
+### (n.6) The token-plumbing line
+
+Where the foundation stops and the UI-fidelity workstream (f) begins:
+
+- Foundation **may** create the theme *mechanism* and import the values of
+  `TK-` groups whose scope is **`global`**. `bf-rebuild-plan` already unions
+  the global groups into *every* screen-bearing item's `**UI fidelity:**`
+  line, which makes them a shared prerequisite of all of them — and a shared
+  prerequisite no single item can own is what foundation means.
+- Foundation **may not** import a `TK-` group scoped to a specific `SCR-###`,
+  and **may not** reproduce any screen's layout structure, even under
+  `FAITHFUL`. Those are exactly what a named human signs in `ui-review.md`,
+  per change, per screen.
+- **No contract in (f) changes.** The foundation *claims* a global token's
+  value; a human still *confirms* it in the first screen-bearing change's
+  review. No `ui-review.md` row is skipped, and no `SCR-###` coverage
+  obligation moves, because bootstrap ran.
+- Under `REINTERPRET`, an undecided `SQ-013`, or a decided policy whose
+  `.specclaw/ui/` artifacts are absent: the mechanism only, no values, and
+  `ui_tokens_skipped_reason` records why. A stated degradation, never a silent
+  one — the same discipline `bf-rebuild-plan` applies when it holds
+  screen-bearing items at `OPEN QUESTIONS` rather than quietly dropping a UI
+  requirement.
+
+## (o) Item splits and the `IS-NNN` registry
+
+An **item split** is the dependency-bypass option that fakes nothing. Part of a
+backlog item is implemented now; the rest is deliberately deferred until the
+items it depends on exist.
+
+The purpose of this section is the same as (m)'s and reached by a different
+route. (m) exists so that no verdict earned against a stub can present as one
+earned against the real thing. **This one exists so that no backlog item can
+present as finished while a layer of it is missing** — and so that, weeks or
+months later, specclaw still knows exactly what was completed and what remains.
+
+### (o.1) The registry
+
+```
+.specclaw/analysis/item-splits.md
+```
+
+One `### IS-NNN` entry per split. The plugin ships only the document skeleton
+(`templates/item-splits.md`), which carries the full entry format; the fields
+bash actually reads are:
+
+| Field | Read by | For |
+|---|---|---|
+| `Status` | propose, rebuild-plan `render`, replay `resolve` | `ACTIVE`/`READY-TO-RESUME` mean the item is unfinished; `COMPLETE` is history |
+| `Item` | all of them | the `BL-0##` this split is about |
+| `Rules implemented` / `Rules deferred` | replay `resolve` | the partition that says which fixtures cover built vs deferred scope |
+| `Blocked until` | rebuild-plan `render`, propose | the `BL-0##` set whose declared `BUILT:` notes compute `READY-TO-RESUME` |
+| `Layers deferred` | `split-append` | the layer-removal guard (o.2) |
+| `Deferred` | reporting only | the human-readable claim, quoted into markers and reports |
+| `Change` / `Evidence` / `Replay evidence` | propose | what a resume cites instead of rebuilding |
+
+**The same three properties as (m.1), each load-bearing:** one shared registry;
+append/update-in-place with archive-then-replace explicitly not applying; and
+**absence is a normal state** — no registry means no splits, silently, with no
+warning, no degradation and no verdict change.
+
+### (o.2) Two guards against a split silently widening
+
+**The split the human chose is the split that happens.** `split-append`
+enforces that with two refusals, because prose in a proposal is not something a
+later command can check.
+
+1. **The DR partition.** `Rules implemented` and `Rules deferred` must together
+   account for **every** `DR-###` in the item's own acceptance basis, with no
+   overlap and nothing left out. A rule in neither half is scope belonging to
+   nobody, so nothing downstream can tell whether it shipped. This is also what
+   makes (o.4) possible without an agent reading prose at run time.
+2. **Layer removal.** A split that defers the whole `ui` layer from a
+   **screen-bearing** item is refused unless
+   `Layer removal confirmed by` names a human. Screen-bearing is itself
+   declared data — the item's own `SCR-###` citations or its rendered
+   `**UI fidelity:**` line — never inferred from a title.
+
+**The honest limit, stated as plainly as (m.5)'s.** Bash can *require* the
+attestation; it cannot verify that a human typed it. That is the same trust
+model `Chosen by` has always run on. What the refusal buys is that the
+confirmation cannot be skipped silently and that the record names who gave it.
+
+### (o.3) The state model, and who flips each transition
+
+```
+ACTIVE  →  READY-TO-RESUME  →  COMPLETE
+```
+
+| Transition | Actor | Basis |
+|---|---|---|
+| → `ACTIVE` | `/specclaw:propose` | the human's own choice, with their name |
+| `ACTIVE` → `READY-TO-RESUME` | **bash**, in `bf-rebuild-plan --refresh` | every `Blocked until` id carries a declared `BUILT:` note |
+| `READY-TO-RESUME` → `COMPLETE` | **Claude**, only on a clean `--item` run | that run's id, cited |
+
+`READY-TO-RESUME` is computed and **written** by bash — the single-line `Status`
+rewrite, one direction only, never back, no other field touched. This is the one
+place a rendering command writes into a registry, and it is deliberate: the
+transition is a *pure function of declared data*, so there is no human judgement
+to defer to, and leaving it to a manual flip would make a stale `ACTIVE`
+indistinguishable from "nobody got round to it" — which is exactly the ambiguity
+a resume cannot afford. (`bf-clarify render` already performs the same surgical
+single-line `Status` rewrite when it promotes a pending question.)
+
+`COMPLETE` is a handoff instead, on the same terms as `RETIRED` (m.4): it
+requires an act in the world — the deferred work actually built and proven — and
+bash cannot observe that. `split-update` **refuses `COMPLETE` straight from
+`ACTIVE`**, because `ACTIVE` means the deferred scope's own blockers are not all
+built, so the work cannot honestly have been done against them.
+
+The governing rule, stated once: **bash writes what bash can prove; a named
+actor writes what requires an act in the world.**
+
+It is deliberately not called "retired". Nothing fake ever existed.
+
+A deferral **withdrawn** from the product rather than built is handled manually
+and on purpose: strike the deferred scope in `rebuild-backlog.md` and record the
+withdrawal in the entry's `Completion` field. There is no automatic path,
+because every automatic path would also be a path that marks unbuilt scope done.
+
+### (o.4) A split is never taint, and never a verdict
+
+A split changes **no** verdict, no `divergence_class`, no `field_class`, no
+fixture status and no exit code. It adds no `stub_refs` and appears in no row of
+(j.3)'s table. Nothing was faked, so nothing's standing is in question.
+
+What it changes is a **statement about completeness**, in three places:
+
+- `rebuild-backlog.md` renders the item `⚠ PARTIALLY BUILT — IS-NNN: deferred
+  <scope>`, recomputed from the registry every run and cleared by regeneration
+  when the entry reaches `COMPLETE` — the same tier as `⚠ PROVISIONAL` and
+  `⚠ STUB-BACKED`, never hand-edited.
+- `/specclaw:bf-replay --item BL-###` appends `(partial — split IS-NNN: N of M
+  fixtures pin deferred rules)` **after** the verdict token, so `PASS` still
+  parses as `PASS`, and states on the report's face that this is **not the
+  item's final acceptance**. The partition (o.2) is what lets it name which
+  fixtures those are.
+- `module-status.md` counts each module's partially-built items.
+
+**Deferred-scope fixtures are reported, never excluded.** A fixture pinning a
+deferred rule still runs and still counts. Silently dropping it from the
+exercised set would change what a run FAILs on, which is the one thing a
+completeness marker must not do — and it would hide a real regression behind a
+scope note. The report says instead that N selected fixtures pin rules the split
+declared deferred: a FAIL among them is explained rather than mysterious, and a
+**PASS among them is a surprise worth investigating** — it means either the
+deferred scope was quietly built after all, or the partition is wrong.
+
+### (o.5) What a split can never claim
+
+An `IS-NNN` makes a deferral **traceable**, not harmless. The item is
+unfinished; the backlog says so on its face; every `--item` replay of it reports
+PARTIAL until the remainder lands. Whether shipping the slice is worth the
+incompleteness is a human judgement about a named, dated, recorded decision —
+considerably more than an unrecorded split offers, because an unrecorded split
+is indistinguishable from a finished item.

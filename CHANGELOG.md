@@ -4,6 +4,138 @@ All notable changes to specclaw are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.13.0] — 2026-08-17
+
+### Added
+- **`/specclaw:bf-bootstrap` — the target-foundation stage the pipeline never
+  had.** No command owned creating the rebuild's application skeleton. Every
+  `bf-` analysis command is read-only and runs in the legacy repo;
+  `bf-rebuild-plan` writes one document and calls no lifecycle command;
+  `bf-replay` assumes the rebuild's real service and entity files already
+  exist. The only writer of application source was `/specclaw:build`, scoped to
+  one change — so **the first backlog item proposed inherited responsibility
+  for inventing the skeleton, and inherited it invisibly**, because nothing in
+  its spec, tasks or verify report said so.
+
+  It reads the architecture the rebuild already decided (`decisions.md`'s
+  SQ/CQ answers plus accepted ADRs in the new repo) and scaffolds for it: app
+  shell, routing shell, API client, solution/project layout, DI, configuration,
+  CORS, error-handling conventions, ORM and database connectivity, migrations
+  infrastructure, test-project structure for both sides, theme plumbing, and
+  one health-check endpoint to prove connectivity. Then it smoke-tests that,
+  gates it, and records `.specclaw/bootstrap/bootstrap-manifest.json`.
+
+  **Stack-agnostic and purely dynamic — no per-stack scaffold template ships in
+  the plugin and none will.** The `bf-bootstrap-architect` agent generates the
+  skeleton for whatever stack the decisions name, exactly as the baseline
+  harness and the replay tests are generated.
+- **A foundation-only gate, enforced rather than hoped.** The agent declares a
+  census of everything it created — every file with a purpose, every route,
+  every screen, every design-token group, every decision it consumed and from
+  where — and bash checks that census against closed, stack-neutral
+  vocabularies. A file declared `capability`, a route beyond the health check,
+  or a `DR-###`/`BL-###`/`SCR-###` id anywhere in the scaffold each fail it.
+  **It states its own limit**: a declared-census check plus id greps cannot
+  prove the absence of capability logic, and a gate that overclaimed there
+  would be worse than no gate.
+- **A precondition gate on `/specclaw:propose`.** In a rebuild repo it now
+  stops before creating anything: *"Target rebuild foundation has not been
+  created. Run `/specclaw:bf-bootstrap` first."* Inert on any project with no
+  `rebuild-backlog.md`, so nothing greenfield ever sees it, and it fails closed
+  on a manifest it cannot parse. The one honest false positive — proposing an
+  ordinary change inside the **legacy** repo, which also carries a backlog — is
+  settled by a named human recording it once with
+  `--not-applicable "<why>"`, never by inferring which repo we are in.
+- **`SQ-014 — Target backend stack`** joins the standard question bank (bank
+  version 1 → 2). `SQ-001` picks the platform and `SQ-006` the UI framework;
+  between them **nothing asked what runs on the server**, and that gap is what
+  left a real rebuild's backend decided-but-unrecorded.
+- **`IS-###` item splits (`.specclaw/analysis/item-splits.md`)**, a persistent
+  record of scope deliberately deferred, with its own three-state lifecycle
+  (`ACTIVE → READY-TO-RESUME → COMPLETE`).
+- Two test suites, both registered in CI: `run-bootstrap-gate-tests.sh` (59
+  assertions) and `run-item-split-tests.sh` (89).
+
+### Changed
+- **`item-split` is no longer a stub strategy.** The other three *fake* a
+  dependency — they produce an `ST-###`, can taint a verdict, and are retired
+  when the real module lands. A split fakes nothing; it defers real scope. A
+  stub asks *"was the thing under test real?"*; a split asks *"is this item even
+  finished?"*, and answering that needs fields an `ST-###` entry never had (what
+  was deferred, which rules each half covers, what unblocks it).
+  `stub-append --strategy item-split` is now refused by name and points at
+  `split-append`. **Existing entries are grandfathered, never rewritten** — ids
+  are permanent — and are excluded from taint and from the retirement flow, with
+  the manual step named once.
+- **A split can no longer silently widen.** `split-append` refuses a rule
+  partition that does not account for the item's acceptance basis exactly (a
+  rule in neither half is scope belonging to nobody), and **refuses to defer the
+  whole UI layer from a screen-bearing item** without a named human confirming
+  that consequence. Screen-bearing is declared data — the item's own `SCR-###`
+  citations or its rendered UI-fidelity line — never inferred from a title.
+- **Re-proposing a split item resumes it.** `bypass-check` reports every
+  non-`COMPLETE` split with what was built, its change/PR/replay evidence, what
+  remains, and which blockers are now satisfied; a dependency an active split
+  already deferred is classified `deferred-by-split` and is **not re-elicited**.
+- **`--refresh` computes and writes `READY-TO-RESUME`.** Once every
+  blocked-until item carries a declared `BUILT:` note, bash flips the entry —
+  the `Status` line only, one direction, never back, with a `WARN` so it is
+  never silent. This is the one place a rendering command writes into a
+  registry, and it is deliberate: the transition is a pure function of declared
+  data, so a stale `ACTIVE` would be indistinguishable from "nobody got round to
+  it". `COMPLETE` stays a handoff — it needs a clean `--item` run to cite, and
+  `split-update` refuses it straight from `ACTIVE`.
+- **`--item` replay reports PARTIAL.** A run whose item carries an open split
+  appends `(partial — split IS-###)` **after** the verdict token, names which of
+  its fixtures cover built versus deferred scope, and states on the report's
+  face that it is not that item's final acceptance;
+  `run-metadata.json` records `not_final_acceptance`. **No verdict, divergence
+  class or exit code changes** — `PASS` still parses as `PASS`, and a split never
+  softens a `FAIL`. Deferred-scope fixtures are **reported, never excluded**:
+  dropping one would change what the run fails on and hide a real regression
+  behind a scope note, so a FAIL among them is explained and a PASS among them
+  is flagged as worth investigating.
+- `module-status.md` gains a **Partially built items** column and an
+  **Item Splits By Module** section, kept distinct from the stub-tainted column:
+  taint asks whether what a module was measured against was real, this asks
+  whether its work is finished at all.
+- The standard bank's version is now read from the bank file rather than
+  hardcoded, so a question minted after the bank grew no longer records itself
+  as coming from v1.
+
+### Fixed
+- **`⚠ PROVISIONAL` / `⚠ STUB-BACKED` markers doubled on every `--refresh` and
+  never cleared.** A preserved item's prior marker was kept as part of its
+  static body and a freshly computed one prepended on top, so the marker grew by
+  one per refresh and stale copies survived after the underlying condition went
+  away. Both documented claims — "recomputed fresh from nothing every run, never
+  persisted from a prior refresh's own rendered marker" and "retiring a stub
+  clears every marker automatically" — were false in practice for exactly the
+  items a refresh does not re-draft. Reproduced, fixed, and now covered by
+  tests.
+- **A preserved section's own template comment duplicated once per
+  `--refresh`.** The Coverage Check comment sits between its heading and its
+  placeholder, so reading the section back picked it up as content and
+  re-rendered it into a template that already contained it — four renders
+  produced four stacked copies, growing the document without bound.
+- **`item-split` registry entries tainted fixtures.** `resolve` and `render`
+  filtered on `Status` alone and never on `Strategy`, so an `item-split` entry
+  marked its items `⚠ STUB-BACKED` and stamped their fixtures `stub_refs` —
+  contradicting three documents that each stated item-split taints nothing.
+
+### Upgrade notes
+- Existing brownfield projects will find **`SQ-014` unanswered** and
+  `/specclaw:bf-bootstrap` will stop naming it. That is correct rather than a
+  regression: the backend stack *was* decided somewhere, and this records it.
+  Re-run `/specclaw:bf-clarify` (then `--resolve`) and re-copy `decisions.md`,
+  or answer it directly in the rebuild repo.
+- Projects with an existing `ST-###` entry whose `Strategy` is `item-split`
+  will see those items **stop reporting as stub-tainted**, and the entry move
+  out of the Stub Retirement flow into its own line. Nothing is migrated
+  automatically; `split-append` records a real split if resume tracking is
+  wanted.
+- No baseline needs re-recording, and no manifest schema changed.
+
 ## [0.12.0] — 2026-08-13
 
 ### Fixed

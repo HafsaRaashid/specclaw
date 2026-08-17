@@ -1,6 +1,6 @@
 # Clarify Standard Question Bank
 
-**Bank version:** 1
+**Bank version:** 2
 
 <!--
   This is reference data for /specclaw:bf-clarify's bank layer, read directly
@@ -208,4 +208,16 @@
   3. REINTERPRET — new design; the legacy UI is reference material only.
 - **Proposed default:** 3 (REINTERPRET — the least-work interpretation, and precisely why it must never be assumed silently: answer this one explicitly rather than letting a rebuild quietly discard a UI the users know).
 - **Applicability:** Applicable whenever the rebuild has any UI layer at all — inapplicable only for a pure backend/API/library rebuild with no UI of its own (the same condition as SQ-006). This is a different question from SQ-006, which picks the *framework*; this one sets how much of the legacy *appearance* the rebuild is held to. Answering FAITHFUL or THEME-ONLY activates the optional UI-fidelity workstream (`/specclaw:bf-ui`, and the SCR/TK grounding `/specclaw:bf-rebuild-plan` then requires); answering REINTERPRET costs nothing further anywhere in the pipeline. Either way the answer is verified by a named human signing a checklist, never by fixture replay — UI stays excluded from the golden-master seam taxonomy.
+
+## SQ-014 — Target backend stack
+
+- **Type:** DECISION
+- **Blocking:** yes
+- **Question:** Server-side language, framework and data-access approach for the rebuild?
+- **Options:**
+  1. Adopt a specific named language + framework (state which, including the data-access/ORM approach).
+  2. No server-side component — the rebuild is a pure client, static site, or library.
+  3. Undecided — defer to an implementation-time ADR.
+- **Proposed default:** unknown — no legacy-code signal determines this; ask explicitly. The legacy app's own stack is *not* evidence here: replacing it is usually the point of the rebuild.
+- **Applicability:** Applicable to every rebuild with any server-side component, which is nearly all of them. Answer option 2 (or mark this question Not applicable) for a genuinely client-only rebuild — that is a real answer and `/specclaw:bf-bootstrap` accepts it. This is deliberately separate from SQ-001 (which picks the *platform*: web, desktop, mobile) and SQ-006 (which picks the *UI framework*): between them those two never determine what runs on the server, and that gap is what left the target backend undecided-but-assumed on a real rebuild. `/specclaw:bf-bootstrap` requires this one resolved before it will scaffold anything, and stops naming this id rather than inferring a stack from the legacy app or from convention.
 

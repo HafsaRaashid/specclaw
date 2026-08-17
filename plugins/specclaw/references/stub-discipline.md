@@ -11,7 +11,7 @@ section. Otherwise it does not apply to you.
 
 ## No stub code lives in this plugin
 
-There are no snippets here, and there will not be any. The four strategies
+There are no snippets here, and there will not be any. The three strategies
 below are **shapes**. What a stub actually looks like — the language, the
 injection mechanism, the test-scoping idiom, the flag system — is designed by
 the build agent by reading the rebuild repo, exactly as harness code, replay
@@ -52,10 +52,12 @@ the real interface or fails to start."* An untestable restatement of the rule
 ("the stub is dev-only") does not satisfy this — name the mechanism, and make
 the criterion something a reviewer can check.
 
-## The four strategies
+## The three faking strategies
 
-Each entry's `Strategy` field is one of these. They are not interchangeable;
-pick by what the dependency actually is.
+Each `ST-###` entry's `Strategy` field is one of these three. They are not
+interchangeable; pick by what the dependency actually is. (The fourth answer
+`/specclaw:propose` offers — `item-split` — is not a stub and is not here; see
+below.)
 
 ### `stub-interface`
 
@@ -96,18 +98,32 @@ off until the real module lands.
 - Best when the dependency is genuinely absent (no contract to stub, no data to
   mock) and the honest answer is "this path cannot run yet."
 
-### `item-split`
+## The fourth option, which is not a stub
 
-Split the item: the part that does not need the dependency ships now, the
-remainder becomes a new `BL-0##` that genuinely waits its turn.
+`item-split` — ship the part that does not need the dependency, and let the
+remainder wait — is the fourth answer `/specclaw:propose` offers, and it is
+**not one of the three strategies above and not a stub at all**.
 
-- **The honest non-stub option, and usually the right one when it fits.**
-  Nothing is faked, so nothing is tainted and nothing needs retiring beyond
-  building the remainder.
-- Still gets a registry entry, so the split is on the record — `Implementation`
-  reads `n/a — no stub code; split into BL-0##`.
-- Prefer this whenever the item decomposes cleanly. A bypass that turns out not
-  to need a stub is the best outcome available.
+It belongs to a different registry (`item-splits.md`, `IS-###`), a different
+state model (`ACTIVE → READY-TO-RESUME → COMPLETE`), and it never taints
+anything, because nothing unreal was ever in the tree. `stub-append --strategy
+item-split` is refused by name.
+
+The distinction is not bookkeeping. A stub raises the question *"was the thing
+under test real?"*. A split raises an entirely different one: *"is this item
+even finished?"* — and answering it needs fields an `ST-###` entry does not
+have (what was deferred, which rules each half covers, what unblocks it).
+Recording a split as a stub is how a real project shipped a screen-bearing
+backlog item with no user interface at all and nothing anywhere noticed.
+
+**If the chosen strategy is `item-split`, this document does not apply.** Read
+`references/split-discipline.md` instead.
+
+Entries recorded before `item-splits.md` existed keep `Strategy: item-split` in
+`module-stubs.md` forever — `ST-###` ids are permanent and entries are never
+deleted (`CONTRACT.md` (c)). They are excluded from taint and from the
+retirement block, and `/specclaw:bf-rebuild-plan` names them once with the
+manual step rather than pretending a migration happened.
 
 ## What the build step owes the registry
 

@@ -425,6 +425,18 @@ type_rank() {
 BANK_FILE="$SCRIPT_DIR/../references/clarify-standard-questions.md"
 CUSTOM_QUESTIONS_TEMPLATE="$SCRIPT_DIR/../templates/custom-questions.md"
 
+# The bank's own declared version, read from the file rather than hardcoded.
+# A rendered question records which bank version it came from in its Source
+# field; hardcoding that string meant every question minted after the bank grew
+# still claimed to come from v1, which is precisely the kind of quietly-wrong
+# provenance a Source field exists to prevent.
+bank_version() {
+  local v=""
+  [ -f "$BANK_FILE" ] && v="$({ grep -m1 -- '^\*\*Bank version:\*\*' "$BANK_FILE" \
+    | sed -E 's/^\*\*Bank version:\*\* *//' | sed -E 's/[[:space:]]+$//'; } || true)"
+  printf '%s' "${v:-unknown}"
+}
+
 split_bank_entries() {
   local file="$1" outdir="$2"
   [ -f "$file" ] || return 0
@@ -837,7 +849,7 @@ assemble_sq_block() {
   fi
   [ -z "${finding:-}" ] && finding="(agent did not contextualize this question — showing the standard bank's generic wording as a fallback) $(bank_field_multiline "$bank_entry_file" "Question")"
   [ -z "${why_it_matters:-}" ] && why_it_matters="See the standard bank's applicability rationale — this question was judged applicable to this repo."
-  [ -z "${source:-}" ] && source="Standard bank v1 (references/clarify-standard-questions.md)"
+  [ -z "${source:-}" ] && source="Standard bank v$(bank_version) (references/clarify-standard-questions.md)"
 
   cat <<BLOCK
 ### ${id} — ${title}

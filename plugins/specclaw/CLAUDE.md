@@ -49,6 +49,8 @@ All executable scripts live in `bin/`. Key ones:
 | `specclaw-gh-sync` | GitHub Issues sync |
 | `specclaw-pr` | Create GitHub PR (enforces test policy, triggers context update) |
 | `specclaw-validate-change` | Check phase prerequisites |
+| `specclaw-bf-bootstrap` | Target-foundation stage: `collect` (validate + resolve the required decisions) / `gate` (foundation-only boundary) / `smoke` / `record` / `foundation-check` (the gate `/specclaw:propose` reads) / `not-applicable` |
+| `specclaw-bf-bootstrap` | Target-foundation stage: `collect` / `gate` / `smoke` / `record` / `foundation-check` / `not-applicable` |
 
 ## Tests
 
@@ -63,6 +65,10 @@ Suites live in `tests/`, are bash + coreutils only (no jq in the suites themselv
 | `run-shellcheck-gate-tests.sh` | the shellcheck gate itself |
 | `run-replay-classification-tests.sh` | field-path language, record-time validation, divergence classification, verdict order |
 | `run-stub-registry-tests.sh` | module bypass: `bypass-check` classification, the declared `BUILT:` signal, registry refusals, and that stub taint changes no verdict or exit code |
+| `run-bootstrap-gate-tests.sh` | the target-foundation stage: the propose gate (inert / not-ready / naming its command), the loud stop on an undecided required `SQ-###`, the foundation-only gate refusing a BL capability, `record`'s refusals, re-run behaviour, and that the gate fails closed |
+| `run-item-split-tests.sh` | item splits: the DR partition and layer-removal guards, the `IS-###` record's fields, `ACTIVE → READY-TO-RESUME → COMPLETE` and who flips each, marker rendering/clearing (both persistence regressions), resume-not-restart, and that PARTIAL changes no verdict or exit code |
+| `run-bootstrap-gate-tests.sh` | the target-foundation stage: the propose gate (inert / not-ready / names its command), the undecided-`SQ` stop, the foundation-only gate's capability refusals, `record`'s refusals, re-run modes, and that the gate fails closed |
+| `run-item-split-tests.sh` | item splits: the DR partition and layer-removal guards, the `IS-###` record's fields, `ACTIVE → READY-TO-RESUME → COMPLETE`, marker rendering/clearing, resume via `bypass-check`, and that PARTIAL changes no verdict or exit code |
 
 `shellcheck-gate.sh` fails CI on any shellcheck finding absent from `shellcheck-baseline.txt` (pairs of `<path> <SCxxxx>`, no line numbers, so unrelated edits do not churn it). Fix a new finding or add a targeted `# shellcheck disable=SCxxxx` with a rationale — never silence one by appending to the baseline. It skips with exit 0 when shellcheck is not installed, so the suite still runs locally.
 

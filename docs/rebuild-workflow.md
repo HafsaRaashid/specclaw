@@ -239,6 +239,82 @@ stands: items planned, scenarios captured, latest module-scoped replay verdict,
 open questions. It is a status view — no number in it says a module is *done*,
 because specclaw records no built state for a backlog item.
 
+## Step 4d — Bootstrap the target foundation (in the NEW repo)
+
+**This step runs once per rebuild repo, after the Phase B copy set (Step 6) is
+in place and before the first `/specclaw:propose`.** Everything above happens in
+the legacy repo; this is where the target application starts existing.
+
+```
+/specclaw:bf-bootstrap
+```
+
+It reads the architecture the rebuild has **already decided** — `decisions.md`'s
+`SQ`/`CQ` answers plus any accepted ADR in the new repo — and scaffolds the
+skeleton for it: app shell, routing shell, API client, solution/project layout,
+DI, configuration, CORS, error-handling conventions, ORM and database
+connectivity, migrations infrastructure, test-project structure for both sides,
+theme plumbing, and exactly one health-check endpoint to prove the wiring works.
+Then it smoke-tests all of that, checks the result against a foundation-only
+gate, and records `.specclaw/bootstrap/bootstrap-manifest.json`.
+
+**Why this step exists.** Before it, nothing owned the target application's
+existence. Every `bf-` analysis command is read-only and runs in the legacy
+repo; `bf-rebuild-plan` writes one document; `bf-replay` assumes the rebuild's
+real service and entity files are already there. The only writer of application
+source was `/specclaw:build` — which is scoped to *one change* — so the first
+backlog item proposed inherited responsibility for inventing the skeleton, and
+inherited it *invisibly*, because nothing in its spec or tasks said so. On a
+real rebuild that produced an ASP.NET Core API, EF Core, PostgreSQL and passing
+backend tests for a screen-bearing patient-grid item, and no React application
+at all.
+
+**It implements no backlog capability.** No Sign In, no patient grid, no
+register-patient, no payments — not a stub of one, not a placeholder screen
+named after one, not an endpoint returning fixture data. Each belongs to its own
+`BL-###`. The agent declares a census of everything it created (every file with
+a purpose, every route, every screen, every token group), and a gate checks that
+census against a closed, stack-neutral vocabulary: a file declared `capability`,
+a route beyond the health check, or a `DR-###`/`BL-###`/`SCR-###` id anywhere in
+the scaffold each fail it. That gate is a declared-census check plus id greps —
+it cannot prove the absence of capability logic, and says so rather than
+implying otherwise.
+
+**It consumes decisions; it never makes them.** Seven are required and have no
+default anywhere: `SQ-001` (platform), `SQ-002` (database), `SQ-003` (hosting),
+`SQ-004` (auth approach — it decides whether the shell has an auth *boundary*,
+never that auth is implemented), `SQ-006` (UI framework), `SQ-013` (UI fidelity)
+and `SQ-014` (backend stack). An unresolved one is a **loud stop naming the
+exact id**. Answer it with `/specclaw:bf-clarify` (then `--resolve`) and re-copy
+`decisions.md`. A question declared *Not applicable* in `clarifications.md` is an
+answer too — a client-only rebuild genuinely has no backend stack to choose.
+
+**Stack-agnostic, purely dynamic.** There is no per-stack scaffold template in
+the plugin and there will not be one; the skeleton is generated per run for
+whatever stack the decisions name, exactly as the baseline harness and the
+replay tests are.
+
+**Re-running is safe.** A healthy recorded foundation is a no-op. One with a
+pillar recorded absent or failed is gap-filled — and only those pillars. If the
+repo already contains an application but no manifest, it **stops and asks**
+rather than scaffolding over somebody's work; `--adopt` smoke-tests and records
+what is already there.
+
+From here on, `/specclaw:propose` checks this state mechanically and refuses to
+draft a proposal without it:
+
+> Target rebuild foundation has not been created. Run `/specclaw:bf-bootstrap`
+> first.
+
+That gate is inert on any project with no `rebuild-backlog.md`, so nothing
+greenfield ever sees it. The one honest false positive — proposing an ordinary
+change inside the **legacy** repo, which also carries a backlog — is settled by
+recording it once, explicitly:
+
+```
+/specclaw:bf-bootstrap --not-applicable "this is the legacy repo"
+```
+
 ## Step 5 — Propose each backlog item yourself
 
 `/specclaw:bf-rebuild-plan` does not, and will not, auto-invoke
@@ -273,7 +349,16 @@ follow the recommended order" are always on the list too.
 no default — the entry records your name and the date. That is the point: the
 cost of a bypass isn't the stub, it's forgetting there was one.
 
-Each choice becomes a permanent `ST-###` entry in
+**An item split is recorded separately, because it is a different kind of
+thing.** The first three strategies *fake* a dependency: they produce an
+`ST-###`, they can taint a verdict, and they are retired when the real module
+lands. A split fakes nothing — it *defers real scope* — so it gets its own
+`IS-###` entry in `.specclaw/analysis/item-splits.md`, never taints anything,
+and completes rather than retiring. A stub asks "was the thing under test
+real?"; a split asks "is this item even finished?", and answering that needs
+fields an `ST-###` entry never had. See **Splitting an item** below.
+
+Each stub choice becomes a permanent `ST-###` entry in
 `.specclaw/analysis/module-stubs.md`, and from then on:
 
 - the consuming backlog items carry `⚠ STUB-BACKED`;
@@ -297,6 +382,64 @@ Two things this deliberately will not do. It will not let you bypass a
 means stubbing part of what you are building. And it will not infer that a
 dependency is done from prose — only a literal `BUILT:` line counts, because
 guessing here silently skips the question that would have caught the gap.
+
+### Splitting an item
+
+An **item split** ships part of a backlog item now and defers the rest. It is
+recorded as an `IS-###` entry carrying what shipped, what waits, which
+`DR-###` rules each half covers, and what unblocks the remainder.
+
+**Prefer a vertical slice.** A thin end-to-end capability — the grid renders,
+calls a real endpoint, runs a real query against real data, and only the auth
+integration waits — delivers something a user can open. A horizontal stack cut
+(every layer below the UI ships, and the UI waits) produces an item that looks
+nearly finished and delivers nothing anyone can use, with its acceptance basis
+unmet and no fixture able to notice. That is not hypothetical: it is exactly
+what happened when a screen-bearing patient grid was split to defer *auth* and
+lost its entire frontend instead.
+
+**The split you choose is the split that happens.** Two guards enforce it:
+
+- **The rule partition.** What ships and what waits must together account for
+  every `DR-###` in the item's acceptance basis, with no overlap and nothing
+  left out. A rule in neither half is scope nobody owns, so nothing can later
+  tell whether it shipped.
+- **Layer removal.** Deferring the whole UI layer from a screen-bearing item is
+  **refused** unless a named human confirms that consequence, stated in those
+  terms: *"this would ship BL-010 with no user-visible part at all, and its UI
+  acceptance basis (SCR-004, TK-001) would go unmet."*
+
+From then on:
+
+- the item renders `⚠ PARTIALLY BUILT` in `rebuild-backlog.md`, naming what is
+  still deferred;
+- `/specclaw:bf-replay --item BL-###` reports `(partial — split IS-###)`, names
+  which of its fixtures cover built versus deferred scope, and states that the
+  run **is not that item's acceptance**;
+- `module-status.md` counts the module's partially built items, separately from
+  its stub-tainted ones — a module can be entirely untainted and still be
+  carrying items that are each missing a layer.
+
+**None of that changes a verdict.** A partial `PASS` is still `PASS` with exit
+0; a partial `FAIL` is still `FAIL` with exit 1. And a fixture pinning a
+deferred rule is still replayed and still counts — excluding it would change
+what the run fails on and hide a real regression behind a scope note. So a FAIL
+among those is expected and explained; a **PASS among them is a surprise worth
+investigating**.
+
+**The split comes back on its own.** Write `BUILT: <evidence>` into each
+blocked-until item's **Status notes** block; the next
+`/specclaw:bf-rebuild-plan --refresh` flips the entry to `READY-TO-RESUME`
+mechanically and says so. Then `/specclaw:propose BL-###` **resumes** rather
+than restarting: it shows what was already built and the PR/replay evidence for
+it, proposes only the remainder, and never re-asks about a dependency the split
+already deferred. Only a clean `--item` run afterwards marks the split
+`COMPLETE`, and the `⚠ PARTIALLY BUILT` marker then clears by regeneration.
+
+The governing principle: **choosing item-split must never make implementation
+history disappear.** If specclaw deliberately splits an item today, it must know
+exactly what was completed and what remains when that item is resumed months
+later.
 
 ## Step 6 — What to copy into the new repo (the Phase B copy set)
 
@@ -322,11 +465,14 @@ backlog item, its fixtures, and its screens by reading these files:
 .specclaw/ui/ui-manifest.json                # their hashes       ┘ together
 ```
 
-**`module-stubs.md` is not in the copy set — it is *born* in the rebuild repo.**
-Bypasses are chosen at `/specclaw:propose` time, which runs where the changes
-live, so the registry is created there by the first proposal that elicits one.
-Nothing copies it from the legacy repo, and a rebuild repo without one simply
-has no stubs — every reader treats it as empty, silently.
+**`module-stubs.md`, `item-splits.md` and `.specclaw/bootstrap/` are not in the
+copy set — they are *born* in the rebuild repo.** Bypasses and splits are chosen
+at `/specclaw:propose` time, which runs where the changes live, so both
+registries are created there by the first proposal that elicits one; the
+bootstrap manifest is written by `/specclaw:bf-bootstrap`, which runs only in
+the new repo. Nothing copies any of them from the legacy repo, and a rebuild
+repo without a registry simply has no stubs and no splits — every reader treats
+each as empty, silently.
 
 **`module-map.md` travels too, but is not load-bearing for a verdict.** `/specclaw:bf-replay --module` selects fixtures from `manifest.json`'s own `module_ids`, never from the map — so a replay run works without it. What the map adds in the new repo is readability: the report's module rollup names each module, and `module-status.md` can be regenerated there. Copy it; if it is absent, rollups still compute and simply read as bare `MOD-###` ids.
 

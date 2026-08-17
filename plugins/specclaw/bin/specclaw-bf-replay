@@ -312,6 +312,69 @@ stubs_json() {
     ' 2>/dev/null || printf '[]'
 }
 
+# ─── The item-split registry (CONTRACT.md (o)) ──────────────────────────────
+#
+# Read for ONE purpose: to say honestly whether an `--item` run is the item's
+# final acceptance, or only a look at the half of it that has been built.
+#
+# NOTHING HERE TOUCHES A VERDICT. A split fakes nothing, so no fixture's
+# standing is in question and no comparison is any less sound — what is in
+# question is whether the ITEM IS FINISHED, which is a statement about scope,
+# not about correctness. Same shape as stub taint, and for a different reason.
+#
+# Absence is a normal state: most projects never split an item, and a missing
+# registry parses to `[]` with no warning and no degradation.
+splits_json() {
+  local splits_file="$1"
+  if [ ! -f "$splits_file" ]; then printf '[]'; return 0; fi
+  awk '
+    function val(s) {
+      sub(/^- \*\*[^*]+:\*\*[[:space:]]*/, "", s)
+      gsub(/\t/, " ", s)
+      sub(/[[:space:]]+$/, "", s)
+      return s
+    }
+    function flush() {
+      if (id != "")
+        printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+               id, summary, status, item, deferred, rules_impl, rules_def, blocked, replay_ev
+      id = ""; summary = ""; status = ""; item = ""; deferred = ""
+      rules_impl = ""; rules_def = ""; blocked = ""; replay_ev = ""
+    }
+    /^### IS-[0-9]+/ {
+      flush()
+      match($0, /IS-[0-9]+/); id = substr($0, RSTART, RLENGTH)
+      summary = $0
+      sub(/^### IS-[0-9]+[[:space:]]*(—|-)[[:space:]]*/, "", summary)
+      gsub(/\t/, " ", summary)
+      next
+    }
+    /^## / { flush(); next }
+    id == "" { next }
+    /^- \*\*Status:\*\*/             { status     = val($0); next }
+    /^- \*\*Item:\*\*/               { item       = val($0); next }
+    /^- \*\*Deferred:\*\*/           { deferred   = val($0); next }
+    /^- \*\*Rules implemented:\*\*/  { rules_impl = val($0); next }
+    /^- \*\*Rules deferred:\*\*/     { rules_def  = val($0); next }
+    /^- \*\*Blocked until:\*\*/      { blocked    = val($0); next }
+    /^- \*\*Replay evidence:\*\*/    { replay_ev  = val($0); next }
+    END { flush() }
+  ' "$splits_file" 2>/dev/null \
+  | jq -R -s '
+      [ split("\n")[] | select(length > 0) | split("\t")
+        | { id:                .[0],
+            summary:           .[1],
+            status:            (.[2] | split(" ")[0] | ascii_upcase),
+            status_raw:        .[2],
+            item:              (.[3] | [scan("BL-[0-9]{3}")] | first),
+            deferred:          .[4],
+            rules_implemented: (.[5] | [scan("DR-[0-9]{3}")]),
+            rules_deferred:    (.[6] | [scan("DR-[0-9]{3}")]),
+            blocked_until:     (.[7] | [scan("BL-[0-9]{3}")]),
+            replay_evidence:   .[8] } ]
+    ' 2>/dev/null || printf '[]'
+}
+
 # Extract the markdown block under a "### <heading_id> —" heading, up to (not
 # including) the next "### " heading. Used for both decisions.md (CQ-###) and
 # rebuild-backlog.md (BL-###) — same heading shape in both real documents.
@@ -812,6 +875,52 @@ ${joined}"
                        | select((.mock_seed // "") != "")
                        | .id + "\t" + .mock_seed' <<< "$stubs_all")
 
+  # ── Item-split partition (CONTRACT.md (o.4)) ─────────────────────────────
+  #
+  # Which of this run's selected fixtures cover scope that was DEFERRED, and
+  # which cover scope that was actually built. A pure join on the split's own
+  # declared `Rules deferred` against each fixture's `business_rules_pinned` —
+  # the same tier as the module_ids join, no agent, nothing re-derived, and
+  # nothing that touches a verdict.
+  #
+  # The partition is declared rather than inferred precisely so this join can
+  # exist: without `Rules implemented`/`Rules deferred` on the entry, the only
+  # way to answer "is this fixture testing something we built?" would be an
+  # agent reading prose at run time, which is exactly what this pipeline keeps
+  # out of every other verdict-adjacent decision.
+  #
+  # DELIBERATELY NOT AN EXCLUSION. A fixture pinning a deferred rule still runs
+  # and still counts toward the verdict. Dropping it from the exercised set
+  # would change what a run FAILs on, which is the one thing a completeness
+  # marker must never do — and it would hide a real regression behind a scope
+  # note. The report says instead which fixtures those are, so a FAIL among
+  # them is explained and a PASS among them is a surprise worth investigating.
+  local item_split_json="null"
+  if [ -n "$bl_id" ]; then
+    local splits_all
+    splits_all="$(splits_json "$specclaw_dir_abs/analysis/item-splits.md")"
+    item_split_json="$(jq -c --arg bl "$bl_id" --argjson sel "$selected_fixtures" '
+      [ .[] | select(.item == $bl)
+            | select(.status == "ACTIVE" or .status == "READY-TO-RESUME") ] as $open
+      | if ($open | length) == 0 then null
+        else ($open[0]) as $s
+          | ([ $sel[] | . as $fx
+               | select(((($fx.business_rules_pinned // "") | [scan("DR-[0-9]{3}")]))
+                        | any(. as $d | $s.rules_deferred | index($d)))
+               | $fx.scenario_id ]) as $def
+          | { id: $s.id, status: $s.status, summary: $s.summary,
+              deferred: $s.deferred,
+              rules_deferred: $s.rules_deferred,
+              rules_implemented: $s.rules_implemented,
+              blocked_until: $s.blocked_until,
+              replay_evidence: $s.replay_evidence,
+              fixtures_covering_deferred: $def,
+              fixtures_covering_built:
+                ([ $sel[].scenario_id ] - $def) }
+        end' <<< "$splits_all" 2>/dev/null || echo 'null')"
+    [ -n "$item_split_json" ] || item_split_json="null"
+  fi
+
   local dr_rules_json legacy_shas_json
   dr_rules_json="$(jq '[ .[].business_rules_pinned ] | join(" ") | [scan("DR-[0-9]{3}")] | unique' <<< "$selected_fixtures")"
   legacy_shas_json="$(jq '[ .[].legacy_commit_sha ] | unique' <<< "$selected_fixtures")"
@@ -834,6 +943,7 @@ ${joined}"
     --arg manifest_plugin_version "${manifest_plugin_version:-unknown}" \
     --argjson stubs_in_effect "$stubs_in_effect" \
     --argjson retirement_candidates "$retirement_candidates" \
+    --argjson item_split "$item_split_json" \
     '{
       target: $target,
       target_kind: $kind,
@@ -848,6 +958,7 @@ ${joined}"
       legacy_commit_sha: $legacy_shas[0],
       stubs_in_effect: $stubs_in_effect,
       retirement_candidates: $retirement_candidates,
+      item_split: $item_split,
       fixtures: $fixtures
     }' > "$out_path"
 
@@ -874,7 +985,15 @@ ${joined}"
   # An item run's target IS its BL id — "for BL-020 (BL-020)" would be noise.
   local bl_note=""
   [ -n "$bl_id" ] && [ "$bl_id" != "$target" ] && bl_note=" (${bl_id})"
-  echo "Selected ${count} fixture(s) for ${target}${bl_note}.${shared_note}${stub_note} DR rules covered: $(jq -r 'join(", ")' <<< "$dr_rules_json"). Legacy commit: $(jq -r '.[0]' <<< "$legacy_shas_json")."
+  local split_note=""
+  if [ "$item_split_json" != "null" ]; then
+    local sp_id sp_status sp_def_n
+    sp_id="$(jq -r '.id' <<< "$item_split_json" | tr -d '')"
+    sp_status="$(jq -r '.status' <<< "$item_split_json" | tr -d '')"
+    sp_def_n="$(jq -r '.fixtures_covering_deferred | length' <<< "$item_split_json" | tr -d '')"
+    split_note=" ${bl_id} is PARTIALLY BUILT under split ${sp_id} (${sp_status}): ${sp_def_n} of ${count} selected fixture(s) pin rules that split declared deferred, so this run is not ${bl_id}'s final acceptance."
+  fi
+  echo "Selected ${count} fixture(s) for ${target}${bl_note}.${shared_note}${stub_note}${split_note} DR rules covered: $(jq -r 'join(", ")' <<< "$dr_rules_json"). Legacy commit: $(jq -r '.[0]' <<< "$legacy_shas_json")."
 }
 
 # ─── Subcommand: parse-target ────────────────────────────────────────────────
@@ -1614,6 +1733,55 @@ cmd_render() {
     stub_taint_suffix=" (with active stubs: $(jq -r 'join(", ")' <<< "$stub_ids_in_run"))"
   fi
 
+  # ── Item-split PARTIAL (CONTRACT.md (o.4)) ───────────────────────────────
+  # Exactly the same shape as stub taint, and for a different reason. Taint
+  # qualifies a verdict's STANDING ("what it was measured against was not
+  # real"); this qualifies its SCOPE ("only half the item exists yet"). Both
+  # ride after the verdict token so `PASS` still parses as `PASS`, and neither
+  # enters the verdict block above or changes an exit code.
+  local item_split split_suffix="" split_section="_None — this run covers a whole backlog item, or no item split applies._"
+  item_split="$(jq -c '.item_split // null' "$selection" 2>/dev/null || echo 'null')"
+  [ -n "$item_split" ] || item_split="null"
+  if [ "$item_split" != "null" ]; then
+    local sp_id sp_status sp_deferred sp_def_n sp_blocked sp_prior
+    sp_id="$(jq -r '.id' <<< "$item_split" | tr -d '\r')"
+    sp_status="$(jq -r '.status' <<< "$item_split" | tr -d '\r')"
+    sp_deferred="$(jq -r '.deferred // "not recorded"' <<< "$item_split" | tr -d '\r')"
+    sp_blocked="$(jq -r '(.blocked_until // []) | join(", ")' <<< "$item_split" | tr -d '\r')"
+    sp_prior="$(jq -r '.replay_evidence // "not yet replayed"' <<< "$item_split" | tr -d '\r')"
+    # Count only fixtures this run actually EXERCISED, the same filter taint
+    # uses: a deferred-scope fixture that never ran says nothing either way.
+    sp_def_n="$(jq --argjson sp "$item_split" '
+      [ .[] | select(.verdict=="MATCH" or .verdict=="DIVERGES" or .verdict=="ERROR")
+            | select((.scenario_id) as $id | $sp.fixtures_covering_deferred | index($id)) ] | length' <<< "$merged")"
+    local sp_exercised
+    sp_exercised="$(jq '[ .[] | select(.verdict=="MATCH" or .verdict=="DIVERGES" or .verdict=="ERROR") ] | length' <<< "$merged")"
+    split_suffix=" (partial — split ${sp_id}: ${sp_def_n} of ${sp_exercised} exercised fixture(s) pin deferred rules)"
+
+    local sp_def_list sp_built_list
+    sp_def_list="$(jq -r '(.fixtures_covering_deferred // []) | if length == 0 then "_none_" else join(", ") end' <<< "$item_split" | tr -d '\r')"
+    sp_built_list="$(jq -r '(.fixtures_covering_built // []) | if length == 0 then "_none_" else join(", ") end' <<< "$item_split" | tr -d '\r')"
+    split_section="> **This run is NOT ${bl_item:-this item}'s final acceptance.** Split \`${sp_id}\` is \`${sp_status}\`: part of this item was deliberately deferred and has not been built.
+
+| | |
+|---|---|
+| Split | \`${sp_id}\` — ${sp_status} |
+| Still deferred | ${sp_deferred} |
+| Blocked until | ${sp_blocked:-not recorded} |
+| Fixtures covering **built** scope | ${sp_built_list} |
+| Fixtures covering **deferred** scope | ${sp_def_list} |
+| Prior slice's replay evidence | ${sp_prior} |
+
+A fixture pinning a deferred rule is still replayed and still counts toward the verdict above — excluding it would change what this run fails on and could hide a real regression behind a scope note. So read the two lists deliberately: a **FAIL** among the deferred-scope fixtures is expected and explained by the split, while a **PASS** among them is a surprise worth investigating — it means either the deferred scope was quietly built after all, or ${sp_id}'s rule partition is wrong.
+
+Only a clean \`--item\` run **after** the deferred scope lands can mark ${sp_id} \`COMPLETE\`:
+\`\`\`
+specclaw-bf-rebuild-collect split-update .specclaw ${sp_id} \\
+  --status \"COMPLETE <date>, cleared by run <run_id>\" \\
+  --completion \"<date>, run <run_id>, <what finished it>\"
+\`\`\`"
+  fi
+
   local table_rows
   table_rows=$(jq -r '
     def statussuffix:
@@ -1920,7 +2088,11 @@ This package contains the generated tests (source), the actual outputs produced 
   # Replaces BOTH occurrences (header line and Verdict section) — fill_placeholder
   # loops, so the two never drift apart into a report whose header admits a stub
   # and whose verdict does not.
-  content="$(fill_placeholder "$content" "{{stub_taint_suffix}}" "$stub_taint_suffix")"
+  # Order matters on the verdict line: the verdict token first, then taint,
+  # then the split's scope qualifier. Anything parsing the leading word still
+  # reads PASS/FAIL/INCOMPLETE unchanged.
+  content="$(fill_placeholder "$content" "{{stub_taint_suffix}}" "${stub_taint_suffix}${split_suffix}")"
+  content="$(fill_placeholder "$content" "{{item_split_section}}" "$split_section")"
 
   # ── Informational footer only. Purely additive: the verdict above and the
   # exit code below are computed exactly as before, and a project whose UI
@@ -2078,6 +2250,17 @@ cmd_finalize() {
   fi
   stub_tainted_flag="$(jq -r 'if (.stub_tainted_exercised // 0) > 0 then "true" else "false" end' <<< "$counts")"
 
+  # The split this run's item is carrying, recorded IN the evidence package for
+  # the same reason stub taint is: a retained run must never be citable later as
+  # this item's acceptance without the qualification travelling with it.
+  # `not_final_acceptance` is the machine-readable form of the report's own
+  # banner — a reviewer, or a CI job reading only the metadata, still cannot
+  # mistake a partial run for a finished item.
+  local item_split_meta not_final
+  item_split_meta="$(jq -c '.item_split // null' "$selection" 2>/dev/null || echo null)"
+  [ -n "$item_split_meta" ] || item_split_meta="null"
+  if [ "$item_split_meta" = "null" ]; then not_final="false"; else not_final="true"; fi
+
   jq -n \
     --arg run_id "$run_id" \
     --arg target "$target" \
@@ -2096,6 +2279,8 @@ cmd_finalize() {
     --argjson stub_tainted_items "$tainted_items" \
     --argjson bl_items_covered "$covered_items" \
     --argjson stub_tainted "$stub_tainted_flag" \
+    --argjson item_split "$item_split_meta" \
+    --argjson not_final_acceptance "$not_final" \
     '{
       run_id: $run_id,
       target: $target,
@@ -2114,7 +2299,9 @@ cmd_finalize() {
       stub_tainted: $stub_tainted,
       stubs_in_effect: $stubs_in_effect,
       stub_tainted_items: $stub_tainted_items,
-      bl_items_covered: $bl_items_covered
+      bl_items_covered: $bl_items_covered,
+      item_split: $item_split,
+      not_final_acceptance: $not_final_acceptance
     }' > "$evidence_dir/run-metadata.json"
 
   # Committable-by-design: evidence is meant to travel with the change's PR.
