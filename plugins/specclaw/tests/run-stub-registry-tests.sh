@@ -174,12 +174,20 @@ assert_eq "ST-002" "$ID2" "ids increment and are never reused"
 ERR="$(cd "$P" && bash "$COLLECT_BIN" stub-append .specclaw --substitutes "BL-014" \
         --strategy wishful --consumed-by "BL-021" --chosen-by "T, d" --summary s 2>&1 >/dev/null)"
 assert_contains "$ERR" "unknown strategy" "an invented strategy is refused"
+# These two used --strategy item-split purely as a vehicle for the refusal
+# being tested. item-split is now refused by name before any other validation
+# (it belongs in item-splits.md, not here), so they carry a real faking
+# strategy instead — the assertions themselves are unchanged.
 ERR="$(cd "$P" && bash "$COLLECT_BIN" stub-append .specclaw --substitutes "BL-014" \
-        --strategy item-split --consumed-by "BL-021" --summary s 2>&1 >/dev/null)"
+        --strategy feature-flag --consumed-by "BL-021" --summary s 2>&1 >/dev/null)"
 assert_contains "$ERR" "chosen-by is required" "an entry with no named chooser is refused"
 ERR="$(cd "$P" && bash "$COLLECT_BIN" stub-append .specclaw --substitutes "BL-014" \
-        --strategy item-split --chosen-by "T, d" --summary s 2>&1 >/dev/null)"
+        --strategy stub-interface --chosen-by "T, d" --summary s 2>&1 >/dev/null)"
 assert_contains "$ERR" "consumed-by is required" "an entry that taints nothing is refused"
+ERR="$(cd "$P" && bash "$COLLECT_BIN" stub-append .specclaw --substitutes "BL-014" \
+        --strategy item-split --consumed-by "BL-021" --chosen-by "T, d" --summary s 2>&1 >/dev/null)"
+assert_contains "$ERR" "not a stub strategy" "item-split is refused here and sent to its own registry"
+assert_contains "$ERR" "split-append" "and the refusal names the command that does record it"
 ERR="$(cd "$P" && bash "$COLLECT_BIN" stub-append .specclaw --substitutes "BL-014" \
         --strategy feature-flag --consumed-by "BL-021" --chosen-by "T, d" --summary s \
         --mock-seed x 2>&1 >/dev/null)"

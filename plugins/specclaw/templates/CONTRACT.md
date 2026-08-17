@@ -203,15 +203,17 @@ Each `fixtures[]` entry carries:
 
 `MOD-NNN` (modules), `GM-NNN` (scenarios), `DR-NNN` (business rules),
 `CQ-NNN`/`SQ-NNN`/`UQ-NNN` (clarify questions), `BL-NNN` (backlog items),
-`ST-NNN` (dependency-bypass stubs, section (m)) are permanent once assigned —
-never renumbered, never reformatted, across any regeneration or archive cycle.
+`ST-NNN` (dependency-bypass stubs, section (m)), `IS-NNN` (item splits,
+section (o)) are permanent once assigned — never renumbered, never
+reformatted, across any regeneration or archive cycle.
 
-`ST-NNN` carries one carve-out from the rest of this section: its document
-(`module-stubs.md`) is **append/update-in-place and is never archived**, on the
-same terms as `pending-questions.md` and `clarifications.md`. So an `ST-NNN`
-never becomes a tombstone — retiring a stub updates that entry's own `Status`
-line and leaves the entry in place, because the record that an item was built
-out of order is the finding, and it outlives the stub.
+`ST-NNN` and `IS-NNN` carry the same carve-out from the rest of this section:
+their documents (`module-stubs.md`, `item-splits.md`) are **append/update-in-
+place and are never archived**, on the same terms as `pending-questions.md` and
+`clarifications.md`. So neither id ever becomes a tombstone — retiring a stub
+or completing a split updates that entry's own `Status` line and leaves the
+entry in place, because the record that an item was built out of order, or
+built in halves, is the finding, and it outlives the stub or the split.
 
 An id that no longer describes anything becomes a **tombstone** rather than
 disappearing (`### MOD-004 — WITHDRAWN <date>, superseded by MOD-002`, and the
@@ -791,6 +793,26 @@ unreal, and here is exactly what." Whether that is acceptable is a human
 judgement about a named, dated, cited decision — which is the most this format
 can honestly offer, and considerably more than an untracked stub offers.
 
+### (m.6) `item-split` is not one of these
+
+`item-split` used to be listed here as a fourth strategy. It is not one, and
+treating it as one cost a real project an entire layer of a real feature.
+
+The other three **fake a dependency**, which puts the *standing of a verdict* in
+question — hence `stub_refs`, hence taint, hence retirement. A split fakes
+nothing; it defers real scope, which puts something else entirely in question:
+**whether the item is finished**. An `ST-NNN` entry has no field for what was
+deferred, which rules each half covers, or what unblocks the remainder — so a
+split recorded here lost every fact a resume would later need, while tainting
+fixtures that nothing unreal was ever standing on.
+
+Splits now live in section (o). `stub-append --strategy item-split` is refused
+by name. Entries recorded before that registry existed keep
+`Strategy: item-split` in `module-stubs.md` forever — ids are permanent and
+entries are never deleted — and every reader **excludes them from taint and
+from the retirement block**, which is what the three documents describing them
+always claimed and no code ever implemented.
+
 ## (n) The target foundation and `bootstrap-manifest.json`
 
 Every section above describes work done *against* an application. This one
@@ -1001,3 +1023,136 @@ Where the foundation stops and the UI-fidelity workstream (f) begins:
   one — the same discipline `bf-rebuild-plan` applies when it holds
   screen-bearing items at `OPEN QUESTIONS` rather than quietly dropping a UI
   requirement.
+
+## (o) Item splits and the `IS-NNN` registry
+
+An **item split** is the dependency-bypass option that fakes nothing. Part of a
+backlog item is implemented now; the rest is deliberately deferred until the
+items it depends on exist.
+
+The purpose of this section is the same as (m)'s and reached by a different
+route. (m) exists so that no verdict earned against a stub can present as one
+earned against the real thing. **This one exists so that no backlog item can
+present as finished while a layer of it is missing** — and so that, weeks or
+months later, specclaw still knows exactly what was completed and what remains.
+
+### (o.1) The registry
+
+```
+.specclaw/analysis/item-splits.md
+```
+
+One `### IS-NNN` entry per split. The plugin ships only the document skeleton
+(`templates/item-splits.md`), which carries the full entry format; the fields
+bash actually reads are:
+
+| Field | Read by | For |
+|---|---|---|
+| `Status` | propose, rebuild-plan `render`, replay `resolve` | `ACTIVE`/`READY-TO-RESUME` mean the item is unfinished; `COMPLETE` is history |
+| `Item` | all of them | the `BL-0##` this split is about |
+| `Rules implemented` / `Rules deferred` | replay `resolve` | the partition that says which fixtures cover built vs deferred scope |
+| `Blocked until` | rebuild-plan `render`, propose | the `BL-0##` set whose declared `BUILT:` notes compute `READY-TO-RESUME` |
+| `Layers deferred` | `split-append` | the layer-removal guard (o.2) |
+| `Deferred` | reporting only | the human-readable claim, quoted into markers and reports |
+| `Change` / `Evidence` / `Replay evidence` | propose | what a resume cites instead of rebuilding |
+
+**The same three properties as (m.1), each load-bearing:** one shared registry;
+append/update-in-place with archive-then-replace explicitly not applying; and
+**absence is a normal state** — no registry means no splits, silently, with no
+warning, no degradation and no verdict change.
+
+### (o.2) Two guards against a split silently widening
+
+**The split the human chose is the split that happens.** `split-append`
+enforces that with two refusals, because prose in a proposal is not something a
+later command can check.
+
+1. **The DR partition.** `Rules implemented` and `Rules deferred` must together
+   account for **every** `DR-###` in the item's own acceptance basis, with no
+   overlap and nothing left out. A rule in neither half is scope belonging to
+   nobody, so nothing downstream can tell whether it shipped. This is also what
+   makes (o.4) possible without an agent reading prose at run time.
+2. **Layer removal.** A split that defers the whole `ui` layer from a
+   **screen-bearing** item is refused unless
+   `Layer removal confirmed by` names a human. Screen-bearing is itself
+   declared data — the item's own `SCR-###` citations or its rendered
+   `**UI fidelity:**` line — never inferred from a title.
+
+**The honest limit, stated as plainly as (m.5)'s.** Bash can *require* the
+attestation; it cannot verify that a human typed it. That is the same trust
+model `Chosen by` has always run on. What the refusal buys is that the
+confirmation cannot be skipped silently and that the record names who gave it.
+
+### (o.3) The state model, and who flips each transition
+
+```
+ACTIVE  →  READY-TO-RESUME  →  COMPLETE
+```
+
+| Transition | Actor | Basis |
+|---|---|---|
+| → `ACTIVE` | `/specclaw:propose` | the human's own choice, with their name |
+| `ACTIVE` → `READY-TO-RESUME` | **bash**, in `bf-rebuild-plan --refresh` | every `Blocked until` id carries a declared `BUILT:` note |
+| `READY-TO-RESUME` → `COMPLETE` | **Claude**, only on a clean `--item` run | that run's id, cited |
+
+`READY-TO-RESUME` is computed and **written** by bash — the single-line `Status`
+rewrite, one direction only, never back, no other field touched. This is the one
+place a rendering command writes into a registry, and it is deliberate: the
+transition is a *pure function of declared data*, so there is no human judgement
+to defer to, and leaving it to a manual flip would make a stale `ACTIVE`
+indistinguishable from "nobody got round to it" — which is exactly the ambiguity
+a resume cannot afford. (`bf-clarify render` already performs the same surgical
+single-line `Status` rewrite when it promotes a pending question.)
+
+`COMPLETE` is a handoff instead, on the same terms as `RETIRED` (m.4): it
+requires an act in the world — the deferred work actually built and proven — and
+bash cannot observe that. `split-update` **refuses `COMPLETE` straight from
+`ACTIVE`**, because `ACTIVE` means the deferred scope's own blockers are not all
+built, so the work cannot honestly have been done against them.
+
+The governing rule, stated once: **bash writes what bash can prove; a named
+actor writes what requires an act in the world.**
+
+It is deliberately not called "retired". Nothing fake ever existed.
+
+A deferral **withdrawn** from the product rather than built is handled manually
+and on purpose: strike the deferred scope in `rebuild-backlog.md` and record the
+withdrawal in the entry's `Completion` field. There is no automatic path,
+because every automatic path would also be a path that marks unbuilt scope done.
+
+### (o.4) A split is never taint, and never a verdict
+
+A split changes **no** verdict, no `divergence_class`, no `field_class`, no
+fixture status and no exit code. It adds no `stub_refs` and appears in no row of
+(j.3)'s table. Nothing was faked, so nothing's standing is in question.
+
+What it changes is a **statement about completeness**, in three places:
+
+- `rebuild-backlog.md` renders the item `⚠ PARTIALLY BUILT — IS-NNN: deferred
+  <scope>`, recomputed from the registry every run and cleared by regeneration
+  when the entry reaches `COMPLETE` — the same tier as `⚠ PROVISIONAL` and
+  `⚠ STUB-BACKED`, never hand-edited.
+- `/specclaw:bf-replay --item BL-###` appends `(partial — split IS-NNN: N of M
+  fixtures pin deferred rules)` **after** the verdict token, so `PASS` still
+  parses as `PASS`, and states on the report's face that this is **not the
+  item's final acceptance**. The partition (o.2) is what lets it name which
+  fixtures those are.
+- `module-status.md` counts each module's partially-built items.
+
+**Deferred-scope fixtures are reported, never excluded.** A fixture pinning a
+deferred rule still runs and still counts. Silently dropping it from the
+exercised set would change what a run FAILs on, which is the one thing a
+completeness marker must not do — and it would hide a real regression behind a
+scope note. The report says instead that N selected fixtures pin rules the split
+declared deferred: a FAIL among them is explained rather than mysterious, and a
+**PASS among them is a surprise worth investigating** — it means either the
+deferred scope was quietly built after all, or the partition is wrong.
+
+### (o.5) What a split can never claim
+
+An `IS-NNN` makes a deferral **traceable**, not harmless. The item is
+unfinished; the backlog says so on its face; every `--item` replay of it reports
+PARTIAL until the remainder lands. Whether shipping the slice is worth the
+incompleteness is a human judgement about a named, dated, recorded decision —
+considerably more than an unrecorded split offers, because an unrecorded split
+is indistinguishable from a finished item.

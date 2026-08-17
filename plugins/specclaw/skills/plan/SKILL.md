@@ -32,6 +32,23 @@ If the spec cannot state a checkable scoping mechanism — because the repo has 
 
 Skip all of this when the proposal has no bypass section, which is the normal case.
 
+3c. **Item-split carry-through.** If `proposal.md` has a `## Item Split` or `## Resumes Split` section, read the cited `IS-###` in `.specclaw/analysis/item-splits.md` and read `$CLAUDE_PLUGIN_ROOT/references/split-discipline.md`. **A split is not a bypass** — nothing is faked, so no criterion is labelled `[stub: ...]` because of it and there is no scoping mechanism to assert. What the spec owes a split is **scope honesty**:
+
+**Now-slice (`## Item Split`):**
+
+- **`spec.md` → `## Item Split`:** the `IS-###`, what this change implements, what is deferred, the `DR-###` rules each half covers, what unblocks the remainder, and **where the deferred scope will attach** — that seam is part of this change's design even though its implementation is not.
+- **`spec.md` → `## Acceptance Criteria`:** criteria cover the **now-slice only**. Any criterion for deferred scope is absent or explicitly out of scope citing the `IS-###`. A spec that states criteria for scope this change is not building produces a verify run that fails for the right reason and a reviewer who cannot tell why.
+- **One mandatory criterion:** the deferred scope is genuinely **absent, not half-present**. A partly-wired deferred layer is worse than an absent one, because it looks built.
+- **`tasks.md`:** no task for deferred scope. **If a task cannot be completed without it, the partition is wrong — say so and stop.** That is a decision to hand back, not one to adjust by quietly moving the boundary.
+
+**Resume (`## Resumes Split`):**
+
+- **`spec.md` → `## Resumed From Split`:** the `IS-###`, what the earlier slice built, and its change/PR/replay evidence.
+- **Label every criterion the earlier slice already satisfied `[already built: IS-###]` and mark it out of scope.** They stay visible so the item's full acceptance basis reads in one place; this change is not measured against them.
+- **`tasks.md`:** the deferred scope plus its integration, and nothing else. Re-specifying completed scope turns a resume into a rewrite of working code — precisely what the `IS-###` record exists to prevent.
+
+Skip all of this when the proposal has neither section, which is the normal case.
+
 4. Generate three files in `.specclaw/changes/<change>/`:
    - `spec.md` — functional requirements, non-functional requirements, acceptance criteria, edge cases.
      - **If `--author-spec` is set:** invoke the `spec-author` subagent via the `Agent` tool with `subagent_type: "spec-author"` to author the spec interactively. After the agent writes the file, **STOP and require explicit user approval** (e.g. "approved", "yes", "go") before proceeding to `design.md` and `tasks.md`. Do not generate the remaining files until the user approves.
