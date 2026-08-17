@@ -31,6 +31,10 @@ jobs:
         run: bash plugins/specclaw/tests/run-bootstrap-gate-tests.sh
       - name: Run item-split tests
         run: bash plugins/specclaw/tests/run-item-split-tests.sh
+      - name: Run bootstrap-gate tests
+        run: bash plugins/specclaw/tests/run-bootstrap-gate-tests.sh
+      - name: Run item-split tests
+        run: bash plugins/specclaw/tests/run-item-split-tests.sh
 
   shellcheck:
     name: ShellCheck bin scripts
