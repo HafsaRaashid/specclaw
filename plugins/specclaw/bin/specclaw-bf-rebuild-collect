@@ -1160,10 +1160,27 @@ cmd_render() {
       # Verification and still be preserved). An earlier version reset
       # skip on the first blank line, which let the trailing "---" fall
       # through to the catch-all print rule.
+      # The "⚠ " lines are the RECOMPUTED-EVERY-RUN markers rendered directly
+      # under the heading (PROVISIONAL, STUB-BACKED, PARTIALLY BUILT). They
+      # MUST be stripped here.
+      #
+      # This was a real, shipped defect. Without this rule a preserved item's
+      # prior marker landed in its own static body and render then prepended a
+      # freshly computed one on top — so the marker DOUBLED on every --refresh
+      # and, once the underlying condition cleared (a stub retired, a CQ
+      # answered), the stale copies stayed forever. Both documented claims —
+      # "recomputed fresh from nothing every run, never persisted from a prior
+      # refresh's own rendered marker" and "retiring a stub clears every marker
+      # automatically" — were false in practice for exactly the items a refresh
+      # does not re-draft.
+      #
+      # Anchored on "⚠ " at line start, which is what every marker renders as
+      # and what nothing else in an item body legitimately starts with.
       EXIST_STATIC[$id]="$(tail -n +2 "$f" | awk '
         /^\*\*Gate:\*\*/ { skip=1; next }
         /^\*\*Verification:\*\*/ { skip=1; next }
         /^\*\*UI fidelity:\*\*/ { skip=1; next }
+        /^⚠ / { next }
         /^\*\*Status:\*\* Deferred/ { skip=1; next }
         /^\*\*Status notes \(human-added\):\*\*/ { intail=1; next }
         intail { next }
@@ -1493,7 +1510,71 @@ cmd_render() {
   done
 
   # ── Gate + Verification per active item ─────────────────────────────────
-  declare -A GATE VERIF GATE_RANK VERIF_RANK PROVISIONAL UI_FIDELITY STUB_BACKED
+  declare -A GATE VERIF GATE_RANK VERIF_RANK PROVISIONAL UI_FIDELITY STUB_BACKED PARTIAL_BUILT
+
+  # ── Item splits (CONTRACT.md (o)) — read fresh, never persisted ──────────
+  #
+  # Same tier as PROVISIONAL and STUB-BACKED: the per-item marker is recomputed
+  # from nothing every run, so a split reaching COMPLETE clears it with no
+  # cleanup and no directive.
+  #
+  # This block also performs the ONE registry write any rendering command makes:
+  # ACTIVE -> READY-TO-RESUME, when every id in an entry's `Blocked until`
+  # carries a declared BUILT: note. That transition is a pure function of
+  # declared data — the same trust model, and the same narrow BUILT: trigger, as
+  # stub retirement — so bash owns it. Leaving it to a manual flip would make a
+  # stale ACTIVE indistinguishable from "nobody got round to it", and a resume
+  # cannot afford that ambiguity. Only the Status line is rewritten, one
+  # direction only, never back, and no other field is touched.
+  declare -A SPLIT_STATUS SPLIT_ITEM SPLIT_DEFERRED SPLIT_BLOCKED SPLIT_RULES_DEF
+  declare -A SPLIT_UNBUILT SPLIT_LAYERS_DEF SPLIT_CHANGE SPLIT_EVIDENCE
+  local is_ids="" splits_file_r
+  splits_file_r="$(splits_file_path "$specclaw_dir_abs")"
+  if [ -f "$splits_file_r" ]; then
+    mkdir -p "$workdir/splits"
+    split_blocks "$splits_file_r" "$workdir/splits" "IS"
+    local sfr sidr sitem_r sstat_r sblocked_r sunbuilt_r bb
+    for sfr in "$workdir/splits"/IS-*.md; do
+      [ -f "$sfr" ] || continue
+      sidr="$(block_id "$sfr")"
+      sstat_r="$(split_status_of "$(block_single_field "$sfr" "Status")")"
+      sitem_r="$(printf '%s' "$(block_single_field "$sfr" "Item")" | { grep -oE 'BL-[0-9]{3}' | head -1; } || true)"
+      sblocked_r="$(normalize_id_list "$(block_single_field "$sfr" "Blocked until")" 'BL-[0-9]{3}')"
+
+      # Which blocked-until items still lack a declared BUILT: note. Read from
+      # the PRIOR backlog's own blocks (workdir/existing), which is where a
+      # human's Status notes live; on a first-ever run there are none, so a
+      # split cannot be ready — correct, since there was no item to build.
+      sunbuilt_r=""
+      for bb in ${sblocked_r//,/ }; do
+        [ -z "$bb" ] && continue
+        if [ -f "$workdir/existing/${bb}.md" ] && built_signal_of "$workdir/existing/${bb}.md" >/dev/null 2>&1; then
+          continue
+        fi
+        sunbuilt_r="${sunbuilt_r}${sunbuilt_r:+, }${bb}"
+      done
+
+      # THE ONE WRITE. Never the reverse direction: a split that became ready
+      # does not become unready because someone edited a status note, and
+      # silently walking it back would strand a resume already in flight.
+      if [ "$sstat_r" = "ACTIVE" ] && [ -z "$sunbuilt_r" ] && [ -n "$sblocked_r" ]; then
+        md_set_field "$splits_file_r" "$sidr" "Status" "READY-TO-RESUME $(date +%Y-%m-%d)"
+        sstat_r="READY-TO-RESUME"
+        warn "${sidr} flipped ACTIVE -> READY-TO-RESUME: every blocked-until item (${sblocked_r//,/, }) now carries a declared BUILT: note. ${sitem_r}'s deferred scope can be proposed."
+      fi
+
+      is_ids="${is_ids} ${sidr}"
+      SPLIT_STATUS[$sidr]="$sstat_r"
+      SPLIT_ITEM[$sidr]="$sitem_r"
+      SPLIT_DEFERRED[$sidr]="$(block_single_field "$sfr" "Deferred")"
+      SPLIT_BLOCKED[$sidr]="$sblocked_r"
+      SPLIT_UNBUILT[$sidr]="$sunbuilt_r"
+      SPLIT_RULES_DEF[$sidr]="$(block_single_field "$sfr" "Rules deferred")"
+      SPLIT_LAYERS_DEF[$sidr]="$(block_single_field "$sfr" "Layers deferred")"
+      SPLIT_CHANGE[$sidr]="$(block_single_field "$sfr" "Change")"
+      SPLIT_EVIDENCE[$sidr]="$(block_single_field "$sfr" "Evidence")"
+    done
+  fi
 
   # ── Stub registry (CONTRACT.md (m)) — read fresh, never persisted ────────
   # Same tier as PROVISIONAL: a marker recomputed from nothing on every run,
@@ -1617,6 +1698,13 @@ cmd_render() {
     local stub_marks="" sid2
     for sid2 in $st_ids; do
       [ "${STUB_STATUS_MAP[$sid2]}" = "ACTIVE" ] || continue
+      # A legacy `item-split` ST entry fakes nothing, so nothing it consumed
+      # was ever standing on something unreal. Marking those items STUB-BACKED
+      # was a real defect: three documents claimed item-split taints nothing,
+      # and the code consulted only Status, never Strategy. Excluded here and
+      # from the retirement block below; the entry itself stays forever, since
+      # ST ids are permanent.
+      case " ${STUB_STRATEGIES_LEGACY} " in *" ${STUB_STRATEGY_MAP[$sid2]} "*) continue ;; esac
       case " ${STUB_CONSUMERS[$sid2]//,/ } " in
         *" ${id} "*) ;;
         *) continue ;;
@@ -1626,6 +1714,30 @@ cmd_render() {
     if [ -n "$stub_marks" ]; then
       STUB_BACKED[$id]="⚠ STUB-BACKED — built against ${stub_marks}. Any replay verdict for this item says so until the stub is retired."
     fi
+
+    # ── PARTIALLY BUILT (CONTRACT.md (o.4)) — the completeness marker.
+    #
+    # Orthogonal to every other axis on the item. Gate answers "can we start?",
+    # Verification "is there a fixture?", STUB-BACKED "was the thing under test
+    # real?" — and this one answers a question none of them can: IS THIS ITEM
+    # FINISHED. An item can be CLEAR, VERIFIABLE, untainted and still be
+    # missing half of itself.
+    #
+    # Recomputed from the registry every run, so reaching COMPLETE clears it by
+    # regeneration alone — never by hand-editing the backlog.
+    local split_marks="" sid4
+    for sid4 in $is_ids; do
+      [ "${SPLIT_ITEM[$sid4]}" = "$id" ] || continue
+      case "${SPLIT_STATUS[$sid4]}" in ACTIVE|READY-TO-RESUME) ;; *) continue ;; esac
+      if [ "${SPLIT_STATUS[$sid4]}" = "READY-TO-RESUME" ]; then
+        split_marks="${split_marks}${split_marks:+
+}⚠ PARTIALLY BUILT — ${sid4} is READY TO RESUME: every blocked-until item (${SPLIT_BLOCKED[$sid4]//,/, }) now carries a declared \`BUILT:\` note. Still deferred: ${SPLIT_DEFERRED[$sid4]}. Run \`/specclaw:propose ${id}\` to plan the remaining scope only."
+      else
+        split_marks="${split_marks}${split_marks:+
+}⚠ PARTIALLY BUILT — ${sid4}: deferred ${SPLIT_DEFERRED[$sid4]}. Blocked until ${SPLIT_UNBUILT[$sid4]:-${SPLIT_BLOCKED[$sid4]//,/, }} carries a declared \`BUILT:\` note. An \`/specclaw:bf-replay --item ${id}\` run reports PARTIAL and is not this item's final acceptance."
+      fi
+    done
+    [ -n "$split_marks" ] && PARTIAL_BUILT[$id]="$split_marks"
 
     if [ -n "${UNVERIF_CQ[$id]:-}" ]; then
       VERIF[$id]="UNVERIFIABLE — acceptance must come from a stakeholder decision, not fixture comparison (see ${UNVERIF_CQ[$id]}). ${UNVERIF_REASON[$id]}"
@@ -1700,6 +1812,11 @@ ${PROVISIONAL[$id]}
     if [ -n "${STUB_BACKED[$id]:-}" ]; then
       provisional_block="${provisional_block}
 ${STUB_BACKED[$id]}
+"
+    fi
+    if [ -n "${PARTIAL_BUILT[$id]:-}" ]; then
+      provisional_block="${provisional_block}
+${PARTIAL_BUILT[$id]}
 "
     fi
     entry="### ${id} — ${FINAL_TITLE[$id]}
@@ -2033,10 +2150,21 @@ ${ui_status_block}
   # must carry the signal: a module is not built because one of its items is.
   local stub_retirement="" ready_block="" waiting_block="" sid3 today_str
   today_str="$(date +%Y-%m-%d)"
+  local legacy_split_note=""
   for sid3 in $st_ids; do
     case "${STUB_STATUS_MAP[$sid3]}" in
       ACTIVE|RETIRING) ;;
       *) continue ;;
+    esac
+    # A legacy item-split entry has no stub code to remove and nothing to
+    # re-replay, so every step of the retirement flow is meaningless for it.
+    # Named once, with the manual step, rather than migrated — ST ids are
+    # permanent and entries are never rewritten (CONTRACT.md (c)).
+    case " ${STUB_STRATEGIES_LEGACY} " in
+      *" ${STUB_STRATEGY_MAP[$sid3]} "*)
+        legacy_split_note="${legacy_split_note}- **${sid3}** — a legacy \`item-split\` entry, recorded before item splits had their own registry. It fakes nothing, so it taints nothing and there is no stub code to retire. It is excluded from the flow above. If you still need resume tracking for that split, record it with \`specclaw-bf-rebuild-collect split-append\` (see \`templates/item-splits.md\`); this entry stays here permanently either way.
+"
+        continue ;;
     esac
     local subs="${STUB_SUBSTITUTES[$sid3]}" consumers="${STUB_CONSUMERS[$sid3]}"
     local cmds="" replay_cmds="" c
@@ -2088,15 +2216,51 @@ ${ui_status_block}
 "
     fi
   done
-  if [ -n "$ready_block" ] || [ -n "$waiting_block" ]; then
+  if [ -n "$ready_block" ] || [ -n "$waiting_block" ] || [ -n "$legacy_split_note" ]; then
     stub_retirement="${ready_block:+### Ready to retire
 
 ${ready_block}
 }${waiting_block:+### Still waiting
 
-${waiting_block}}"
+${waiting_block}
+}${legacy_split_note:+### Legacy item-split entries (nothing to retire)
+
+${legacy_split_note}}"
   else
     stub_retirement="_No active dependency bypass stubs. Every item is being built on the real modules it depends on._"
+  fi
+
+  # ── Item Splits (CONTRACT.md (o)) ────────────────────────────────────────
+  #
+  # Bash-computed every run from item-splits.md, the same tier as the Stub
+  # Retirement block. A project with no registry gets one line saying so.
+  local item_splits_block="" is_ready_block="" is_waiting_block="" sid5
+  for sid5 in $is_ids; do
+    case "${SPLIT_STATUS[$sid5]}" in
+      READY-TO-RESUME)
+        is_ready_block="${is_ready_block}- **${sid5}** — ${SPLIT_ITEM[$sid5]} is partially built and every blocked-until item (${SPLIT_BLOCKED[$sid5]//,/, }) now carries a declared \`BUILT:\` note. Still deferred: ${SPLIT_DEFERRED[$sid5]}.
+  1. *(Claude)* \`/specclaw:propose ${SPLIT_ITEM[$sid5]}\` — it resumes, proposing ONLY the deferred scope and citing this entry's own evidence (${SPLIT_CHANGE[$sid5]:-no change recorded}, ${SPLIT_EVIDENCE[$sid5]:-no PR evidence}).
+  2. *(Claude)* build and verify the remainder, then \`/specclaw:bf-replay --item ${SPLIT_ITEM[$sid5]}\`.
+  3. *(Claude, on a clean run only)* \`split-update .specclaw ${sid5} --status \"COMPLETE <date>, cleared by run <run_id>\" --completion \"<date>, run <run_id>, <what finished it>\"\`.
+"
+        ;;
+      ACTIVE)
+        is_waiting_block="${is_waiting_block}- **${sid5}** — ${SPLIT_ITEM[$sid5]} is partially built. Deferred: ${SPLIT_DEFERRED[$sid5]} (rules ${SPLIT_RULES_DEF[$sid5]:-none recorded}; layers ${SPLIT_LAYERS_DEF[$sid5]:-none recorded}). Waiting on ${SPLIT_UNBUILT[$sid5]:-${SPLIT_BLOCKED[$sid5]//,/, }} — no declared \`BUILT:\` note yet. This flips to READY-TO-RESUME automatically on the next \`--refresh\` once those notes exist.
+"
+        ;;
+    esac
+  done
+  if [ -n "$is_ready_block" ] || [ -n "$is_waiting_block" ]; then
+    item_splits_block="${is_ready_block:+### Ready to resume
+
+${is_ready_block}
+}${is_waiting_block:+### Still waiting
+
+${is_waiting_block}}"
+  elif [ -f "$splits_file_r" ]; then
+    item_splits_block="_Every recorded item split is COMPLETE. No backlog item is carrying deferred scope._"
+  else
+    item_splits_block="_No item splits. Every backlog item is being built whole._"
   fi
 
   # ── Change report (refresh only) ─────────────────────────────────────────
@@ -2147,10 +2311,26 @@ ${waiting_block}}"
   draft_sequencing="$(awk '/^## Sequencing Rationale/{flag=1;next}/^## /{flag=0}flag' "$draft_file" | sed '/./,$!d' | strip_trailing_separator)"
   draft_coverage="$(awk '/^## Coverage Check/{flag=1;next}/^## /{flag=0}flag' "$draft_file" | sed '/./,$!d' | strip_trailing_separator)"
 
+  # Strip a leading HTML comment block. The template renders its own explanatory
+  # comment BETWEEN a section heading and that section's placeholder, so reading
+  # the section back on a refresh picks the comment up as if it were content —
+  # and re-rendering it into a template that already contains it appended one
+  # more copy on every single --refresh. A shipped defect: four renders produced
+  # four stacked copies of the Coverage Check comment, growing the document
+  # without bound and burying the actual coverage lines.
+  strip_leading_comment() {
+    awk '
+      NR == 1 && /^[[:space:]]*$/ { next }
+      !started && /^<!--/ { incomment = 1 }
+      incomment { if (/-->/) { incomment = 0 } ; next }
+      { started = 1; print }
+    ' | sed '/./,$!d'
+  }
+
   local prior_sequencing="" prior_coverage=""
   if $is_refresh; then
-    prior_sequencing="$(awk '/^## Sequencing Rationale/{flag=1;next}/^## /{flag=0}flag' "$backlog_file" | sed '/./,$!d')"
-    prior_coverage="$(awk '/^## Coverage Check/{flag=1;next}/^## /{flag=0}flag' "$backlog_file" | sed '/./,$!d')"
+    prior_sequencing="$(awk '/^## Sequencing Rationale/{flag=1;next}/^## /{flag=0}flag' "$backlog_file" | strip_leading_comment)"
+    prior_coverage="$(awk '/^## Coverage Check/{flag=1;next}/^## /{flag=0}flag' "$backlog_file" | strip_leading_comment)"
     # Drop any prior run's bash-computed subsections — both are re-derived
     # below, so carrying the old ones forward would render two of each, one
     # stale.
@@ -2284,6 +2464,7 @@ ${scr_cov}
   doc="$(substitute "$doc" '{{deferred_items}}' "$deferred_body")"
   doc="$(substitute "$doc" '{{change_report}}' "$change_report")"
   doc="$(substitute "$doc" '{{stub_retirement}}' "$stub_retirement")"
+  doc="$(substitute "$doc" '{{item_splits}}' "$item_splits_block")"
 
   printf '%s\n' "$doc" > "$backlog_file"
   rm -f "$draft_file"
@@ -2478,6 +2659,33 @@ cmd_module_status() {
     MS_TAINTED[$owner]=$(( MS_TAINTED[$owner] + 1 ))
   done
 
+  # ── Partially-built items per module (CONTRACT.md (o)) ───────────────────
+  # A different question from the tainted count beside it. Tainted asks "was
+  # what this module was measured against real?"; this asks "is this module's
+  # work even finished?" — a module can be entirely untainted and still be
+  # carrying three items that are each missing a layer.
+  declare -A MS_PARTIAL
+  local ms_split_rows=""
+  for m in $mod_ids; do MS_PARTIAL[$m]=0; done
+  local splits_file_ms; splits_file_ms="$(splits_file_path "$specclaw_dir_abs")"
+  if [ -f "$splits_file_ms" ]; then
+    mkdir -p "$workdir/splits"
+    split_blocks "$splits_file_ms" "$workdir/splits" "IS"
+    local isf isid isitem isstat isowner
+    for isf in "$workdir/splits"/IS-*.md; do
+      [ -f "$isf" ] || continue
+      isstat="$(split_status_of "$(block_single_field "$isf" "Status")")"
+      case "$isstat" in ACTIVE|READY-TO-RESUME) ;; *) continue ;; esac
+      isid="$(block_id "$isf")"
+      isitem="$(printf '%s' "$(block_single_field "$isf" "Item")" | { grep -oE 'BL-[0-9]{3}' | head -1; } || true)"
+      [ -n "$isitem" ] || continue
+      isowner="${ITEM_MODULE[$isitem]:-}"
+      [ -n "$isowner" ] && MS_PARTIAL[$isowner]=$(( ${MS_PARTIAL[$isowner]:-0} + 1 ))
+      ms_split_rows="${ms_split_rows}| ${isid} | ${isowner:-unassigned} | ${isitem} | ${isstat} | $(block_single_field "$isf" "Deferred") | $(block_single_field "$isf" "Blocked until") |
+"
+    done
+  fi
+
   # ── Which stubs fake THIS module for other people's items ────────────────
   # The "who is waiting on the real MOD-005" lookup, in one place. An entry
   # substitutes this module when it names the MOD-### directly, or names a
@@ -2557,7 +2765,7 @@ cmd_module_status() {
   fi
 
   # ── Render ───────────────────────────────────────────────────────────────
-  local rows="" deps verdict_cell tainted_cell
+  local rows="" deps verdict_cell tainted_cell partial_cell
   for m in $mod_ids; do
     deps="${MS_DEPS[$m]:-}"
     [ -n "$deps" ] && deps="${deps//,/, }" || deps="none"
@@ -2575,15 +2783,24 @@ cmd_module_status() {
     else
       tainted_cell="0"
     fi
+    # A different axis from the one beside it: tainted asks whether what this
+    # module was measured against was real, partial asks whether its work is
+    # even finished. A module can be wholly untainted and still be carrying
+    # items that are each missing a layer.
+    if [ "${MS_PARTIAL[$m]:-0}" -gt 0 ]; then
+      partial_cell="⚠ ${MS_PARTIAL[$m]}"
+    else
+      partial_cell="0"
+    fi
 
-    rows="${rows}| ${m} | ${MS_NAME[$m]} | ${deps} | ${MS_PLANNED[$m]}/${MS_TOTAL[$m]} | ${MS_CAPTURED[$m]}/${MS_DESIGNED[$m]} | ${verdict_cell} | ${tainted_cell} | ${MS_QS[$m]} |
+    rows="${rows}| ${m} | ${MS_NAME[$m]} | ${deps} | ${MS_PLANNED[$m]}/${MS_TOTAL[$m]} | ${MS_CAPTURED[$m]}/${MS_DESIGNED[$m]} | ${verdict_cell} | ${tainted_cell} | ${partial_cell} | ${MS_QS[$m]} |
 "
   done
-  [ -n "$rows" ] || rows="| — | _No active modules in module-map.md._ | — | — | — | — | — | — |
+  [ -n "$rows" ] || rows="| — | _No active modules in module-map.md._ | — | — | — | — | — | — | — |
 "
 
-  local table="| Module | Name | Depends on | Backlog items (planned/total) | Scenarios (captured/designed) | Latest replay verdict | Stub-tainted items | Open questions |
-|---|---|---|---|---|---|---|---|
+  local table="| Module | Name | Depends on | Backlog items (planned/total) | Scenarios (captured/designed) | Latest replay verdict | Stub-tainted items | Partially built items | Open questions |
+|---|---|---|---|---|---|---|---|---|
 ${rows}"
 
   # ── Stubs In Effect By Module ────────────────────────────────────────────
@@ -2598,6 +2815,16 @@ ${stub_rows}"
     fi
   else
     stubs_section="_None — no active dependency bypass stubs. Every module is being built on the real modules it depends on._"
+  fi
+
+  # ── Item Splits By Module ────────────────────────────────────────────────
+  local splits_section
+  if [ -n "$ms_split_rows" ]; then
+    splits_section="| Split | Module | Item | Status | Deferred | Blocked until |
+|---|---|---|---|---|---|
+${ms_split_rows}"
+  else
+    splits_section="_None — no backlog item is carrying deferred scope. Every item is being built whole._"
   fi
 
   local unassigned_note=""
@@ -2619,6 +2846,12 @@ ${stub_rows}"
 "
   notes="${notes}- A verdict here covers only **module-scoped** replay runs that retained evidence. A change-scoped or \`--all\` run exercises a module's fixtures too, but records no per-module verdict in its metadata — read that run's report's own **Module Rollup** section instead. The **Stub-tainted items** column has no such limitation: it counts runs at every scope, because which items a run exercised and which of those rested on a stub is a per-item fact no scope distorts.
 - No number here says a module is *done*: specclaw records no built state for a backlog item, so these are planning, capture, and comparison coverage only."
+  local total_partial=0
+  for m in $mod_ids; do total_partial=$(( total_partial + ${MS_PARTIAL[$m]:-0} )); done
+  if [ "$total_partial" -gt 0 ]; then
+    notes="${notes}
+- **A partially built item is not a built item.** ${total_partial} item(s) had part of their scope deliberately deferred under an \`IS-###\` split, and the remainder has not landed. A \`/specclaw:bf-replay --item\` run for one of those reports PARTIAL and is not that item's final acceptance. This is a different question from stub taint: taint asks whether what was measured was real, this asks whether the item is finished at all."
+  fi
   local total_tainted=0
   for m in $mod_ids; do total_tainted=$(( total_tainted + MS_TAINTED[$m] )); done
   if [ "$total_tainted" -gt 0 ]; then
@@ -2636,6 +2869,7 @@ ${stub_rows}"
   doc="$(substitute "$doc" '{{module_table}}' "$table")"
   doc="$(substitute "$doc" '{{unassigned_note}}' "$unassigned_note")"
   doc="$(substitute "$doc" '{{stubs_by_module}}' "$stubs_section")"
+  doc="$(substitute "$doc" '{{splits_by_module}}' "$splits_section")"
   doc="$(substitute "$doc" '{{notes}}' "$notes")"
 
   local out_file="$analysis_dir/module-status.md"
@@ -3123,6 +3357,7 @@ cmd_split_append() {
   local item="" module="" reason="" unmet="" impl_now="" deferred=""
   local rules_impl="" rules_def="" layers_impl="" layers_def=""
   local blocked_until="" chosen_by="" change="" summary="" layer_confirm=""
+  local rules_impl_given=false
   while [ $# -gt 0 ]; do
     case "$1" in
       --item)                        item="${2:-}"; shift 2 ;;
@@ -3131,7 +3366,7 @@ cmd_split_append() {
       --unmet-deps)                  unmet="${2:-}"; shift 2 ;;
       --implemented-now)             impl_now="${2:-}"; shift 2 ;;
       --deferred)                    deferred="${2:-}"; shift 2 ;;
-      --rules-implemented)           rules_impl="${2:-}"; shift 2 ;;
+      --rules-implemented)           rules_impl="${2:-}"; rules_impl_given=true; shift 2 ;;
       --rules-deferred)              rules_def="${2:-}"; shift 2 ;;
       --layers-implemented)          layers_impl="${2:-}"; shift 2 ;;
       --layers-deferred)             layers_def="${2:-}"; shift 2 ;;
@@ -3162,7 +3397,12 @@ cmd_split_append() {
   case "$blocked_until" in *BL-[0-9][0-9][0-9]*) ;; *) die "split-append: --blocked-until must name at least one BL-### item (got '${blocked_until}')." ;; esac
   [ -n "$chosen_by" ] || die "split-append: --chosen-by is required (name, YYYY-MM-DD). A split is always an explicit human choice — an entry with no named chooser is malformed, on the same terms as a bypass's Chosen by (CONTRACT.md (m.2))."
   [ -n "$summary" ] || die "split-append: --summary is required (the one-line heading: which item was split, and what waits)."
-  [ -n "$rules_impl" ] || die "split-append: --rules-implemented is required (the acceptance-basis DR-### rules the now-slice covers)."
+  # Required to be PASSED, but legitimately empty: a slice can ship groundwork
+  # (middleware, a seam, plumbing) that no acceptance-basis rule covers on its
+  # own. Refusing that would force a fake rule assignment, which is worse than
+  # an honest "none". Passing it empty is a deliberate statement; omitting it
+  # is an oversight, and those are different things.
+  $rules_impl_given || die "split-append: --rules-implemented is required (the acceptance-basis DR-### rules the now-slice covers). Pass it empty (--rules-implemented \"\") if this slice genuinely covers none of them — that is a legitimate answer, but it has to be stated rather than left out."
   [ -n "$rules_def" ] || die "split-append: --rules-deferred is required (the acceptance-basis DR-### rules the deferred scope covers)."
   [ -n "$layers_impl" ] || die "split-append: --layers-implemented is required (from: ${ITEM_SPLIT_LAYERS})."
   [ -n "$layers_def" ] || die "split-append: --layers-deferred is required (from: ${ITEM_SPLIT_LAYERS})."
@@ -3196,6 +3436,7 @@ cmd_split_append() {
   local ri rd
   ri="$(normalize_id_list "$rules_impl" 'DR-[0-9]{3}')"
   rd="$(normalize_id_list "$rules_def" 'DR-[0-9]{3}')"
+  [ -n "$ri" ] || warn "This split's now-slice covers NONE of ${item}'s acceptance-basis rules — every one of them is deferred. That is legal (the slice may ship groundwork no rule describes on its own), but it means nothing this change delivers can be verified against a fixture, and an --item replay of ${item} will report every selected fixture as covering deferred scope."
   [ -n "$rd" ] || die "split-append: --rules-deferred names no DR-### rule (got '${rules_def}'). If the deferred scope covers none of the item's acceptance-basis rules, the deferral is invisible to every later check — including the replay run that is supposed to report the item as PARTIAL."
 
   local overlap="" missing="" extra="" r

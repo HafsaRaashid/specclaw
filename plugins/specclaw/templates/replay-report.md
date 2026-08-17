@@ -97,6 +97,40 @@
 
 {{stubs_in_effect}}
 
+## Item Split In Effect
+
+<!--
+  Present when this run's backlog item has a non-COMPLETE IS-### split
+  (templates/CONTRACT.md (o)) — i.e. part of the item was deliberately
+  deferred and has not been built yet.
+
+  A DIFFERENT CLAIM FROM STUB TAINT ABOVE, and the difference is the whole
+  point. A stub qualifies a verdict's STANDING: what it was measured against
+  was not real. A split qualifies its SCOPE: the comparison was entirely
+  sound, but only half the item exists to compare. Nothing here was faked, so
+  nothing here is tainted.
+
+  WHAT IT DOES AND DOES NOT MEAN. This run changes no verdict, no divergence
+  class and no exit code — a split enters none of them. What it changes is
+  that this run CANNOT BE THE ITEM'S FINAL ACCEPTANCE, and says so on its own
+  face rather than leaving a reader to notice.
+
+  DEFERRED-SCOPE FIXTURES ARE REPORTED, NEVER EXCLUDED. A fixture pinning a
+  deferred rule still runs and still counts. Dropping it from the exercised
+  set would change what the run FAILs on — the one thing a completeness
+  marker must never do — and would hide a real regression behind a scope
+  note. So a FAIL among the deferred-scope fixtures is expected and
+  explained; a PASS among them is a SURPRISE WORTH INVESTIGATING, because it
+  means either the deferred scope was quietly built after all, or the split's
+  rule partition is wrong.
+
+  Computed in bash by `resolve`/`render` from the split entry's own declared
+  `Rules deferred` joined against each fixture's `business_rules_pinned`. No
+  agent asserts any of it.
+-->
+
+{{item_split_section}}
+
 ## Fixtures
 
 | Scenario | Verdict | Class | Sanction | Stubs | Detail |

@@ -241,6 +241,37 @@
 
 {{stub_retirement}}
 
+## Item Splits
+
+<!--
+  Bash-computed every run from .specclaw/analysis/item-splits.md, never
+  agent-narrated (templates/CONTRACT.md (o)). Which backlog items are
+  PARTIALLY BUILT, what each is still missing, and — once every blocked-until
+  item carries a declared "BUILT:" note — the exact steps to resume.
+
+  A SPLIT IS NOT A STUB. Nothing was faked, so nothing is tainted and there is
+  nothing to retire. What a split puts in question is whether the ITEM IS
+  FINISHED, which is why it gets its own section rather than a row in Stub
+  Retirement.
+
+  THE SAME DECLARED TRIGGER as stub retirement: an entry becomes
+  READY-TO-RESUME only when every id in its "Blocked until" list carries a
+  literal "BUILT:" line in that item's own Status-notes block. Prose is never
+  parsed. Unlike stub retirement, that transition is WRITTEN by bash here (a
+  single Status-line rewrite, one direction only) — it is a pure function of
+  declared data, so there is no human judgement to defer to, and a stale
+  ACTIVE would be indistinguishable from "nobody got round to it".
+
+  COMPLETE is a handoff, not a computation: it needs a clean
+  /specclaw:bf-replay --item BL-### run to cite, and split-update refuses it
+  straight from ACTIVE.
+
+  This section changes no Gate, no Verification, and no ordering. It is a
+  work list.
+-->
+
+{{item_splits}}
+
 ## Change Report
 
 <!--

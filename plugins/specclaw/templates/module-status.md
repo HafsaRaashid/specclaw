@@ -132,6 +132,33 @@
 
 {{stubs_by_module}}
 
+## Item Splits By Module
+
+<!--
+  Every ACTIVE or READY-TO-RESUME item split (templates/CONTRACT.md (o)),
+  keyed by the module owning the item — so "which of this module's items are
+  still missing a piece?" is one lookup.
+
+  A DIFFERENT QUESTION FROM THE STUB TABLE ABOVE, and the distinction is the
+  whole reason both exist. A stub asks: was what this module was measured
+  against real? A split asks: is this module's work even finished? A module
+  can be entirely untainted — every verdict earned against real code — and
+  still be carrying three items that are each missing a layer somebody
+  deliberately deferred.
+
+  ACTIVE and READY-TO-RESUME only. A COMPLETE split is history: its deferred
+  scope was built and the full item passed a clean --item replay. The entry
+  stays in item-splits.md forever, because the record that an item was built
+  in halves outlives the split — but nobody is waiting on it, which is what
+  this table is for.
+
+  Nothing here taints anything and nothing here changes a verdict. What it
+  changes is whether a reader can tell a finished module from one that looks
+  finished.
+-->
+
+{{splits_by_module}}
+
 ## Notes
 
 {{notes}}
