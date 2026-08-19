@@ -694,7 +694,6 @@ BP_SECTIONS=(sources_consumed overview stack_sections context_diagram context_na
 bp_check_markers() {
   local draft="$1"
   local problems="" sec n
-  local -a seen=()
 
   for sec in "${BP_SECTIONS[@]}"; do
     n="$({ grep -cE "^<!--[[:space:]]*SECTION:[[:space:]]*${sec}[[:space:]]*-->[[:space:]]*$" "$draft" || true; })"
@@ -1254,6 +1253,10 @@ Regenerate the affected diagram(s) and re-run render. Do NOT delete a diagram to
   [ -f "$clar_file" ] && sources+=("clarifications.md")
   local -a declared=() missing_src=()
   while IFS= read -r d; do
+    # shellcheck disable=SC2016  # the single quotes hold a sed script, not
+    # a shell string; the backtick inside the bracket expression strips list
+    # markup and markdown code fences off a declared filename, and expanding
+    # it would break exactly that.
     d="$(printf '%s' "$d" | sed -E 's/^[-*[:space:]`]+//; s/[`[:space:]]+$//')"
     [ -z "$d" ] && continue
     case "$d" in *.md) ;; *) continue ;; esac

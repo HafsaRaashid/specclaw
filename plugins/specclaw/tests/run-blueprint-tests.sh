@@ -902,10 +902,21 @@ assert_eq "0" "$(grep -c 'Inputs consumed' "$SA/target-architecture.md" || true)
   "the old second provenance list is gone"
 
 # Not added unconditionally: a run that does not declare it does not claim it.
+#
+# Scoped to the provenance LINE, not the whole file. The template's own
+# explanatory comment legitimately names domain-model.md while describing what
+# the legacy side of the pipeline documents, and that comment is rendered into
+# every blueprint by design. Grepping the whole document for a bare filename
+# therefore tests the comment, not the claim — which is what this assertion
+# used to do, and why it failed against a provenance line that was correct.
 blueprint_draft "$SD" "$ROW" "$BOTH_MODULE_SECTIONS"
 OUT="$("$BLUEPRINT_BIN" render "$SB/.specclaw" "$SD" 2>&1)"; RC=$?
-assert_not_contains "$(cat "$SA/target-architecture.md")" "domain-model.md" \
+assert_eq "0" "$RC" "a run that declares no extra source still renders"
+PROV_LINE="$(grep -m1 '^\*\*Source documents consumed:' "$SA/target-architecture.md" || true)"
+assert_not_contains "$PROV_LINE" "domain-model.md" \
   "a document the run did not read is NOT claimed as a source"
+assert_contains "$PROV_LINE" "architecture.md" \
+  "the provenance line still names what the run did read"
 
 # A declared source that does not exist is refused.
 blueprint_draft "$SD" "$ROW" "$BOTH_MODULE_SECTIONS"
