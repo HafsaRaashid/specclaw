@@ -242,6 +242,10 @@ EOF
 blueprint_draft() {
   # $1 outfile, $2 mapping rows, $3 module sections
   cat > "$1" <<EOF
+<!-- SECTION: sources_consumed -->
+architecture.md
+module-map.md
+decisions.md
 <!-- SECTION: overview -->
 Fixture overview.
 <!-- SECTION: stack_sections -->
@@ -249,11 +253,13 @@ Fixture overview.
 fixture
 <!-- SECTION: context_diagram -->
 C4Context
+  title Fixture context
   Person(u, "Operator")
 <!-- SECTION: context_narrative -->
 fixture
 <!-- SECTION: container_diagram -->
 C4Container
+  title Fixture containers
   Container(c, "Thing")
 <!-- SECTION: container_narrative -->
 fixture
@@ -274,6 +280,7 @@ BOTH_MODULE_SECTIONS='## MOD-001 — Core
 
 ```mermaid
 C4Component
+  title MOD-001 components
   Component(a, "Domain service")
 ```
 
@@ -281,6 +288,7 @@ C4Component
 
 ```mermaid
 C4Component
+  title MOD-002 components
   Component(b, "Edge service")
 ```'
 
@@ -560,6 +568,351 @@ ARCHIVED="$(find "$BPA/archive" -name '*-target-architecture.md' 2>/dev/null | w
 if [ "$ARCHIVED" -ge 1 ]; then ok "the prior blueprint is archived, not overwritten"
 else bad "the prior blueprint is archived, not overwritten" "found $ARCHIVED archived copies"; fi
 
+# ════════════════════════════════════════════════════════════════════════════
+echo
+echo "── One state: status, header, PROVISIONAL markers and Open Questions ────"
+# ════════════════════════════════════════════════════════════════════════════
+#
+# The defect this whole section exists for: a generated blueprint that said
+# "Blueprint status: COMPLETE", "Pending questions raised this run: PQ-001,
+# PQ-002, PQ-007" and "Open Questions: None" simultaneously. Three statements,
+# three different computations, no shared authority. Every assertion below
+# pins one of them to the same source of truth.
+
+write_pending_questions() {
+  # $1 file; remaining args: "PQ-00N|STATUS|title"
+  local file="$1"; shift
+  cat > "$file" <<'PQHDR'
+# Pending Questions
+
+PQHDR
+  local spec id st title rest
+  for spec in "$@"; do
+    id="${spec%%|*}"; rest="${spec#*|}"; st="${rest%%|*}"; title="${rest#*|}"
+    cat >> "$file" <<PQE
+
+### ${id} — ${title}
+
+- **Status:** ${st}
+- **Source:** fixture
+- **Trigger:** T3
+- **Blocks:** MOD-001
+- **Evidence found:** fixture
+- **Could not determine:** fixture
+- **Candidates considered:** fixture
+- **Proposed default (UNCONFIRMED):** fixture
+PQE
+  done
+}
+
+decisions_two() {
+  cat > "$1" <<'EOF'
+# Decisions: Fixture Project
+
+## Decisions
+
+### CQ-001 — Settled by promotion
+
+- **Decision:** The recorded answer
+- **Decided by:** Ada Okoro
+- **Date:** 2026-08-19
+
+### SQ-001 — Also settled
+
+- **Decision:** The recorded answer
+- **Decided by:** Ada Okoro
+- **Date:** 2026-08-19
+EOF
+}
+
+decisions_one() {
+  cat > "$1" <<'EOF'
+# Decisions: Fixture Project
+
+## Decisions
+
+### SQ-001 — Settled
+
+- **Decision:** The recorded answer
+- **Decided by:** Ada Okoro
+- **Date:** 2026-08-19
+EOF
+}
+
+# ── A resolved PQ must not be reported open, however loudly the prose
+# mentions it. This is the exact reported bug. ───────────────────────────────
+PQP="$(new_project pqresolved)"
+PA="$PQP/.specclaw/analysis"
+write_architecture "$PA/architecture.md"
+write_module_map "$PA/module-map.md" "CONFIRMED by Ada Okoro, 2026-08-19"
+start_clarifications "$PA/clarifications.md"
+add_question "$PA/clarifications.md" "CQ-001" "Settled by promotion" "DECISION" "yes" "Chosen" "Ada Okoro" "2026-08-19"
+add_question "$PA/clarifications.md" "SQ-001" "Also settled" "DECISION" "yes" "Chosen" "Ada Okoro" "2026-08-19"
+decisions_two "$PA/decisions.md"
+# PQ-001 promoted to a DECIDED CQ; PQ-002 withdrawn; PQ-007 genuinely open.
+write_pending_questions "$PA/pending-questions.md" \
+  "PQ-001|PROMOTED → CQ-001|An older annotation that has since been decided" \
+  "PQ-002|WITHDRAWN|Retracted by its author" \
+  "PQ-007|OPEN|A question nobody has answered"
+
+D="$PA/.blueprint-draft.md"
+PQROWS='| Client shell | Browser client | SQ-001 | DECIDED |
+| Domain core | Application service | CQ-001 | DECIDED |'
+blueprint_draft "$D" "$PQROWS" "$BOTH_MODULE_SECTIONS"
+# Reference all three PQs in prose, exactly as a real draft does when it
+# carries an annotation forward out of an older architecture.md.
+sed -i 's|^Fixture overview\.$|Fixture overview. PQ-001 was resolved by CQ-001. PQ-002 was withdrawn. One area is PROVISIONAL(PQ-007).|' "$D"
+
+OUT="$("$BLUEPRINT_BIN" render "$PQP/.specclaw" "$D" 2>&1)"; RC=$?
+assert_eq "0" "$RC" "a draft mentioning resolved PQs still renders"
+DOC="$(cat "$PA/target-architecture.md")"
+assert_not_contains "$DOC" "**Open pending questions:** PQ-001" "a PQ promoted to a DECIDED CQ is not reported open"
+assert_not_contains "$DOC" "- **PQ-001**" "a resolved PQ is not listed under Open Questions"
+assert_not_contains "$DOC" "- **PQ-002**" "a WITHDRAWN PQ is not listed under Open Questions"
+assert_contains "$DOC" "**Open pending questions:** PQ-007" "the genuinely open PQ is reported, alone"
+assert_contains "$DOC" "**Blueprint status:** PROVISIONAL" "an open PQ makes the blueprint PROVISIONAL, not COMPLETE"
+assert_contains "$DOC" "unresolved blocking questions: PQ-007" "the status line names the open PQ"
+assert_contains "$DOC" "- **PQ-007**" "the open PQ is listed in the Open Questions section"
+
+# The three statements must agree — the reported bug was that they did not.
+assert_eq "1" "$(printf '%s\n' "$DOC" | grep -c 'Open pending questions:' || true)" \
+  "header carries exactly one open-pending-questions line"
+assert_eq "0" "$(printf '%s\n' "$DOC" | grep -c '^None\.' || true)" \
+  "Open Questions does not simultaneously claim None"
+
+# ── A PQ id with no registry entry is refused, like an unknown CQ. ──────────
+blueprint_draft "$D" "$PQROWS" "$BOTH_MODULE_SECTIONS"
+sed -i 's|^Fixture overview\.$|Fixture overview. Something is PROVISIONAL(PQ-404).|' "$D"
+OUT="$("$BLUEPRINT_BIN" render "$PQP/.specclaw" "$D" 2>&1)"; RC=$?
+assert_eq "1" "$RC" "a PQ id with no registry entry fails the run"
+assert_contains "$OUT" "PQ-404" "the refusal names the untracked PQ id"
+
+# ── Module map PROPOSED: warning preserved, no auto-confirmation, and the
+# status says structurally-complete-but-not-accepted rather than COMPLETE. ──
+MP="$(new_project mapproposed)"
+MA="$MP/.specclaw/analysis"
+write_architecture "$MA/architecture.md"
+write_module_map "$MA/module-map.md" "PROPOSED — awaiting human confirmation"
+start_clarifications "$MA/clarifications.md"
+add_question "$MA/clarifications.md" "SQ-001" "Settled" "DECISION" "yes" "Chosen" "Ada Okoro" "2026-08-19"
+decisions_one "$MA/decisions.md"
+MD="$MA/.blueprint-draft.md"
+ROW='| Client shell | Browser client | SQ-001 | DECIDED |'
+MAP_BEFORE="$(cat "$MA/module-map.md")"
+blueprint_draft "$MD" "$ROW" "$BOTH_MODULE_SECTIONS"
+OUT="$("$BLUEPRINT_BIN" render "$MP/.specclaw" "$MD" 2>&1)"; RC=$?
+assert_eq "0" "$RC" "an unconfirmed map still renders (soft block, per the contract)"
+DOC="$(cat "$MA/target-architecture.md")"
+assert_contains "$DOC" "COMPLETE — PENDING MODULE-MAP CONFIRMATION" \
+  "an unconfirmed map yields structurally-complete-but-not-accepted, never bare COMPLETE"
+assert_contains "$DOC" "WARN — Status reads" "the unconfirmed-map warning is preserved"
+assert_contains "$DOC" "human action this command never performs" "the warning says confirmation stays a human action"
+assert_eq "$MAP_BEFORE" "$(cat "$MA/module-map.md")" "module-map.md is never auto-confirmed"
+assert_contains "$DOC" "acceptance gate, not an unanswered question" \
+  "Open Questions explains the status rather than contradicting it"
+
+# Same project, map confirmed -> bare COMPLETE, no manual cleanup needed.
+write_module_map "$MA/module-map.md" "CONFIRMED by Ada Okoro, 2026-08-20"
+blueprint_draft "$MD" "$ROW" "$BOTH_MODULE_SECTIONS"
+OUT="$("$BLUEPRINT_BIN" render "$MP/.specclaw" "$MD" 2>&1)"; RC=$?
+DOC="$(cat "$MA/target-architecture.md")"
+assert_eq "0" "$RC" "confirming the map and regenerating succeeds"
+assert_contains "$DOC" "**Blueprint status:** COMPLETE" "a confirmed map with everything decided reads COMPLETE"
+assert_not_contains "$DOC" "PENDING MODULE-MAP" "the pending-confirmation qualifier clears by regeneration alone"
+
+# ════════════════════════════════════════════════════════════════════════════
+echo
+echo "── Draft structure: markers, containment, and no detached content ───────"
+# ════════════════════════════════════════════════════════════════════════════
+
+SB="$(new_project structure)"
+SA="$SB/.specclaw/analysis"
+write_architecture "$SA/architecture.md"
+write_module_map "$SA/module-map.md" "CONFIRMED by Ada Okoro, 2026-08-19"
+start_clarifications "$SA/clarifications.md"
+add_question "$SA/clarifications.md" "SQ-001" "Settled" "DECISION" "yes" "Chosen" "Ada Okoro" "2026-08-19"
+decisions_one "$SA/decisions.md"
+SD="$SA/.blueprint-draft.md"
+
+# A missing marker used to be silent: the preceding section swallowed
+# everything after it and content surfaced at the bottom of the document.
+blueprint_draft "$SD" "$ROW" "$BOTH_MODULE_SECTIONS"
+grep -v '^<!-- SECTION: data_migration -->$' "$SD" > "$SD.tmp" && mv "$SD.tmp" "$SD"
+OUT="$("$BLUEPRINT_BIN" render "$SB/.specclaw" "$SD" 2>&1)"; RC=$?
+assert_eq "1" "$RC" "a missing section marker fails the run instead of silently swallowing content"
+assert_contains "$OUT" "missing section marker" "the refusal says a marker is missing"
+assert_contains "$OUT" "data_migration" "the refusal names the missing marker"
+
+# A duplicated marker.
+blueprint_draft "$SD" "$ROW" "$BOTH_MODULE_SECTIONS"
+printf '\n<!-- SECTION: deployment -->\nduplicate\n' >> "$SD"
+OUT="$("$BLUEPRINT_BIN" render "$SB/.specclaw" "$SD" 2>&1)"; RC=$?
+assert_eq "1" "$RC" "a duplicated section marker fails the run"
+assert_contains "$OUT" "appears 2 times" "the refusal says how many times it appeared"
+
+# Content before the first marker would be silently dropped.
+blueprint_draft "$SD" "$ROW" "$BOTH_MODULE_SECTIONS"
+{ printf 'orphan preamble\n'; cat "$SD"; } > "$SD.tmp" && mv "$SD.tmp" "$SD"
+OUT="$("$BLUEPRINT_BIN" render "$SB/.specclaw" "$SD" 2>&1)"; RC=$?
+assert_eq "1" "$RC" "content before the first marker fails the run"
+assert_contains "$OUT" "before the first section marker" "the refusal explains it would be dropped"
+
+# THE REPORTED DEFECT: a module heading emitted outside component_sections.
+# It used to satisfy the module gate (which counted '## MOD-' across the whole
+# draft) and then render detached at the very bottom, under Open Questions.
+blueprint_draft "$SD" "$ROW" "$BOTH_MODULE_SECTIONS"
+cat >> "$SD" <<'STRAY'
+
+## MOD-002 — Edge
+
+```mermaid
+C4Component
+  title stray
+  Component(z, "Detached")
+```
+STRAY
+OUT="$("$BLUEPRINT_BIN" render "$SB/.specclaw" "$SD" 2>&1)"; RC=$?
+assert_eq "1" "$RC" "a module heading outside component_sections fails the run"
+assert_contains "$OUT" "outside the component_sections block" "the refusal names the containment rule"
+assert_contains "$OUT" "MOD-002" "the refusal names the detached module"
+
+# And on a clean render, no module content may appear after the final section.
+blueprint_draft "$SD" "$ROW" "$BOTH_MODULE_SECTIONS"
+OUT="$("$BLUEPRINT_BIN" render "$SB/.specclaw" "$SD" 2>&1)"; RC=$?
+assert_eq "0" "$RC" "a well-formed draft renders"
+DOCF="$SA/target-architecture.md"
+assert_eq "0" "$(sed -n '/^## Open Questions/,$p' "$DOCF" | grep -c '^## MOD-' || true)" \
+  "no module section leaks past the final Open Questions section"
+assert_eq "0" "$(sed -n '/^## Open Questions/,$p' "$DOCF" | grep -c '```mermaid' || true)" \
+  "no diagram fence leaks past the final section"
+assert_eq "$(grep -c '^## MOD-' "$DOCF" || true)" \
+  "$(sed -n '/^## Components by Module/,/^## Legacy/p' "$DOCF" | grep -c '^## MOD-' || true)" \
+  "every module heading stays inside its intended section"
+
+# ════════════════════════════════════════════════════════════════════════════
+echo
+echo "── Diagram validation: malformed Mermaid cannot render as success ───────"
+# ════════════════════════════════════════════════════════════════════════════
+#
+# Stated limit: this is deterministic STRUCTURAL validation, not rendering.
+# Full Mermaid needs a browser. A pass proves the source is well-formed; it
+# does not prove Mermaid draws it. It fails only on what cannot be valid.
+
+bad_module_sections() {
+  printf '## MOD-001 — Core\n\n```mermaid\nC4Component\n  title MOD-001\n%s\n```\n\n## MOD-002 — Edge\n\n```mermaid\nC4Component\n  title MOD-002\n  Component(b, "Edge service")\n```\n' "$1"
+}
+
+blueprint_draft "$SD" "$ROW" "$(bad_module_sections '  Component(a, "Domain service)')"
+OUT="$("$BLUEPRINT_BIN" render "$SB/.specclaw" "$SD" 2>&1)"; RC=$?
+assert_eq "1" "$RC" "an unbalanced quote in a component label fails the run"
+assert_contains "$OUT" "odd number of double quotes" "the refusal explains the unterminated label"
+assert_contains "$OUT" "MOD-001" "the diagram refusal names the module"
+
+blueprint_draft "$SD" "$ROW" "$(bad_module_sections '  Component(a, "Rooms (all types")')"
+OUT="$("$BLUEPRINT_BIN" render "$SB/.specclaw" "$SD" 2>&1)"; RC=$?
+assert_eq "1" "$RC" "an unbalanced parenthesis from a label fails the run"
+assert_contains "$OUT" "parenthes" "the refusal explains the parenthesis rule"
+
+blueprint_draft "$SD" "$ROW" "$(bad_module_sections '  Component(a, "Register / browse / fire tabs; no decorative") \')"
+OUT="$("$BLUEPRINT_BIN" render "$SB/.specclaw" "$SD" 2>&1)"; RC=$?
+assert_eq "1" "$RC" "a truncated line ending in a backslash fails the run"
+assert_contains "$OUT" "bare backslash" "the refusal names the truncation"
+
+blueprint_draft "$SD" "$ROW" "$(bad_module_sections '  Component(a, "x")
+  Syntax error in text')"
+OUT="$("$BLUEPRINT_BIN" render "$SB/.specclaw" "$SD" 2>&1)"; RC=$?
+assert_eq "1" "$RC" "Mermaid parser error text in the source fails the run"
+assert_contains "$OUT" "parser error text" "the refusal says the error was copied in rather than fixed"
+
+blueprint_draft "$SD" "$ROW" "$(bad_module_sections '  Container_Boundary(api, "API") {
+  Component(a, "x")')"
+OUT="$("$BLUEPRINT_BIN" render "$SB/.specclaw" "$SD" 2>&1)"; RC=$?
+assert_eq "1" "$RC" "an unclosed boundary brace fails the run"
+assert_contains "$OUT" "unbalanced braces" "the refusal names the unclosed block"
+
+blueprint_draft "$SD" "$ROW" '## MOD-001 — Core
+
+```mermaid
+C4Component
+```
+
+## MOD-002 — Edge
+
+```mermaid
+C4Component
+  title MOD-002
+  Component(b, "Edge service")
+```'
+OUT="$("$BLUEPRINT_BIN" render "$SB/.specclaw" "$SD" 2>&1)"; RC=$?
+assert_eq "1" "$RC" "a diagram with no element declarations fails the run"
+assert_contains "$OUT" "no element declarations" "the refusal says the diagram is empty"
+
+blueprint_draft "$SD" "$ROW" '## MOD-001 — Core
+
+Prose only, no diagram.
+
+## MOD-002 — Edge
+
+```mermaid
+C4Component
+  title MOD-002
+  Component(b, "Edge service")
+```'
+OUT="$("$BLUEPRINT_BIN" render "$SB/.specclaw" "$SD" 2>&1)"; RC=$?
+assert_eq "1" "$RC" "a module with no mermaid block fails the run"
+assert_contains "$OUT" "no \`\`\`mermaid block found" "the refusal names the missing diagram"
+assert_contains "$OUT" "Do NOT delete a diagram" "the refusal forbids deleting diagrams to pass"
+
+# The top-level Context/Container diagrams are validated too.
+blueprint_draft "$SD" "$ROW" "$BOTH_MODULE_SECTIONS"
+sed -i 's|^  Person(u, "Operator")$|  Person(u, "Operator (primary")|' "$SD"
+OUT="$("$BLUEPRINT_BIN" render "$SB/.specclaw" "$SD" 2>&1)"; RC=$?
+assert_eq "1" "$RC" "a malformed System Context diagram fails the run"
+assert_contains "$OUT" "System Context diagram" "the refusal names which top-level diagram"
+
+blueprint_draft "$SD" "$ROW" "$BOTH_MODULE_SECTIONS"
+sed -i 's|^C4Container$|NotADiagramType|' "$SD"
+OUT="$("$BLUEPRINT_BIN" render "$SB/.specclaw" "$SD" 2>&1)"; RC=$?
+assert_eq "1" "$RC" "a diagram with an unrecognised opening type fails the run"
+assert_contains "$OUT" "recognised type" "the refusal lists the accepted diagram types"
+
+# And the clean case still renders, with no error text anywhere.
+blueprint_draft "$SD" "$ROW" "$BOTH_MODULE_SECTIONS"
+OUT="$("$BLUEPRINT_BIN" render "$SB/.specclaw" "$SD" 2>&1)"; RC=$?
+assert_eq "0" "$RC" "well-formed diagrams render successfully"
+DOCTXT="$(cat "$SA/target-architecture.md")"
+assert_not_contains "$DOCTXT" "Syntax error in text" "no parser error text reaches the document"
+assert_not_contains "$DOCTXT" "Cannot read properties of undefined" "no renderer crash text reaches the document"
+
+# ════════════════════════════════════════════════════════════════════════════
+echo
+echo "── Provenance: one list, reflecting what the run actually read ──────────"
+# ════════════════════════════════════════════════════════════════════════════
+
+printf '# Domain Model: Fixture\n\n## Rules\n\n- DR-001 fixture rule.\n' > "$SA/domain-model.md"
+blueprint_draft "$SD" "$ROW" "$BOTH_MODULE_SECTIONS"
+sed -i 's|^decisions\.md$|decisions.md\ndomain-model.md|' "$SD"
+OUT="$("$BLUEPRINT_BIN" render "$SB/.specclaw" "$SD" 2>&1)"; RC=$?
+assert_eq "0" "$RC" "a draft declaring an extra consumed source renders"
+assert_contains "$(cat "$SA/target-architecture.md")" "**Source documents consumed:**" "provenance is rendered under one heading"
+assert_contains "$(cat "$SA/target-architecture.md")" "domain-model.md" "a document the agent actually read appears in provenance"
+assert_eq "1" "$(grep -c 'Source documents' "$SA/target-architecture.md" || true)" \
+  "there is exactly ONE provenance list, not two drifting ones"
+assert_eq "0" "$(grep -c 'Inputs consumed' "$SA/target-architecture.md" || true)" \
+  "the old second provenance list is gone"
+
+# Not added unconditionally: a run that does not declare it does not claim it.
+blueprint_draft "$SD" "$ROW" "$BOTH_MODULE_SECTIONS"
+OUT="$("$BLUEPRINT_BIN" render "$SB/.specclaw" "$SD" 2>&1)"; RC=$?
+assert_not_contains "$(cat "$SA/target-architecture.md")" "domain-model.md" \
+  "a document the run did not read is NOT claimed as a source"
+
+# A declared source that does not exist is refused.
+blueprint_draft "$SD" "$ROW" "$BOTH_MODULE_SECTIONS"
+sed -i 's|^decisions\.md$|decisions.md\nnot-a-real-document.md|' "$SD"
+OUT="$("$BLUEPRINT_BIN" render "$SB/.specclaw" "$SD" 2>&1)"; RC=$?
+assert_eq "1" "$RC" "a declared source that does not exist fails the run"
+assert_contains "$OUT" "not-a-real-document.md" "the refusal names the phantom source"
 # ════════════════════════════════════════════════════════════════════════════
 echo
 echo "── No stack knowledge in bash or templates ──────────────────────────────"

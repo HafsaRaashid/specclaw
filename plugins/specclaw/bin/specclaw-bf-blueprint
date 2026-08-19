@@ -483,6 +483,269 @@ arch_components() {
     | awk 'length($0) > 0 && !seen[$0]++'
 }
 
+# ─── Pending questions: the authoritative open/closed join ──────────────────
+#
+# A PQ-### is NOT open merely because some document's prose mentions it. That
+# was the original defect here: render scraped `grep -oE 'PQ-[0-9]+'` over the
+# whole draft and reported every hit as "raised this run", so a sentence
+# saying "PQ-001 was resolved by CQ-001" put PQ-001 straight back into the
+# header as pending — while the Open Questions section, computed from a
+# different source, said there were none.
+#
+# There is exactly one authority on a PQ's state, and it is the registry's own
+# Status line (templates/pending-questions.md):
+#
+#   - **Status:** OPEN | PROMOTED → CQ-### | WITHDRAWN
+#
+# written surgically by specclaw-bf-clarify's promote_pq_status. So:
+#
+#   OPEN                  -> open
+#   WITHDRAWN             -> closed (someone retracted it)
+#   PROMOTED → CQ-###     -> defer to that CQ's own DECIDED/UNDECIDED verdict,
+#                            which bp_scan_questions already computed. A
+#                            promoted-and-decided PQ is closed; a
+#                            promoted-but-undecided one is still open, but it
+#                            is represented downstream by its CQ id, which is
+#                            the permanent one.
+#   no registry entry     -> UNKNOWN. Never guessed in either direction: the
+#                            draft cited an id that resolves to nothing, which
+#                            is the same failure GATE 2 refuses for a CQ.
+#
+# Emits one row per PQ id found in the registry:
+#   1 pq_id  2 state(OPEN|CLOSED|OPEN_VIA)  3 promoted_cq  4 title
+
+bp_pq_registry() {
+  local pq_file="$1" scan="$2"
+  [ -f "$pq_file" ] || return 0
+  local workdir; workdir="$(mktemp -d)"
+  awk -v dir="$workdir" '
+    /^### PQ-[0-9]+/ {
+      match($0, /PQ-[0-9]+/); id = substr($0, RSTART, RLENGTH)
+      outfile = dir "/" id ".md"
+    }
+    id != "" { print $0 >> outfile }
+  ' "$pq_file" 2>/dev/null || true
+  shopt -s nullglob
+  local -a pfiles=("$workdir"/PQ-*.md)
+  shopt -u nullglob
+
+  local f id title st cq cqstatus state
+  for f in ${pfiles[@]+"${pfiles[@]}"}; do
+    id="$(basename "$f" .md)"
+    # NB: alternation, never a bracket expression — a POSIX bracket class
+    # byte-splits the em dash on this toolchain (see block_title's note).
+    title="$(head -1 "$f" | sed -E 's/^### PQ-[0-9]+[[:space:]]*(—|-)[[:space:]]*//')"
+    st="$({ grep -m1 -- '^- \*\*Status:\*\*' "$f" || true; } | sed -E 's/^- \*\*Status:\*\* *//' | sed -E 's/[[:space:]]+$//')"
+    cq=""
+    state=OPEN
+    case "$st" in
+      *WITHDRAWN*) state=CLOSED ;;
+      *PROMOTED*)
+        cq="$(printf '%s' "$st" | { grep -oE '(CQ|SQ|UQ)-[0-9]+' | head -1; } || true)"
+        if [ -n "$cq" ]; then
+          cqstatus="$(printf '%s\n' "$scan" | awk -F"$BP_FS" -v i="$cq" '$1==i {print $4; exit}')"
+          case "$cqstatus" in
+            DECIDED|NOT-APPLICABLE) state=CLOSED ;;
+            *) state=OPEN_VIA ;;
+          esac
+        else
+          state=CLOSED
+        fi
+        ;;
+      OPEN*|'') state=OPEN ;;
+      *) state=OPEN ;;
+    esac
+    bp_row "$id" "$state" "$cq" "$title"
+  done
+  rm -rf "$workdir"
+}
+
+# ─── Mermaid / C4 structural validation ─────────────────────────────────────
+#
+# The command used to be able to finish successfully while the document it
+# wrote contained Mermaid parser error text. Nothing checked the diagram
+# source at all, so a truncated line, an unbalanced quote or a stray paren in
+# a C4 label rendered as "Syntax error in text" or "Cannot read properties of
+# undefined (reading 'x')" in a blueprint that reported success.
+#
+# Full Mermaid rendering needs a browser and is not available here, so this is
+# the strongest DETERMINISTIC structural check available. It is deliberately
+# conservative: it only fails on things that cannot be valid, never on things
+# it merely does not recognise. Stated limit, so nobody reads more into a PASS
+# than it earns: this proves the source is structurally well-formed; it does
+# not prove Mermaid will render it.
+#
+# Echoes one problem per line; empty output means no structural defect found.
+
+BP_DIAGRAM_TYPES='C4Context|C4Container|C4Component|C4Dynamic|C4Deployment|flowchart|graph|sequenceDiagram|classDiagram|erDiagram|stateDiagram(-v2)?'
+
+bp_validate_diagram() {
+  local label="$1" body="$2"
+  local problems="" first_line line n_open n_close n_quote lineno=0
+  local elements=0
+
+  if [ -z "$(printf '%s' "$body" | tr -d '[:space:]')" ]; then
+    printf '%s: the diagram body is empty.\n' "$label"
+    return 0
+  fi
+
+  first_line="$(printf '%s\n' "$body" | { grep -m1 -vE '^[[:space:]]*$' || true; } | sed -E 's/^[[:space:]]+//')"
+  if ! printf '%s' "$first_line" | grep -qE "^(${BP_DIAGRAM_TYPES})([[:space:]]|$)"; then
+    problems="${problems}${label}: first line is \"${first_line}\" — a Mermaid diagram must open with a recognised type (${BP_DIAGRAM_TYPES//|/, }).
+"
+  fi
+
+  while IFS= read -r line; do
+    lineno=$((lineno + 1))
+    # Truncation: a line ending in a bare backslash is a continuation Mermaid
+    # does not support, and is how a cut-off label reaches the document.
+    case "$line" in
+      *\\) problems="${problems}${label}: line ${lineno} ends in a bare backslash — a truncated or wrapped label. Mermaid has no line continuation; keep each element on one line.
+" ;;
+    esac
+    # Renderer error text pasted into the source.
+    if printf '%s' "$line" | grep -qE 'Syntax error in text|Cannot read properties of undefined|Parse error|mermaid version'; then
+      problems="${problems}${label}: line ${lineno} contains Mermaid parser error text — a previous render failure was copied into the diagram source instead of being fixed.
+"
+    fi
+    # Unbalanced double quotes on a single element line.
+    n_quote="$(printf '%s' "$line" | tr -cd '"' | wc -c | tr -d ' ')"
+    if [ $((n_quote % 2)) -ne 0 ]; then
+      problems="${problems}${label}: line ${lineno} has an odd number of double quotes (${n_quote}) — an unterminated label. A literal quote inside a C4 label is not escapable; rephrase without it.
+"
+    fi
+    case "$line" in
+      *'('*) elements=$((elements + 1)) ;;
+    esac
+  done <<< "$body"
+
+  n_open="$(printf '%s' "$body" | tr -cd '(' | wc -c | tr -d ' ')"
+  n_close="$(printf '%s' "$body" | tr -cd ')' | wc -c | tr -d ' ')"
+  if [ "$n_open" != "$n_close" ]; then
+    problems="${problems}${label}: unbalanced parentheses (${n_open} open, ${n_close} close). A literal parenthesis inside a C4 label breaks the parser; rephrase without it.
+"
+  fi
+  n_open="$(printf '%s' "$body" | tr -cd '{' | wc -c | tr -d ' ')"
+  n_close="$(printf '%s' "$body" | tr -cd '}' | wc -c | tr -d ' ')"
+  if [ "$n_open" != "$n_close" ]; then
+    problems="${problems}${label}: unbalanced braces (${n_open} open, ${n_close} close) — an unclosed Boundary block.
+"
+  fi
+  if [ "$elements" -eq 0 ]; then
+    problems="${problems}${label}: no element declarations found — a diagram header with no body renders as an empty box or fails outright.
+"
+  fi
+
+  printf '%s' "$problems"
+}
+
+# Every fenced ```mermaid block inside a chunk, validated. Also proves the
+# fences themselves balance: an unclosed fence swallows the rest of the
+# document into a code block.
+bp_validate_fenced_mermaid() {
+  local label="$1" chunk="$2"
+  local problems="" line in_fence=0 body="" idx=0 opens=0
+
+  while IFS= read -r line; do
+    case "$line" in
+      '```mermaid'*|'``` mermaid'*)
+        if [ "$in_fence" -eq 1 ]; then
+          problems="${problems}${label}: a new \`\`\`mermaid fence opened while one was still open — the previous block was never closed.
+"
+        fi
+        in_fence=1; opens=$((opens + 1)); idx=$((idx + 1)); body=""
+        continue ;;
+      '```'*)
+        if [ "$in_fence" -eq 1 ]; then
+          in_fence=0
+          problems="${problems}$(bp_validate_diagram "${label} block ${idx}" "$body")"
+        fi
+        continue ;;
+    esac
+    [ "$in_fence" -eq 1 ] && body="${body}${line}
+"
+  done <<< "$chunk"
+
+  if [ "$in_fence" -eq 1 ]; then
+    problems="${problems}${label}: a \`\`\`mermaid fence was never closed — everything after it is swallowed into the code block.
+"
+  fi
+  if [ "$opens" -eq 0 ]; then
+    problems="${problems}${label}: no \`\`\`mermaid block found.
+"
+  fi
+  printf '%s' "$problems"
+}
+
+# ─── Draft marker discipline ────────────────────────────────────────────────
+#
+# The draft is a flat sequence of `<!-- SECTION: name -->` markers, and
+# draft_section returns EMPTY for one that is missing or misspelled. That
+# silence is how content leaks: with no marker to close it, a section swallows
+# everything after it, and a module's component source can end up rendered at
+# the bottom of the finished document under Open Questions. Nothing checked
+# that the markers were all present, unique, and in order — so nothing caught
+# it.
+
+BP_SECTIONS=(sources_consumed overview stack_sections context_diagram context_narrative
+             container_diagram container_narrative component_sections
+             mapping_table data_migration deployment)
+
+bp_check_markers() {
+  local draft="$1"
+  local problems="" sec n
+  local -a seen=()
+
+  for sec in "${BP_SECTIONS[@]}"; do
+    n="$({ grep -cE "^<!--[[:space:]]*SECTION:[[:space:]]*${sec}[[:space:]]*-->[[:space:]]*$" "$draft" || true; })"
+    if [ "$n" = "0" ]; then
+      problems="${problems}missing section marker: <!-- SECTION: ${sec} -->
+"
+    elif [ "$n" != "1" ]; then
+      problems="${problems}section marker <!-- SECTION: ${sec} --> appears ${n} times — each must appear exactly once.
+"
+    fi
+  done
+
+  # Unknown markers: a typo produces one of these AND a missing-marker report
+  # above, so naming it makes the fix obvious instead of a guessing game.
+  local m
+  while IFS= read -r m; do
+    [ -z "$m" ] && continue
+    case " ${BP_SECTIONS[*]} " in
+      *" $m "*) ;;
+      *) problems="${problems}unknown section marker: <!-- SECTION: ${m} --> is not one of: ${BP_SECTIONS[*]}
+" ;;
+    esac
+  done < <({ grep -oE '^<!--[[:space:]]*SECTION:[[:space:]]*[a-z_]+' "$draft" || true; } \
+             | sed -E 's/.*SECTION:[[:space:]]*//' | sort -u)
+
+  # Order. Out-of-order markers still parse, but they mean the agent built the
+  # document in a different shape than the template expects, which is exactly
+  # when content lands in the wrong section.
+  local order_actual order_expected
+  order_actual="$({ grep -oE '^<!--[[:space:]]*SECTION:[[:space:]]*[a-z_]+' "$draft" || true; } \
+                    | sed -E 's/.*SECTION:[[:space:]]*//' | paste -sd, -)"
+  order_expected="$(printf '%s,' "${BP_SECTIONS[@]}")"; order_expected="${order_expected%,}"
+  if [ -n "$order_actual" ] && [ "$order_actual" != "$order_expected" ] && [ -z "$problems" ]; then
+    problems="${problems}section markers are out of order.
+  expected: ${order_expected}
+  found:    ${order_actual}
+"
+  fi
+
+  # Anything before the first marker is content with no home; it is silently
+  # dropped by draft_section and vanishes from the rendered document.
+  local pre
+  pre="$(awk '/^<!--[[:space:]]*SECTION:/ { exit } { print }' "$draft" | tr -d '[:space:]')"
+  if [ -n "$pre" ]; then
+    problems="${problems}the draft has content before the first section marker; it would be silently dropped.
+"
+  fi
+
+  printf '%s' "$problems"
+}
+
 # ─── Subcommand: collect ─────────────────────────────────────────────────────
 
 cmd_collect() {
@@ -623,16 +886,42 @@ cmd_collect() {
     done < <(printf '%s\n' "${unresolved[@]}" | sort -u)
   fi
 
-  local bp_status status_line
-  if [ "${#unresolved_sorted[@]}" -eq 0 ]; then
+  # Pending-question registry state, so the agent never has to judge for
+  # itself whether a `pending PQ-###` annotation it found in an older source
+  # document is still live. Exactly the join render applies, computed once
+  # here and handed over already resolved — same trust model as questions[].
+  local pq_scan; pq_scan="$(bp_pq_registry "$analysis_dir/pending-questions.md" "$scan")"
+  local pq_json="" pqfirst=true ppq pstate pcq ptitle pq_open_json pq_cq_json
+  local -a open_pq_ids=()
+  while IFS="$BP_FS" read -r ppq pstate pcq ptitle; do
+    [ -z "$ppq" ] && continue
+    pq_open_json=false
+    case "$pstate" in OPEN|OPEN_VIA) pq_open_json=true; open_pq_ids+=("$ppq") ;; esac
+    pq_cq_json='null'
+    [ -n "$pcq" ] && pq_cq_json="\"$(json_escape "$pcq")\""
+    if $pqfirst; then pqfirst=false; else pq_json="${pq_json},"; fi
+    pq_json="${pq_json}
+    {\"id\": \"$(json_escape "$ppq")\", \"open\": ${pq_open_json}, \"promoted_to\": ${pq_cq_json}, \"title\": \"$(json_escape "$ptitle")\"}"
+  done <<< "$pq_scan"
+
+  # The status line collect reports must be the SAME three-state computation
+  # render performs, or the two disagree the moment a map is unconfirmed or a
+  # PQ is open — which is the class of bug this whole change exists to remove.
+  local bp_status status_line joined
+  if [ "${#unresolved_sorted[@]}" -gt 0 ] || [ "${#open_pq_ids[@]}" -gt 0 ]; then
+    bp_status="PROVISIONAL"
+    local -a all_blockers=()
+    all_blockers+=(${unresolved_sorted[@]+"${unresolved_sorted[@]}"})
+    all_blockers+=(${open_pq_ids[@]+"${open_pq_ids[@]}"})
+    joined="$(printf '%s, ' "${all_blockers[@]}")"
+    joined="${joined%, }"
+    status_line="**Blueprint status:** PROVISIONAL (${#all_blockers[@]} unresolved blocking questions: ${joined})"
+  elif ! $map_confirmed; then
+    bp_status="COMPLETE-PENDING-MODULE-MAP"
+    status_line="**Blueprint status:** COMPLETE — PENDING MODULE-MAP CONFIRMATION"
+  else
     bp_status="COMPLETE"
     status_line="**Blueprint status:** COMPLETE"
-  else
-    bp_status="PROVISIONAL"
-    local joined
-    joined="$(printf '%s, ' "${unresolved_sorted[@]}")"
-    joined="${joined%, }"
-    status_line="**Blueprint status:** PROVISIONAL (${#unresolved_sorted[@]} unresolved blocking questions: ${joined})"
   fi
 
   local warnings_json="" wfirst=true w
@@ -668,6 +957,12 @@ cmd_collect() {
   },
   "question_counts": {"decided": ${dec_n}, "undecided": ${und_n}, "not_applicable": ${na_n}},
   "unresolved_blocking_ids": [$(ids_json_args ${unresolved_sorted[@]+"${unresolved_sorted[@]}"})],
+  "pending_questions": {
+    "path": ".specclaw/analysis/pending-questions.md",
+    "open_ids": [$(ids_json_args ${open_pq_ids[@]+"${open_pq_ids[@]}"})],
+    "entries": [${pq_json}
+    ]
+  },
   "blueprint_status": "$(json_escape "$bp_status")",
   "blueprint_status_line": "$(json_escape "$status_line")",
   "warnings": [${warnings_json}],
@@ -719,6 +1014,20 @@ cmd_render() {
     while IFS= read -r id; do
       [ -n "$id" ] && unresolved_sorted+=("$id")
     done < <(printf '%s\n' "${unresolved[@]}" | sort -u)
+  fi
+
+  # ── GATE 0: the draft's own structure. ────────────────────────────────
+  # Runs before every other gate because they all read sections out of this
+  # draft, and draft_section returns EMPTY for a marker that is missing or
+  # misspelled. That silence is how a module's component source ends up
+  # rendered at the bottom of the finished document: with no marker to close
+  # the preceding section, everything after it is swallowed.
+  local marker_problems
+  marker_problems="$(bp_check_markers "$draft")"
+  if [ -n "$marker_problems" ]; then
+    die "the blueprint draft's section structure is malformed. Every section marker must be present exactly once, in order, with no content before the first:
+${marker_problems}
+Fix the draft and re-run render — do not delete sections to make this pass."
   fi
 
   # ── GATE 1: every mapping-table data row is cited. ─────────────────────
@@ -786,16 +1095,38 @@ cmd_render() {
       if (rest !~ /WITHDRAWN/) print mid
     }' "$map" 2>/dev/null || true)
 
+  # Module headings are counted INSIDE the component_sections block only.
+  # Counting them across the whole draft is what let a '## MOD-007' emitted
+  # after the deployment marker satisfy this gate and then render at the very
+  # bottom of the document, under Open Questions.
+  local comp_block
+  comp_block="$(draft_section "$draft" "component_sections")"
+
   local -a draft_mods=()
   while IFS= read -r id; do
     [ -z "$id" ] && continue
     draft_mods+=("$id")
-  done < <({ grep -oE '^## MOD-[0-9]+' "$draft" || true; } | sed -E 's/^## //' | sort -u)
+  done < <({ printf '%s\n' "$comp_block" | grep -oE '^## MOD-[0-9]+' || true; } | sed -E 's/^## //' | sort -u)
+
+  # Containment: a module heading anywhere else in the draft is section
+  # corruption, and it is refused rather than rendered out of place.
+  local -a stray_mods=()
+  while IFS= read -r id; do
+    [ -z "$id" ] && continue
+    stray_mods+=("$id")
+  done < <(awk '
+      /^<!--[[:space:]]*SECTION:[[:space:]]*component_sections[[:space:]]*-->/ { inside=1; next }
+      /^<!--[[:space:]]*SECTION:/ { inside=0 }
+      !inside && /^## MOD-[0-9]+/ { print }
+    ' "$draft" | grep -oE '^## MOD-[0-9]+' | sed -E 's/^## //' | sort -u)
+  if [ "${#stray_mods[@]}" -gt 0 ]; then
+    die "the blueprint draft has module component heading(s) outside the component_sections block: ${stray_mods[*]}. Every module's diagram and narrative must be emitted inside that one section — a heading anywhere else renders detached at the bottom of the document, which is exactly the corruption this gate exists to catch."
+  fi
 
   local mid n
   for mid in ${active_ids[@]+"${active_ids[@]}"}; do
-    n="$({ grep -cE "^## ${mid}([^0-9]|$)" "$draft" || true; })"
-    [ "$n" = "1" ] || die "the blueprint draft must carry exactly one '## ${mid}' component section (found ${n}). Every active module in module-map.md gets a component view — a module whose target shape is entirely undecided gets a PROVISIONAL placeholder naming the blocking question, never a silent omission."
+    n="$({ printf '%s\n' "$comp_block" | grep -cE "^## ${mid}([^0-9]|$)" || true; })"
+    [ "$n" = "1" ] || die "the component_sections block must carry exactly one '## ${mid}' component section (found ${n}). Every active module in module-map.md gets a component view — a module whose target shape is entirely undecided gets a PROVISIONAL placeholder naming the blocking question, never a silent omission."
   done
   for mid in ${draft_mods[@]+"${draft_mods[@]}"}; do
     case " ${active_ids[*]-} " in
@@ -804,57 +1135,189 @@ cmd_render() {
     esac
   done
 
-  # ── Status header (bash-computed; the agent never asserts this). ───────
-  local status_line
-  if [ "${#unresolved_sorted[@]}" -eq 0 ]; then
-    status_line="**Blueprint status:** COMPLETE"
-  else
-    local joined; joined="$(printf '%s, ' "${unresolved_sorted[@]}")"; joined="${joined%, }"
-    status_line="**Blueprint status:** PROVISIONAL (${#unresolved_sorted[@]} unresolved blocking questions: ${joined})"
+  # ── GATE 4: the diagrams are structurally valid. ──────────────────────
+  # The command used to be able to report success while the document it wrote
+  # contained "Syntax error in text" and "Cannot read properties of undefined
+  # (reading 'x')". Nothing looked at the diagram source at all.
+  #
+  # This is a DETERMINISTIC STRUCTURAL check, and its limit is stated rather
+  # than implied: full Mermaid rendering needs a browser and is not available
+  # in this environment, so a PASS here proves the source is well-formed, not
+  # that Mermaid will render it. It fails only on things that cannot be valid.
+  local diag_problems=""
+  diag_problems="${diag_problems}$(bp_validate_diagram "System Context diagram" "$(draft_section "$draft" context_diagram)")"
+  diag_problems="${diag_problems}$(bp_validate_diagram "Containers diagram" "$(draft_section "$draft" container_diagram)")"
+
+  # Per-module: each module's own fenced block, validated inside its own
+  # section, so a problem names the module rather than a line number in a
+  # 400-line blob.
+  local mrow mname mbody
+  while IFS= read -r mrow; do
+    [ -z "$mrow" ] && continue
+    mbody="$(printf '%s\n' "$comp_block" | awk -v m="$mrow" '
+      $0 ~ ("^## " m "([^0-9]|$)") { cap=1; next }
+      cap && /^## MOD-[0-9]+/ { cap=0 }
+      cap { print }')"
+    diag_problems="${diag_problems}$(bp_validate_fenced_mermaid "${mrow} component diagram" "$mbody")"
+  done < <(printf '%s\n' ${draft_mods[@]+"${draft_mods[@]}"})
+
+  if [ -n "$diag_problems" ]; then
+    die "the blueprint draft contains malformed diagram source. A blueprint that renders parser errors is worse than one that fails, because it looks finished:
+
+${diag_problems}
+Regenerate the affected diagram(s) and re-run render. Do NOT delete a diagram to make this pass — a module with no component view is a silent omission, which the module gate refuses anyway."
   fi
 
-  local map_status header
+  # ── ONE AUTHORITATIVE STATE, from which the status line, the header, the
+  # PROVISIONAL markers and the Open Questions section are ALL derived. ──
+  #
+  # These four used to be computed from three different places, which is how a
+  # document came to say "Blueprint status: COMPLETE", "Pending questions
+  # raised this run: PQ-001, PQ-002, PQ-007" and "Open Questions: None" at the
+  # same time. Anything below that disagrees is now a bug in one place, not
+  # four.
+
+  # (a) Open PQs — joined against the registry's own Status line, never
+  # scraped from the draft's prose. A PQ the draft merely MENTIONS (commonly
+  # "..., resolved by CQ-001") is not open; a PQ the registry says is OPEN, or
+  # PROMOTED to a still-undecided CQ, is.
+  local pq_file="$analysis_dir/pending-questions.md"
+  local pq_scan; pq_scan="$(bp_pq_registry "$pq_file" "$scan")"
+
+  local pq pqstate pqcq pqtitle
+  local -a draft_pqs=()
+  while IFS= read -r pq; do
+    [ -n "$pq" ] && draft_pqs+=("$pq")
+  done < <({ grep -oE 'PQ-[0-9]+' "$draft" || true; } | sort -u)
+
+  # A cited PQ with no registry entry resolves to nothing — the same failure
+  # GATE 2 refuses for a CQ, and refused here for the same reason: it reads as
+  # tracked and is not.
+  local -a unknown_pqs=()
+  for pq in ${draft_pqs[@]+"${draft_pqs[@]}"}; do
+    if [ -z "$(printf '%s\n' "$pq_scan" | awk -F"$BP_FS" -v i="$pq" '$1==i {print $1; exit}')" ]; then
+      unknown_pqs+=("$pq")
+    fi
+  done
+  if [ "${#unknown_pqs[@]}" -gt 0 ]; then
+    die "the blueprint draft cites ${#unknown_pqs[@]} pending question id(s) with no entry in .specclaw/analysis/pending-questions.md: ${unknown_pqs[*]}. A citation that resolves to nothing reads as tracked and is not. Append the PQ to the registry, or drop the reference."
+  fi
+
+  local -a open_pqs=()
+  for pq in ${draft_pqs[@]+"${draft_pqs[@]}"}; do
+    pqstate="$(printf '%s\n' "$pq_scan" | awk -F"$BP_FS" -v i="$pq" '$1==i {print $2; exit}')"
+    case "$pqstate" in
+      OPEN|OPEN_VIA) open_pqs+=("$pq") ;;
+    esac
+  done
+
+  # (b) The module map. templates/module-map.md fixes the contract: an
+  # unconfirmed map is a SOFT BLOCK — "it never stops a command from running,
+  # it just travels with the result." So it never refuses the run, and it
+  # never lets the document claim final acceptance either.
+  local map_status map_confirmed=false
   map_status="$(map_status_line "$map")"
+  case "$map_status" in CONFIRMED*) map_confirmed=true ;; esac
+
+  # (c) The status line. Three deterministic states, in precedence order.
+  local status_line joined
+  if [ "${#unresolved_sorted[@]}" -gt 0 ] || [ "${#open_pqs[@]}" -gt 0 ]; then
+    local -a blockers=()
+    blockers+=(${unresolved_sorted[@]+"${unresolved_sorted[@]}"})
+    blockers+=(${open_pqs[@]+"${open_pqs[@]}"})
+    joined="$(printf '%s, ' "${blockers[@]}")"; joined="${joined%, }"
+    status_line="**Blueprint status:** PROVISIONAL (${#blockers[@]} unresolved blocking questions: ${joined})"
+  elif ! $map_confirmed; then
+    # Structurally complete, not finally accepted. Said explicitly, rather
+    # than left for a reader to reconcile against a warning three lines down.
+    status_line="**Blueprint status:** COMPLETE — PENDING MODULE-MAP CONFIRMATION"
+  else
+    status_line="**Blueprint status:** COMPLETE"
+  fi
+
+  local header
   header="${status_line}"
-  case "$map_status" in
-    CONFIRMED*) header="${header}"$'\n'"**Module map:** ${map_status}" ;;
-    *) header="${header}"$'\n'"**Module map:** ⚠ WARN — Status reads \"${map_status:-<absent>}\", not CONFIRMED. This blueprint's module grouping rests on a proposal no human has signed off; confirming it is an edit to \`module-map.md\`'s own Status line." ;;
-  esac
-  header="${header}"$'\n'"**Inputs consumed:** architecture.md, module-map.md, decisions.md$( [ -f "$analysis_dir/rebuild-backlog.md" ] && printf ', rebuild-backlog.md' || printf ' (rebuild-backlog.md absent)' )$( [ -f "$clar_file" ] && printf ', clarifications.md' || printf '' )"
+  if $map_confirmed; then
+    header="${header}"$'\n'"**Module map:** ${map_status}"
+  else
+    header="${header}"$'\n'"**Module map:** WARN — Status reads \"${map_status:-<absent>}\", not CONFIRMED. This blueprint's module grouping rests on a proposal no human has signed off; confirming it is an edit to \`module-map.md\`'s own Status line, and it is a human action this command never performs."
+  fi
+
+  # (d) Provenance — ONE list, from ONE mechanism. There used to be two: a
+  # hardcoded "Source documents" line in the template and a computed "Inputs
+  # consumed" line here, and they drifted apart the moment the agent read a
+  # document neither of them named. Now: the documents bash itself reads,
+  # unioned with the ones the agent declares in its sources_consumed section,
+  # every one verified to exist on disk.
+  local d
+  local -a sources=("architecture.md" "module-map.md" "decisions.md")
+  [ -f "$clar_file" ] && sources+=("clarifications.md")
+  local -a declared=() missing_src=()
+  while IFS= read -r d; do
+    d="$(printf '%s' "$d" | sed -E 's/^[-*[:space:]`]+//; s/[`[:space:]]+$//')"
+    [ -z "$d" ] && continue
+    case "$d" in *.md) ;; *) continue ;; esac
+    d="$(basename "$d")"
+    if [ ! -f "$analysis_dir/$d" ]; then missing_src+=("$d"); continue; fi
+    case " ${sources[*]} " in *" $d "*) ;; *) declared+=("$d") ;; esac
+  done < <(draft_section "$draft" sources_consumed)
+  if [ "${#missing_src[@]}" -gt 0 ]; then
+    die "the blueprint draft declares source document(s) that do not exist in .specclaw/analysis/: ${missing_src[*]}. Provenance must name what was actually read."
+  fi
+  local -a declared_sorted=()
+  if [ "${#declared[@]}" -gt 0 ]; then
+    while IFS= read -r d; do [ -n "$d" ] && declared_sorted+=("$d"); done < <(printf '%s\n' "${declared[@]}" | sort -u)
+  fi
+  sources+=(${declared_sorted[@]+"${declared_sorted[@]}"})
+  local provenance; provenance="$(printf '%s, ' "${sources[@]}")"
+  provenance="**Source documents consumed:** ${provenance%, }"
+
+  header="${header}"$'\n'"${provenance}"
   header="${header}"$'\n'"**Modules:** ${#active_ids[@]} active"
 
-  # A PQ the agent raised THIS run is not a clarify question yet, so it cannot
-  # appear in the status line above — that line's shape is fixed to blocking
-  # CQ/SQ/UQ ids. But a blueprint whose header reads COMPLETE while a line in
-  # its body reads PROVISIONAL(PQ-005) is overstating, so a raised PQ gets its
-  # own header line. It reaches the status line later, as a CQ-### id, once
-  # /specclaw:bf-clarify ingests it.
-  local pq
-  local -a run_pqs=()
-  while IFS= read -r pq; do
-    [ -n "$pq" ] && run_pqs+=("$pq")
-  done < <({ grep -oE 'PQ-[0-9]+' "$draft" || true; } | sort -u)
-  if [ "${#run_pqs[@]}" -gt 0 ]; then
-    local pqjoined; pqjoined="$(printf '%s, ' "${run_pqs[@]}")"; pqjoined="${pqjoined%, }"
-    header="${header}"$'\n'"**Pending questions raised this run:** ${pqjoined} — the affected lines below are marked PROVISIONAL. These are not clarify questions yet; \`/specclaw:bf-clarify\` ingests each into a permanent \`CQ-###\`, after which it counts toward the status line above."
+  # (e) Open PQs on the header — derived from (a), so it can no longer
+  # contradict the Open Questions section or the status line.
+  local pqjoined
+  if [ "${#open_pqs[@]}" -gt 0 ]; then
+    pqjoined="$(printf '%s, ' "${open_pqs[@]}")"; pqjoined="${pqjoined%, }"
+    header="${header}"$'\n'"**Open pending questions:** ${pqjoined} — the affected lines below are marked PROVISIONAL. Each is ingested into a permanent \`CQ-###\` by \`/specclaw:bf-clarify\`, after which it is tracked by that id instead."
   fi
 
-  # ── Open Questions section (bash-computed transcription). ──────────────
+  # ── Open Questions section — same state as everything above. ───────────
   local open_body=""
   for id in ${unresolved_sorted[@]+"${unresolved_sorted[@]}"}; do
     title="$(printf '%s\n' "$scan" | awk -F"$BP_FS" -v i="$id" '$1==i {print $5; exit}')"
     qtype="$(printf '%s\n' "$scan" | awk -F"$BP_FS" -v i="$id" '$1==i {print $2; exit}')"
-    open_body="${open_body}- **${id}** — ${title} (Type: ${qtype:-—}). Everything in this document that rests on it renders \`PROVISIONAL(${id})\`.
+    open_body="${open_body}- **${id}** — ${title} (Type: ${qtype:-not stated}). Everything in this document that rests on it renders \`PROVISIONAL(${id})\`.
 "
   done
+  for pq in ${open_pqs[@]+"${open_pqs[@]}"}; do
+    pqtitle="$(printf '%s\n' "$pq_scan" | awk -F"$BP_FS" -v i="$pq" '$1==i {print $4; exit}')"
+    pqcq="$(printf '%s\n' "$pq_scan" | awk -F"$BP_FS" -v i="$pq" '$1==i {print $3; exit}')"
+    if [ -n "$pqcq" ]; then
+      open_body="${open_body}- **${pq}** — ${pqtitle} (pending question, promoted to **${pqcq}**, still undecided).
+"
+    else
+      open_body="${open_body}- **${pq}** — ${pqtitle} (pending question, not yet ingested by \`/specclaw:bf-clarify\`).
+"
+    fi
+  done
+
   if [ -z "$open_body" ]; then
-    open_body="None. Every blocking question this blueprint rests on has a recorded decision, which is why the status above reads COMPLETE."
+    if $map_confirmed; then
+      open_body="None. Every blocking question this blueprint rests on has a recorded decision, and the module map is confirmed — which is why the status above reads COMPLETE."
+    else
+      open_body="None open. Every blocking question this blueprint rests on has a recorded decision. The status above still reads \`COMPLETE — PENDING MODULE-MAP CONFIRMATION\` because \`module-map.md\` has not been signed off by a human; that is an acceptance gate, not an unanswered question."
+    fi
   else
     open_body="${open_body}
 Answer these in \`.specclaw/analysis/clarifications.md\` (attributed to a named human), run \`/specclaw:bf-clarify --resolve\`, then re-run \`/specclaw:bf-blueprint\` — every \`PROVISIONAL\` marker clears by regeneration alone, and none of them is ever cleared by hand."
   fi
 
   # ── Section extraction from the draft. ────────────────────────────────
+  # sources_consumed is deliberately NOT in this list: it is consumed as
+  # provenance metadata above, not rendered as a section of its own. The
+  # template has no placeholder for it.
   local -a sec_names=(overview stack_sections context_diagram context_narrative
                       container_diagram container_narrative component_sections
                       mapping_table data_migration deployment)
