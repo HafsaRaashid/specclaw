@@ -86,6 +86,70 @@ C4Component
 
 Never omit a module's section to avoid drawing this — render refuses a draft missing an active module's section, because a silent omission is indistinguishable from an oversight.
 
+# Diagram safety — the rules that keep Mermaid parseable
+
+A blueprint that renders `Syntax error in text` is worse than one that fails to
+generate, because it looks finished. `render` now validates every diagram's
+structure and **refuses the draft** rather than writing a document containing
+parser errors. These are the rules that keep you on the right side of it.
+
+**Label content — the single biggest source of breakage.** A C4 element's
+arguments are comma-separated, double-quoted strings, and Mermaid's parser is
+not forgiving inside them:
+
+- **No double quote inside a label.** There is no escape that works. Rephrase.
+- **No parentheses inside a label.** `Component(a, "Rooms (all types)")` breaks
+  the parser on the inner paren. Write `Rooms - all types`.
+- **No backslash anywhere in a label**, and never a trailing backslash on a
+  line — Mermaid has no line continuation, and a trailing `\` is the signature
+  of a label that got cut off mid-write.
+- **No newline inside a label.** One element, one line, however long.
+- Commas inside a label are fine; semicolons and slashes are fine.
+
+**Structure:**
+
+- Every diagram starts with `title <short text>` on the line after the diagram
+  type. A C4 diagram without a title is the usual cause of
+  `Cannot read properties of undefined (reading 'x')`.
+- Every `Boundary(...) {` is closed by its own `}`.
+- Every diagram has at least one element declaration. A header with no body
+  renders as an empty box or fails outright.
+- Never paste a renderer's error text into the diagram source. If you know a
+  diagram failed, fix the source; do not annotate it with the message.
+
+**When `render` reports a diagram problem**, it names the module and the line.
+Fix that diagram and re-run `render`. **Do not delete a diagram to make the
+check pass** — every active module must have a component view, the module gate
+refuses a missing one anyway, and a silently dropped diagram is precisely the
+failure this whole gate exists to prevent.
+
+# Pending questions you did not raise
+
+`pending-questions.md` is a permanent, append-only registry. A `PQ-###` in it
+carries its own `Status:` line — `OPEN`, `PROMOTED → CQ-###`, or `WITHDRAWN` —
+and **that line, not prose anywhere else, is what decides whether it is open**.
+
+Two consequences for what you write:
+
+1. **Never describe a PQ as pending because a source document's prose mentions
+   it.** An older `architecture.md` or `domain-model.md` routinely carries
+   `⚠ PROVISIONAL — pending PQ-001` from the run that raised it, long after
+   `/specclaw:bf-clarify` promoted it to a `CQ-###` that has since been
+   decided. Check the registry's `Status:` line and the collected
+   `questions[]` verdict before carrying such an annotation forward. If the
+   question is settled, cite the deciding `CQ-###` and drop the `PQ` marker.
+2. **Only mark a line `PROVISIONAL(PQ-###)` for a question that is genuinely
+   open** — one you raised this run, or one the registry still shows as `OPEN`
+   or promoted-but-undecided. `render` joins every `PQ-###` you mention against
+   the registry and computes the header, the status line and the Open Questions
+   section from that one join, so a resolved PQ you mention in passing costs
+   nothing — but an id with no registry entry at all fails the run, because a
+   citation that resolves to nothing reads as tracked and is not.
+
+You never state the blueprint's status, and you never state whether a question
+is open. Both are computed. Your job is to be accurate about which id you cite.
+
+
 # Evidence discipline
 
 - **A claim about the legacy system** cites a `file:line` or a document section (`architecture.md § Containers (L2)`, `domain-model.md § DR-011`), exactly as `bf-architecture-analyst` requires.
@@ -110,9 +174,16 @@ Never fill a gap with a plausible default. A blueprint that quietly invents the 
 
 Write **one draft file**, `.specclaw/analysis/.blueprint-draft.md`, via your own `Write` tool. Never write `target-architecture.md` itself — `specclaw-bf-blueprint render` owns that file, the status header, and the Open Questions section.
 
-The draft is a flat sequence of section markers. Emit **all ten**, in this order, each on its own line exactly as written:
+The draft is a flat sequence of section markers. Emit **all eleven**, in this order, each on its own line exactly as written. `render` refuses the draft if one is missing, duplicated, out of order, or if any content sits before the first marker — not out of pedantry: a missing marker makes the section before it swallow everything that follows, which is how a module's component diagram ends up rendered at the bottom of the finished document under Open Questions.
 
 ```
+<!-- SECTION: sources_consumed -->
+architecture.md                ← one filename per line, every analysis
+module-map.md                    document you ACTUALLY read this run.
+decisions.md                     render verifies each exists and builds
+domain-model.md                  the document's provenance line from it.
+…                                Do not list one you did not open.
+
 <!-- SECTION: overview -->
 …prose…
 

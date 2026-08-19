@@ -3,7 +3,6 @@
 **Path analyzed:** {{path}}
 **Date generated:** {{date}}
 **Plugin version:** {{plugin_version}}
-**Source documents:** architecture.md, module-map.md, decisions.md, rebuild-backlog.md
 
 {{status_header}}
 
