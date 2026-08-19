@@ -51,6 +51,8 @@ All executable scripts live in `bin/`. Key ones:
 | `specclaw-validate-change` | Check phase prerequisites |
 | `specclaw-bf-bootstrap` | Target-foundation stage: `collect` (validate + resolve the required decisions) / `gate` (foundation-only boundary) / `smoke` / `record` / `foundation-check` (the gate `/specclaw:propose` reads) / `not-applicable` |
 | `specclaw-bf-bootstrap` | Target-foundation stage: `collect` / `gate` / `smoke` / `record` / `foundation-check` / `not-applicable` |
+| `specclaw-bf-clarify` | Clarify engine: `collect` / `render` (extract mode) / `resolve-collect` / `resolve-render` (`--resolve`) / `options-pack-collect` / `options-pack-render` (`--options-pack` — the client decision paper; bash owns every DECIDED/UNDECIDED/NOT-APPLICABLE verdict, the header counts and the Client-decision lines) |
+| `specclaw-bf-blueprint` | Target blueprint: `collect` (module roster + structural legacy inventory + decision status + the bash-computed `Blueprint status:` line) / `render` (three refusal gates: uncited mapping row, citation to a non-existent id, missing or invented module section) |
 
 ## Tests
 
@@ -69,6 +71,7 @@ Suites live in `tests/`, are bash + coreutils only (no jq in the suites themselv
 | `run-item-split-tests.sh` | item splits: the DR partition and layer-removal guards, the `IS-###` record's fields, `ACTIVE → READY-TO-RESUME → COMPLETE` and who flips each, marker rendering/clearing (both persistence regressions), resume-not-restart, and that PARTIAL changes no verdict or exit code |
 | `run-bootstrap-gate-tests.sh` | the target-foundation stage: the propose gate (inert / not-ready / names its command), the undecided-`SQ` stop, the foundation-only gate's capability refusals, `record`'s refusals, re-run modes, and that the gate fails closed |
 | `run-item-split-tests.sh` | item splits: the DR partition and layer-removal guards, the `IS-###` record's fields, `ACTIVE → READY-TO-RESUME → COMPLETE`, marker rendering/clearing, resume via `bypass-check`, and that PARTIAL changes no verdict or exit code |
+| `run-blueprint-tests.sh` | the client options pack and the target blueprint: the three-way decision-status computation (including that an empty `Decision:` line is not an answer and a `## Outstanding Questions` bullet is not one either), empty-field integrity in the scan, the zero-pending clean state, the options-pack draft refusals, the blueprint's missing-input stops, unconfirmed-map-is-a-WARN-not-a-stop, and all three render gates |
 
 `shellcheck-gate.sh` fails CI on any shellcheck finding absent from `shellcheck-baseline.txt` (pairs of `<path> <SCxxxx>`, no line numbers, so unrelated edits do not churn it). Fix a new finding or add a targeted `# shellcheck disable=SCxxxx` with a rationale — never silence one by appending to the baseline. It skips with exit 0 when shellcheck is not installed, so the suite still runs locally.
 

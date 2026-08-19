@@ -4,6 +4,92 @@ All notable changes to specclaw are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.14.0] — 2026-08-19
+
+### Added
+- **`/specclaw:bf-clarify --options-pack` — the client decision paper the
+  pipeline never had.** `clarifications.md` is written for engineers: seven type
+  labels, `file:line` sources, an ID namespace. The people who actually get to
+  choose the database, the hosting model or whether nine years of history moves
+  were being handed that document, or a verbal summary of it, and **the decision
+  was coming back attributed to "the client"** — which is to say, to nobody who
+  could be asked about it later.
+
+  It writes `.specclaw/analysis/options-pack.md`: every **undecided blocking**
+  question, from any family, restated in plain language, with 2–3 candidate
+  options, what each one means for *this* system, the trade-offs, and a
+  recommendation. **It records nothing.** The choice goes back through the
+  ordinary `clarifications.md` answer → `--resolve` path, attributed to a named
+  human — which is also the remediation path for attribution generally.
+- **Options are generated per run, never templated per stack.** There is no
+  curated menu of databases, hosts or frameworks in any bash collector or
+  template, and a hardcoded product name in one would be an architectural
+  defect rather than a convenience. The agent generates candidates at run time
+  from what this repo's own analysis documents show, cites each option's
+  consequences by `file:line`, and labels a trade-off that is professional
+  judgement rather than evidence `(judgment)` — so a client who cannot read the
+  code can still tell a measurement from an opinion.
+- **`/specclaw:bf-blueprint` — the target-side counterpart to
+  `architecture.md`.** The pipeline was asymmetric. The legacy side had
+  `architecture.md`, `domain-model.md` and `module-map.md`; the target side had
+  its architecture scattered across `decisions.md`, ADRs, `bootstrap-plan.md`
+  and the backlog, with **nothing that showed the shape of the thing being
+  built** and nothing anyone could put in front of a client.
+
+  It writes `.specclaw/analysis/target-architecture.md`: Mermaid C4 diagrams
+  (one Context, one Container, one Component per `MOD-###`, grouped exactly as
+  `rebuild-backlog.md` groups them), a **legacy→target mapping table in which
+  every row cites the `SQ`/`CQ`/`UQ` decision that sanctions it**, and
+  stack/persistence/hosting/auth sections where every claim carries its
+  decision id.
+- **It derives, it never decides.** A claim with no decision behind it renders
+  `PROVISIONAL(<id>)` naming the open question rather than becoming a confident
+  diagram box, and a module whose target shape is entirely undecided gets a
+  single placeholder naming what blocks it — **never an invented design.** A
+  speculative architecture is worse than an incomplete one: it reads as a plan,
+  and somebody builds it.
+- **Three bash gates that refuse the run rather than render something
+  misleading**: a mapping row with no citation and no `PROVISIONAL`/
+  `RETIRED-BY-DECISION` marker; a citation to an id that is not a real question
+  (worse than an uncited row — it *looks* answered); and a missing section for
+  an active module, or a section for one the map does not define.
+- One test suite, registered in CI: `run-blueprint-tests.sh`.
+
+### Changed
+- **Decision status is computed in bash, in one place, for both new
+  documents.** Whether a question is `DECIDED` / `UNDECIDED` /
+  `NOT-APPLICABLE` is derived from `decisions.md`'s literal heading structure
+  and `clarifications.md`'s own `## Not Applicable` section — the same
+  discipline `sanction-check` and the bootstrap gate already use — and handed
+  to the agents as a resolved verdict with the file that proves it. Neither
+  agent re-derives it, and the blueprint's `**Blueprint status:** COMPLETE |
+  PROVISIONAL (n unresolved blocking questions: …)` line is injected by bash,
+  never asserted by an agent. A status an agent inferred by re-reading markdown
+  is exactly the quietly-wrong claim this split prevents.
+- **A question answered in `clarifications.md` but not yet `--resolve`d counts
+  as decided.** Both new commands read the answer as well as the decision
+  record, and report which file proved it. Reporting a question as undecided to
+  the client who answered it that morning would make the pack lie.
+- **Zero undecided blocking questions is a clean state, not an error.**
+  `--options-pack` still writes the pack, saying nothing is pending and listing
+  what was decided and by whom; `bf-blueprint` renders `COMPLETE` with no
+  `PROVISIONAL` boxes. A project that has already answered everything gets a
+  real document out of both commands, not a refusal.
+- `target-architecture.md` joins the **Phase B copy set** in
+  `docs/rebuild-workflow.md`, on the same terms as `module-map.md`: it travels
+  for readability and nothing computes from it. `options-pack.md` deliberately
+  does not travel — a stale copy in the rebuild repo would show questions as
+  pending that have since been answered.
+- `plugins/specclaw/CLAUDE.md` gains registry rows for `specclaw-bf-blueprint`
+  and for `specclaw-bf-clarify`'s full subcommand set.
+
+### Fixed
+- Nothing in the new scan uses a tab as a field separator. A tab is an IFS
+  *whitespace* character, so `IFS=$'\t' read` collapses runs of them and every
+  field after the first empty one shifts left by a column — which an empty
+  `Type` on a `## Not Applicable` entry produces every time. Both new scans use
+  US (`0x1f`), which preserves empty fields.
+
 ## [0.13.0] — 2026-08-17
 
 ### Added
