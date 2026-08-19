@@ -453,6 +453,7 @@ backlog item, its fixtures, and its screens by reading these files:
 .specclaw/analysis/rebuild-backlog.md        # change → BL item → DR rules / SCR screens
 .specclaw/analysis/domain-model.md           # DR rules, for coverage reporting
 .specclaw/analysis/decisions.md              # sanctioning CQs; the SQ-013 UI policy
+.specclaw/analysis/target-architecture.md    # the target blueprint (readability only)
 .specclaw/baseline/scenarios.md              # GM scenario definitions + seam layers
 .specclaw/baseline/seams.md                  # seam recommendations cited in remediations
 .specclaw/baseline/error-map.md              # the project's semantic error vocabulary
@@ -473,6 +474,10 @@ bootstrap manifest is written by `/specclaw:bf-bootstrap`, which runs only in
 the new repo. Nothing copies any of them from the legacy repo, and a rebuild
 repo without a registry simply has no stubs and no splits — every reader treats
 each as empty, silently.
+
+**`target-architecture.md` travels for the same reason, and with the same limit.** It is the target blueprint `/specclaw:bf-blueprint` writes in the legacy repo — the one document that shows the shape of what is being built and what each part of it rests on, which makes it worth having open in the rebuild repo. Nothing computes from it: every decision it cites is already in `decisions.md`, and `/specclaw:bf-bootstrap` reads that file directly and would scaffold identically if the blueprint had never been generated. Re-copy it after any `--resolve` that answers a question it renders `PROVISIONAL`.
+
+**`options-pack.md` is deliberately NOT in the copy set.** The client decision paper is a legacy-repo artifact: the decisions it elicits travel as `decisions.md` entries, which are already here, and a stale copy of the pack in the rebuild repo would show questions as pending that have since been answered.
 
 **`module-map.md` travels too, but is not load-bearing for a verdict.** `/specclaw:bf-replay --module` selects fixtures from `manifest.json`'s own `module_ids`, never from the map — so a replay run works without it. What the map adds in the new repo is readability: the report's module rollup names each module, and `module-status.md` can be regenerated there. Copy it; if it is absent, rollups still compute and simply read as bare `MOD-###` ids.
 
