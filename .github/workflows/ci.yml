@@ -37,6 +37,8 @@ jobs:
         run: bash plugins/specclaw/tests/run-item-split-tests.sh
       - name: Run blueprint + options-pack tests
         run: bash plugins/specclaw/tests/run-blueprint-tests.sh
+      - name: Run C#/Pascal validation-body parser tests
+        run: bash plugins/specclaw/tests/run-cs-body-parser-tests.sh
 
   shellcheck:
     name: ShellCheck bin scripts
