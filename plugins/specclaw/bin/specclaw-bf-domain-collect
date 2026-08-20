@@ -658,18 +658,27 @@ gather_const_declarations() {
 # starts with, case-insensitively, "valid" (covers "validate" too), "check",
 # or "can" — false positives like `CanRedo` are expected and accepted (the
 # agent decides relevance later, not this bash layer). For each match, the
-# full routine body is captured via a depth-counted scan: the first `begin`
-# line after the signature (skipping any local var declarations in between)
-# opens the body, then `begin`/`end;` (case-insensitive) track depth until it
-# returns to 0 — the matching top-level `end;`. Capped at 100 lines,
-# truncation labeled the same way `specclaw-verify collect` labels its own
-# 200-line file cap ("... (truncated, N total lines)").
+# full routine body is captured by a depth-counted scan in the grammar of the
+# language the signature was found in:
 #
-# Known, accepted limitation (spec FR10): this depth counter has no concept
-# of comments or string literals — a comment or string containing the
-# literal word "begin"/"end" can misalign it. Same best-effort, no-real-
-# parser tolerance every extractor in this script and its sibling
-# specclaw-bf-analyze-codebase already accepts.
+#   .pas → capture_pascal_body: the first `begin` line after the signature
+#          (skipping any local var declarations in between) opens the body,
+#          then `begin`/`end;` (case-insensitive) track depth until it
+#          returns to 0 — the matching top-level `end;`.
+#   .cs  → capture_csharp_body: the first `{` at or after the signature line
+#          opens the body, then `{`/`}` are counted per character until depth
+#          returns to 0 — the method's own closing brace. An expression-
+#          bodied member (`=> expr;`) is captured through its terminating `;`.
+#
+# Either way the body is capped at 100 lines, truncation labeled the same way
+# `specclaw-verify collect` labels its own 200-line file cap
+# ("... (truncated, N total lines)").
+#
+# Known, accepted limitation (spec FR10): neither depth counter has any
+# concept of comments or string literals — a comment or string containing the
+# literal word "begin"/"end", or a literal `{`/`}`, can misalign it. Same
+# best-effort, no-real-parser tolerance every extractor in this script and its
+# sibling specclaw-bf-analyze-codebase already accepts.
 
 VALIDATION_NAME_RE='^(valid|check|can)'
 PAS_ROUTINE_SIG_RE='^[[:space:]]*(procedure|function)[[:space:]]+([A-Za-z_][A-Za-z0-9_]*\.)?([A-Za-z_][A-Za-z0-9_]*)[[:space:]]*\('
@@ -677,12 +686,160 @@ CS_ROUTINE_SIG_RE='^[[:space:]]*(public|private|protected|internal|static)[[:spa
 VALIDATION_BEGIN_RE='^[[:space:]]*[Bb][Ee][Gg][Ii][Nn]([^A-Za-z0-9_]|$)'
 VALIDATION_END_RE='^[[:space:]]*[Ee][Nn][Dd];[[:space:]]*$'
 
+# Both capture_*_body functions publish their result here rather than trying to
+# return an array. Reset by each call.
+VALIDATION_BODY_LINES=()
+
+# capture_pascal_body <signature_index>
+#
+# Reads `lines`, `total` and `sig_re` from its caller (parse_one_validation_file)
+# by bash's dynamic scoping. Sets VALIDATION_BODY_LINES to the captured body,
+# returns 1 when the routine has no body in this file.
+#
+# Find the first `begin` after the signature, skipping any local var
+# declarations in between. A forward/interface declaration (no body of its own
+# — its actual implementation, if any, appears later in the file and is matched
+# independently when the outer loop reaches it) is recognized by hitting
+# another routine signature or an interface/implementation keyword line before
+# any `begin` — bail without emitting rather than misattributing a later
+# routine's body.
+capture_pascal_body() {
+  local i="$1"
+  VALIDATION_BODY_LINES=()
+
+  local j=$((i + 1)) found_begin=false
+  while [ "$j" -lt "$total" ]; do
+    if [[ "${lines[$j]}" =~ $VALIDATION_BEGIN_RE ]]; then
+      found_begin=true
+      break
+    fi
+    if [[ "${lines[$j]}" =~ $sig_re ]] || [[ "${lines[$j]}" =~ $PAS_IMPLEMENTATION_RE ]] || [[ "${lines[$j]}" =~ $PAS_INTERFACE_RE ]]; then
+      break
+    fi
+    j=$((j + 1))
+  done
+  $found_begin || return 1
+
+  local depth=1 k=$((j + 1))
+  while [ "$k" -lt "$total" ] && [ "$depth" -gt 0 ]; do
+    local bline="${lines[$k]}"
+    VALIDATION_BODY_LINES+=("$bline")
+    [[ "$bline" =~ $VALIDATION_BEGIN_RE ]] && depth=$((depth + 1))
+    [[ "$bline" =~ $VALIDATION_END_RE ]] && depth=$((depth - 1))
+    k=$((k + 1))
+  done
+  return 0
+}
+
+# capture_csharp_body <signature_index>
+#
+# Same contract as capture_pascal_body (dynamic scoping in,
+# VALIDATION_BODY_LINES out, 1 = no body here).
+#
+# Scan forward from the signature line for whichever comes first:
+#   `{`  → braced body. Depth-count `{`/`}` per character from that brace;
+#          the body ends when depth returns to 0. Capture stops AT that
+#          closing brace, so a body never swallows the next method.
+#   `=>` → expression-bodied member. Capture through the terminating `;`.
+# A signature line that ends in `;` with no `=>` is a declaration only
+# (interface member, abstract/partial method) — bail without emitting. So is a
+# scan that reaches the next signature before finding either opener; the
+# implementation, if there is one, is matched independently by the outer loop.
+capture_csharp_body() {
+  local i="$1"
+  VALIDATION_BODY_LINES=()
+
+  local sig_line="${lines[$i]}"
+  local sig_trimmed="${sig_line%"${sig_line##*[![:space:]]}"}"
+  if [[ "$sig_line" != *'=>'* && "$sig_trimmed" == *';' ]]; then
+    return 1
+  fi
+
+  # Locate the opener. `form` is brace|expr, `start_line` the line holding it.
+  local n="$i" form="" start_line=-1
+  while [ "$n" -lt "$total" ]; do
+    local ln="${lines[$n]}"
+    # Checked before the opener scan: a `{` on a LATER signature's line
+    # belongs to that signature, not this one.
+    if [ "$n" -gt "$i" ] && [[ "$ln" =~ $sig_re ]]; then
+      break
+    fi
+    local bpos=-1 apos=-1 pre
+    if [[ "$ln" == *'{'* ]]; then pre="${ln%%'{'*}"; bpos=${#pre}; fi
+    if [[ "$ln" == *'=>'* ]]; then pre="${ln%%'=>'*}"; apos=${#pre}; fi
+    if [ "$bpos" -ge 0 ] && [ "$apos" -ge 0 ]; then
+      if [ "$apos" -lt "$bpos" ]; then form="expr"; else form="brace"; fi
+      start_line="$n"
+      break
+    elif [ "$bpos" -ge 0 ]; then
+      form="brace"; start_line="$n"; break
+    elif [ "$apos" -ge 0 ]; then
+      form="expr"; start_line="$n"; break
+    fi
+    n=$((n + 1))
+  done
+  [ "$start_line" -ge 0 ] || return 1
+
+  if [ "$form" = "expr" ]; then
+    local k="$start_line" seg bline
+    while [ "$k" -lt "$total" ]; do
+      bline="${lines[$k]}"
+      if [ "$k" -eq "$start_line" ]; then
+        seg="=>${bline#*'=>'}"
+      else
+        seg="$bline"
+      fi
+      if [[ "$seg" == *';'* ]]; then
+        VALIDATION_BODY_LINES+=("${seg%%;*};")
+        break
+      fi
+      VALIDATION_BODY_LINES+=("$seg")
+      k=$((k + 1))
+    done
+    return 0
+  fi
+
+  local depth=0 k="$start_line" seg bline len p stop ch
+  while [ "$k" -lt "$total" ]; do
+    bline="${lines[$k]}"
+    if [ "$k" -eq "$start_line" ]; then
+      # Count from the opening brace onward — text before it is signature.
+      seg="{${bline#*'{'}"
+    else
+      seg="$bline"
+    fi
+    len=${#seg}; p=0; stop=-1
+    while [ "$p" -lt "$len" ]; do
+      ch="${seg:$p:1}"
+      if [ "$ch" = "{" ]; then
+        depth=$((depth + 1))
+      elif [ "$ch" = "}" ]; then
+        depth=$((depth - 1))
+        if [ "$depth" -le 0 ]; then stop="$p"; break; fi
+      fi
+      p=$((p + 1))
+    done
+    if [ "$k" -eq "$start_line" ]; then
+      # The opening line contributes only what follows its `{` — usually
+      # nothing, for `{` on its own line.
+      local first_seg="${seg:1}"
+      [ "$stop" -ge 0 ] && first_seg="${seg:1:$((stop - 1))}"
+      [ -n "${first_seg//[[:space:]]/}" ] && VALIDATION_BODY_LINES+=("$first_seg")
+    else
+      VALIDATION_BODY_LINES+=("$bline")
+    fi
+    [ "$stop" -ge 0 ] && break
+    k=$((k + 1))
+  done
+  return 0
+}
+
 # Parse one .pas or .cs file for validation-candidate routines. Best-effort:
 # never aborts on a malformed or unreadable file. Reads the whole file into
 # an array once so the body can be looked ahead for its opening `begin` and
 # matching `end;` without re-reading the file per match.
 parse_one_validation_file() {
-  local abs_file="$1" rel_file="$2" sig_re="$3" name_group="$4"
+  local abs_file="$1" rel_file="$2" sig_re="$3" name_group="$4" lang="$5"
   [ -r "$abs_file" ] || return 0
 
   local -a lines=()
@@ -705,35 +862,39 @@ parse_one_validation_file() {
 
     local sig_line_num=$((i + 1))
 
-    # Find the first `begin` after the signature, skipping any local var
-    # declarations in between. A forward/interface declaration (no body of
-    # its own — its actual implementation, if any, appears later in the
-    # file and is matched independently when the outer loop reaches it) is
-    # recognized by hitting another routine signature or an
-    # interface/implementation keyword line before any `begin` — bail
-    # without emitting rather than misattributing a later routine's body.
-    local j=$((i + 1)) found_begin=false
-    while [ "$j" -lt "$total" ]; do
-      if [[ "${lines[$j]}" =~ $VALIDATION_BEGIN_RE ]]; then
-        found_begin=true
-        break
-      fi
-      if [[ "${lines[$j]}" =~ $sig_re ]] || [[ "${lines[$j]}" =~ $PAS_IMPLEMENTATION_RE ]] || [[ "${lines[$j]}" =~ $PAS_INTERFACE_RE ]]; then
-        break
-      fi
-      j=$((j + 1))
-    done
-    $found_begin || continue
-
-    local depth=1 k=$((j + 1))
+    # ── Body-parser dispatch, keyed on the language of the file the signature
+    # was found in (`lang`, mapped from the file extension by
+    # gather_validation_candidates below).
+    #
+    # WHY THIS EXISTS: signature matching has always covered both .pas and
+    # .cs, but body capture used to be Pascal-only — one forward search for
+    # `begin`. A C# method body opens with `{`, so that search never
+    # succeeded and every matched C# method was SILENTLY DROPPED, which could
+    # leave validation_routine_candidates[] empty for a C# codebase full of
+    # validation methods. This is syntax-driven parsing of a file we already
+    # decided to scan, not a per-stack template: bash still only computes
+    # facts, the agent still does all interpretation.
+    #
+    # Neither parser is comment- or string-literal-aware (see the section
+    # header's FR10 note) — a `}` inside a string, or the word "end" inside a
+    # comment, can misalign the depth count. Deliberate: a real tokenizer is
+    # out of proportion to what this layer is for.
+    #
+    # And what this layer is for is HINTS. validation_routine_candidates[] is
+    # a narrow naming heuristic (Valid*/Check*/Can*), never the exhaustive
+    # set of a codebase's business rules — bf-domain-analyst is required to
+    # read source directly for rules this never surfaces, and to treat an
+    # empty array as "the heuristic found nothing", never as "there are no
+    # business rules here".
+    #
+    # Any other extension reaching here keeps the pre-existing Pascal
+    # behavior; today gather_validation_candidates admits only .pas and .cs.
+    case "$lang" in
+      csharp) capture_csharp_body "$i" || continue ;;
+      *)      capture_pascal_body "$i" || continue ;;
+    esac
     local -a body_lines=()
-    while [ "$k" -lt "$total" ] && [ "$depth" -gt 0 ]; do
-      local bline="${lines[$k]}"
-      body_lines+=("$bline")
-      [[ "$bline" =~ $VALIDATION_BEGIN_RE ]] && depth=$((depth + 1))
-      [[ "$bline" =~ $VALIDATION_END_RE ]] && depth=$((depth - 1))
-      k=$((k + 1))
-    done
+    [ ${#VALIDATION_BODY_LINES[@]} -gt 0 ] && body_lines=("${VALIDATION_BODY_LINES[@]}")
 
     local total_body=${#body_lines[@]}
     local -a capped=("${body_lines[@]}")
@@ -761,15 +922,17 @@ ${bl}"; fi
 gather_validation_candidates() {
   local files_file="$1" project_root="$2"
   local out="" first=true
-  local rel entry sig_re name_group
+  local rel entry sig_re name_group lang
   while IFS= read -r rel; do
     [ -z "$rel" ] && continue
+    # File extension is the dispatch key for both the signature regex and the
+    # body parser — see the dispatch comment in parse_one_validation_file.
     case "$rel" in
-      *.pas) sig_re="$PAS_ROUTINE_SIG_RE"; name_group=3 ;;
-      *.cs)  sig_re="$CS_ROUTINE_SIG_RE";  name_group=2 ;;
+      *.pas) sig_re="$PAS_ROUTINE_SIG_RE"; name_group=3; lang="pascal" ;;
+      *.cs)  sig_re="$CS_ROUTINE_SIG_RE";  name_group=2; lang="csharp" ;;
       *) continue ;;
     esac
-    entry="$(parse_one_validation_file "$project_root/$rel" "$rel" "$sig_re" "$name_group")"
+    entry="$(parse_one_validation_file "$project_root/$rel" "$rel" "$sig_re" "$name_group" "$lang")"
     [ -z "$entry" ] && continue
     if $first; then first=false; else out="${out},"; fi
     out="${out}${entry}"

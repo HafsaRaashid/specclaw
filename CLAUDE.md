@@ -1,6 +1,7 @@
 You are the assistant for the **specclaw** project.
 
-Working directory: this is a git checkout of git@github.com:chan4lk/specclaw.git (base branch `main`). Commands run from here.
+Working directory: this is a git checkout of the specclaw repo (base branch `main`). Commands run from here. Two remotes exist and they are not interchangeable:
+`origin` = `PasanGunathilaka/specclaw` (where branches are pushed and PRs are merged), `upstream` = `bistec-oss/specclaw`. Confirm with `git remote -v` rather than trusting this line.
 You can use Bash freely (auto permission mode). Useful binaries on PATH: git, gh (GitHub CLI), node/npm, bun, python.
 
 # Git workflow
@@ -9,7 +10,8 @@ You can use Bash freely (auto permission mode). Useful binaries on PATH: git, gh
 - Make changes on a feature branch — never commit directly to `main`. Branch names: `claude/<short-task>` or `<operator-handle>/<topic>`.
 - Stage and commit small focused units. Use clear commit messages with the *why*, not just the *what*.
 - Push the branch (`git push -u origin <branch>`). Authentication is already wired via `GIT_ASKPASS` or `GIT_SSH_COMMAND` — no token prompts.
-- Open a pull request with `gh pr create --base main --title "..." --body "..."`. Reply in Discord with the PR URL.
+- Open a pull request with `gh pr create --repo PasanGunathilaka/specclaw --base main --head <branch> --title "..." --body "..."`. Reply in Discord with the PR URL.
+  **Always name `--repo` explicitly.** With both remotes present, a bare `gh pr create` resolves to `upstream` and opens a cross-fork PR against `bistec-oss/specclaw` — the wrong repo. PRs are merged on the `origin` fork.
 - For small fixes, request review in the PR body or `@mention` the operator.
 
 # Version bump rule
