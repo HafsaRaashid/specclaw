@@ -4,6 +4,89 @@ All notable changes to specclaw are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.14.2] — 2026-08-25
+
+### Added
+- **`/specclaw:bf-quality` — a measured quality baseline, and an honest one.**
+  Sizing a legacy rebuild has always rested on a reading of the code that nobody
+  could reproduce. "The billing module is the scary one" is a real finding and it
+  travels as hearsay: it cannot be re-measured after the rebuild, and it cannot
+  be shown to a client who is being asked to fund the work.
+
+  The new command writes `.specclaw/analysis/quality.json` — per-module rollups
+  of cyclomatic complexity, function length, duplication and file length — plus a
+  narrated `quality-report.md`. Four modes: the legacy report, `--target <path>`
+  for the rebuilt tree, `--compare`, and `--compare --gate`.
+
+- **Every verdict is computed in bash; the agent narrates and cannot re-derive.**
+  Statuses, severities, per-module rollups and the gate result are all decided in
+  the collector from thresholds that live only in `config.yaml`'s new `quality:`
+  block. The narration agent is granted `Read` and `Write` and nothing else, so
+  it has no way to run a metric tool or check a number against source even if its
+  prompt failed to forbid it. A threshold that can be re-derived can be drifted,
+  and these numbers end up in front of clients.
+
+- **`NOT-MEASURED` is a result, not a gap.** No metric is ever estimated,
+  extrapolated or filled in. When one cannot be computed it is recorded with a
+  machine-readable reason — `language_unsupported`, `tool_missing`, or
+  `parse_error` — and the report states the coverage **above** the findings
+  rather than below them, because a reader who takes a rollup as complete without
+  knowing a third of the tree was unmeasurable has been misled. Language support
+  wins over a missing tool in that precedence: if no available tool parses the
+  language, installing something would not help, and saying `tool_missing` would
+  send someone off to fix the wrong thing.
+
+- **`scc`, `lizard` and `jscpd` are all optional.** Each is probed per run and a
+  missing one degrades only its own metrics. A run with none of them installed
+  still succeeds, reports everything as `NOT-MEASURED`, and invents no hotspot.
+  `jq` is the one hard dependency. Only documented machine-readable output is
+  parsed — never scraped human output.
+
+- **`QI-###` hotspots are permanent, and the registry is never archived.**
+  `templates/quality-issues.md` joins `ST-###`/`IS-###` under `CONTRACT.md` (c)
+  with one addition: the `quality.json` snapshot beside it *is* archived every
+  run, which is exactly why the id space lives in a separate document. A hotspot
+  that no longer exceeds its threshold is marked `resolved` and keeps its id and
+  first-seen date forever — never deleted, because "this used to be a hotspot" is
+  what distinguishes a module somebody cleaned up from one that was never bad.
+  Identity is `metric|file|function|module`, never the measured value, so two
+  reports months apart are comparable.
+
+- **A one-sided comparison is `NOT-COMPARABLE`, never an improvement.** This is
+  the flattering lie the compare mode exists to refuse. A legacy system in a
+  language no tool parses for complexity reports `NOT-MEASURED`; the rebuild, in
+  a well-supported language, reports `PASS`. Nothing has been shown to have
+  improved — nobody knows what the legacy figure was — and the delta report says
+  so in its own section, placed ahead of the wins.
+
+- **Advisory by default, and provably optional.** The default mode exits 0 even
+  when every module is `HIGH`. `--compare --gate` is the only enforcing path
+  anywhere in the command, printing `QUALITY-GATE: PASS`/`FAIL (n regressions)`
+  with a matching exit code, where a regression is a status *band* worsening at
+  module level. No other command requires anything this one produces. The single
+  interaction is `/specclaw:bf-rebuild-plan`, whose per-module coverage rollup
+  gains a quality status and open-hotspot count when `quality.json` happens to
+  exist — a guarded read whose every failure mode (no file, no `jq`, unreadable
+  JSON, an unmeasured module) degrades to the same empty string, so the rendered
+  backlog is byte-identical to a run predating the hook. `run-quality-tests.sh`
+  asserts that by diffing two renders and requiring every differing line to be an
+  annotation.
+
+- **Module numbers describe the cited slice, and say so.** Nothing in
+  `.specclaw/` maps a source file to a `MOD-###` — the module map maps modules to
+  entities, rules, services and screens. So the join uses only the file paths each
+  module cites in its own `**Evidence:**` bullets, an exact path citation beats a
+  directory one, and a file two modules both cite is left under
+  `MOD-UNASSIGNED` rather than allocated. A large unassigned bucket is the
+  expected result on a map nobody has enriched, and it is reported loudly: the
+  alternative — claiming every file under a cited file's directory — is inferring
+  a boundary, which is the one thing `module-map.md` forbids.
+
+- **Stack-blind.** No framework, product or project name appears in the
+  collector. Language handling is an extension→tool-capability table, so adding a
+  language is a row rather than a branch.
+
+
 ## [0.14.0] — 2026-08-19
 
 ### Added
