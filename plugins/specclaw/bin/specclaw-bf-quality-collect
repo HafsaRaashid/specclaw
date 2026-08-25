@@ -1,0 +1,1177 @@
+#!/usr/bin/env bash
+# specclaw-bf-quality-collect — measure code quality of a codebase and compute
+# every verdict in bash, so /specclaw:bf-quality's agent only ever narrates.
+#
+# WHAT THIS IS NOT. It is not a comprehension command. /specclaw:bf-analyze,
+# /specclaw:bf-domain and /specclaw:bf-architecture answer "what is this system";
+# this one answers "what shape is the code in", which is a judgement, and
+# judgements live in exactly one place so a reader always knows where the number
+# came from. Nothing here writes into, reads from, or changes the behaviour of
+# any other command's artifacts. It is also not the code reviewer
+# (agents/code-reviewer.md): that reads a change's diff and forms an opinion,
+# this reads a whole tree and computes a threshold.
+#
+# WHY BASH OWNS THE VERDICTS. Every status, severity, rollup and gate result in
+# the emitted JSON is computed here. The agent is handed a finished artifact and
+# is forbidden from running a metric tool or reading a source file to
+# double-check one. An LLM that can re-derive a threshold can also drift one,
+# and a quality number that drifted is worse than no number — somebody will put
+# it in front of a client.
+#
+# NOT-MEASURED IS A RESULT. When a metric cannot be computed for a file, that
+# fact is recorded with a machine-readable reason and never estimated,
+# extrapolated or filled in. The three reasons:
+#
+#   language_unsupported  the tool does not parse this language. Installing it
+#                         would not help, so this wins over tool_missing.
+#   tool_missing          the tool would have parsed this language but is not
+#                         on PATH.
+#   parse_error           the tool ran and this file's row came back unusable.
+#
+# A missing tool never aborts a run. An empty result is an honest result.
+#
+# TOOLS, all optional, probed at start:
+#   scc     LOC, per-file line counts, per-language file counts
+#   lizard  per-function cyclomatic complexity, function length, param count
+#   jscpd   duplication percentage
+#
+# jq is the one hard dependency (the tools' machine-readable output is nested
+# JSON). Human-formatted tool output is never scraped.
+#
+# STACK-BLIND. There is no framework, product or project name anywhere in this
+# script. Language handling is the extension→capability table below, which is
+# data: adding a language is a row, never a branch.
+#
+# THRESHOLDS ARE CONFIG. The defaults live in exactly one block and are
+# overridable from .specclaw/config.yaml's `quality:` section. They enter the
+# classification logic as jq arguments, so no threshold number appears inline in
+# any comparison.
+#
+# ADVISORY BY DEFAULT. collect always exits 0 on findings — only an
+# infrastructure error is non-zero. The single enforcing path is
+# `compare --gate`, which prints QUALITY-GATE: PASS|FAIL and exits 0|1.
+#
+# QI-### PERMANENCE. Hotspots are registered in
+# .specclaw/analysis/quality-issues.md using the same mechanism ST-###/IS-###
+# use (templates/CONTRACT.md (c)): scan for the highest assigned number, add
+# one, never renumber, never reuse, never delete. It carries their carve-out
+# too — the registry is append/update-in-place and is NEVER archived, because a
+# registry that gets archived and regenerated is exactly the silent re-pointing
+# (c) exists to prevent. quality.json's quality_issues[] is a regenerated
+# projection of that registry, never the registry itself. One direction per
+# fact.
+#
+# Usage:
+#   specclaw-bf-quality-collect collect <specclaw_dir> [path] [--target]
+#   specclaw-bf-quality-collect compare <specclaw_dir> [--gate]
+#
+# collect  measures [path] (default: repository root). Writes
+#          .specclaw/analysis/quality.json and emits it on stdout for the agent;
+#          the human-readable summary goes to stderr. --target measures the
+#          rebuilt tree instead, writing quality-target.json — and registers no
+#          QI, because QI ids name legacy hotspots and nothing else.
+#
+# compare  requires both quality.json and quality-target.json; fails fast and
+#          says which is missing. Computes per-module per-metric deltas into
+#          quality-delta.json. --gate additionally prints the verdict line and
+#          sets the exit code.
+
+set -euo pipefail
+
+die() { echo "ERROR: $*" >&2; exit 1; }
+warn() { echo "WARN: $*" >&2; }
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# ─── template substitution (copied verbatim from specclaw-bf-rebuild-collect) ──
+#
+# NOT "${content//"$token"/$value}" — bash's pattern-substitution replacement
+# string reads a literal & as "insert the whole match", so any substituted value
+# containing a bare & silently gets that & replaced with the token's own text.
+# Split-and-concat never treats $value as a replacement string.
+substitute() {
+  local content="$1" token="$2" value="$3"
+  case "$content" in
+    *"$token"*) printf '%s' "${content%%"$token"*}${value}${content#*"$token"}" ;;
+    *) printf '%s' "$content" ;;
+  esac
+}
+
+project_title() {
+  local project_root="$1" name=""
+  local config_file="$project_root/.specclaw/config.yaml"
+  [ -f "$config_file" ] && name="$(yaml_val "$config_file" "project.name")"
+  [ -n "$name" ] || name="$(basename "$project_root")"
+  printf '%s' "$name"
+}
+
+# ─── JSON helpers (copied per repo convention — there is no shared bash lib) ──
+
+json_escape() {
+  local s="$1"
+  s="${s//\\/\\\\}"
+  s="${s//\"/\\\"}"
+  s="${s//$'\n'/\\n}"
+  s="${s//$'\r'/\\r}"
+  s="${s//$'\t'/\\t}"
+  printf '%s' "$s"
+}
+
+# ─── config.yaml reader (copied verbatim from specclaw-bf-rebuild-collect) ────
+
+yaml_val() {
+  local file="$1" key="$2"
+  local section field
+  if [[ "$key" == *.* ]]; then
+    section="${key%%.*}"
+    field="${key#*.}"
+  else
+    section=""
+    field="$key"
+  fi
+
+  local in_section=false value=""
+  while IFS= read -r line; do
+    [[ "$line" =~ ^[[:space:]]*# ]] && continue
+    [[ -z "${line// /}" ]] && continue
+
+    if [[ -z "$section" ]]; then
+      if [[ "$line" =~ ^${field}:[[:space:]]*(.*) ]]; then
+        value="${BASH_REMATCH[1]}"
+        break
+      fi
+    else
+      if [[ "$line" =~ ^[a-zA-Z_] ]]; then
+        if [[ "$line" =~ ^${section}: ]]; then
+          in_section=true
+        else
+          in_section=false
+        fi
+        continue
+      fi
+      if $in_section; then
+        if [[ "$line" =~ ^[[:space:]]+${field}:[[:space:]]*(.*) ]]; then
+          value="${BASH_REMATCH[1]}"
+          break
+        fi
+      fi
+    fi
+  done < "$file"
+
+  if [[ "$value" =~ ([[:space:]]+#) ]]; then
+    value="${value%%"${BASH_REMATCH[1]}"*}"
+  fi
+  if [[ "$value" =~ [[:space:]]+$ ]]; then
+    value="${value%"${BASH_REMATCH[0]}"}"
+  fi
+  value="${value#\"}"; value="${value%\"}"
+  value="${value#\'}"; value="${value%\'}"
+  printf '%s' "$value"
+}
+
+# ─── capability_table ────────────────────────────────────────────────────────
+#
+# DATA, not logic. Columns:
+#
+#   extension <TAB> language <TAB> scc <TAB> lizard <TAB> jscpd
+#
+# where each tool column is 1 when that tool parses this language and 0 when it
+# does not. A 0 is what produces language_unsupported, which is why the table is
+# the honest core of this script rather than a convenience: getting a row wrong
+# means claiming a measurement nobody made, or withholding one that exists.
+#
+# An extension absent from the table is out of scope for every metric and is
+# counted under the "unclassified" file count — never silently folded into a
+# language it might be.
+capability_table() {
+  cat <<'CAPTABLE'
+.cs	C#	1	1	1
+.vb	Visual Basic	1	0	1
+.java	Java	1	1	1
+.kt	Kotlin	1	1	1
+.kts	Kotlin	1	1	1
+.js	JavaScript	1	1	1
+.jsx	JavaScript	1	1	1
+.mjs	JavaScript	1	1	1
+.cjs	JavaScript	1	1	1
+.ts	TypeScript	1	1	1
+.tsx	TypeScript	1	1	1
+.py	Python	1	1	1
+.rb	Ruby	1	1	1
+.go	Go	1	1	1
+.rs	Rust	1	1	1
+.php	PHP	1	1	1
+.swift	Swift	1	1	1
+.scala	Scala	1	1	1
+.lua	Lua	1	1	1
+.pl	Perl	1	1	0
+.pm	Perl	1	1	0
+.c	C	1	1	1
+.h	C	1	1	1
+.cpp	C++	1	1	1
+.cc	C++	1	1	1
+.cxx	C++	1	1	1
+.hpp	C++	1	1	1
+.m	Objective-C	1	1	1
+.mm	Objective-C	1	1	1
+.erl	Erlang	1	1	0
+.zig	Zig	1	1	0
+.sol	Solidity	1	1	0
+.pas	Pascal	1	0	1
+.pp	Pascal	1	0	1
+.dpr	Pascal	1	0	1
+.dpk	Pascal	1	0	1
+.sql	SQL	1	0	1
+.sh	Shell	1	0	0
+.bash	Shell	1	0	0
+.ps1	PowerShell	1	0	0
+CAPTABLE
+}
+
+# ─── threshold defaults ──────────────────────────────────────────────────────
+#
+# THE ONLY PLACE A THRESHOLD NUMBER IS WRITTEN. Every one of these is
+# overridable from .specclaw/config.yaml's `quality:` block, and they reach the
+# classification logic as jq --argjson values, so no comparison anywhere below
+# contains a literal. Changing a policy is a config edit, never a code edit.
+#
+# register_severity is the one non-numeric knob: which severity band earns a
+# permanent QI-### id. It defaults to HIGH deliberately. QI ids are permanent
+# and entries are never deleted, so a registry that admitted every WARN on a
+# large legacy tree would grow to thousands of rows that outlive the code they
+# describe. WARN findings are still counted in every module rollup — they are
+# just not individually immortalised.
+load_thresholds() {
+  local config_file="$1"
+  local -A t=(
+    [complexity_warn]=10
+    [complexity_high]=20
+    [function_length_warn]=60
+    [function_length_high]=120
+    [duplication_warn]=5
+    [duplication_high]=15
+    [file_length_warn]=500
+    [file_length_high]=1000
+  )
+  local register_severity="HIGH"
+  local k v
+  if [ -f "$config_file" ]; then
+    for k in "${!t[@]}"; do
+      v="$(yaml_val "$config_file" "quality.${k}")"
+      if [ -n "$v" ] && [[ "$v" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+        t[$k]="$v"
+      elif [ -n "$v" ]; then
+        warn "config.yaml quality.${k} is not a number ('${v}') — using the default ${t[$k]}."
+      fi
+    done
+    v="$(yaml_val "$config_file" "quality.register_severity")"
+    case "$(printf '%s' "${v:-}" | tr '[:lower:]' '[:upper:]')" in
+      HIGH) register_severity="HIGH" ;;
+      WARN) register_severity="WARN" ;;
+      "") : ;;
+      *) warn "config.yaml quality.register_severity must be HIGH or WARN ('${v}') — using HIGH." ;;
+    esac
+  fi
+
+  printf '{'
+  local first=true
+  for k in complexity_warn complexity_high function_length_warn function_length_high \
+           duplication_warn duplication_high file_length_warn file_length_high; do
+    if $first; then first=false; else printf ','; fi
+    printf '"%s":%s' "$k" "${t[$k]}"
+  done
+  printf ',"register_severity":"%s"}' "$register_severity"
+}
+
+# ─── tool probe (PD-09) ──────────────────────────────────────────────────────
+
+have_tool() { command -v "$1" >/dev/null 2>&1; }
+
+# ─── file enumeration ────────────────────────────────────────────────────────
+#
+# Mirrors specclaw-bf-analyze-codebase's convention exactly: git ls-files when
+# inside a work tree, the pruning find otherwise, then the SAME post-filter
+# applied uniformly to both — because `git ls-files` happily lists a committed
+# vendor/ or node_modules/ tree and third-party code in a quality number is a
+# lie about the project's own code.
+#
+# This list stays authoritative. Each metric tool is run over the scope
+# directory and its output is then INTERSECTED with this list, rather than
+# trusting each tool's own ignore semantics to agree with ours. Three tools with
+# three different ignore files would otherwise give three different denominators
+# for the same repo.
+enumerate_files() {
+  local project_root="$1" rel_scope="$2" out="$3"
+  local tmp_all f
+  tmp_all="$(mktemp)"
+
+  if git -C "$project_root" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    git -C "$project_root" ls-files -z 2>/dev/null | tr '\0' '\n' > "$tmp_all"
+  else
+    (
+      cd "$project_root" || exit 0
+      find . \( -name .git -o -name node_modules -o -name .specclaw -o -name vendor -o -name dist -o -name build \) -prune \
+        -o -type f -print 2>/dev/null | sed 's|^\./||'
+    ) > "$tmp_all"
+  fi
+
+  : > "$out"
+  while IFS= read -r f; do
+    [ -z "$f" ] && continue
+    case "$f" in
+      .specclaw|.specclaw/*) continue ;;
+      node_modules/*|*/node_modules/*) continue ;;
+      vendor/*|*/vendor/*) continue ;;
+      dist/*|*/dist/*) continue ;;
+      build/*|*/build/*) continue ;;
+    esac
+    if [ -z "$rel_scope" ]; then
+      printf '%s\n' "$f" >> "$out"
+    else
+      case "$f" in
+        "$rel_scope"|"$rel_scope"/*) printf '%s\n' "$f" >> "$out" ;;
+      esac
+    fi
+  done < "$tmp_all"
+  rm -f "$tmp_all"
+}
+
+# ─── module join (PD-11) ─────────────────────────────────────────────────────
+#
+# THE HONEST LIMITATION, STATED UP FRONT: nothing in .specclaw/ maps a source
+# file to a MOD-###. module-map.md maps a module to entities, rules, services
+# and screens; rebuild-backlog.md maps backlog items to modules. So the only
+# declared file-level evidence a module carries is the file paths cited in its
+# own **Evidence:** bullets, and that is what this joins on. Evidence is a
+# sample of a boundary, not an inventory of one, so a large MOD-UNASSIGNED
+# bucket is the EXPECTED result on a map nobody has enriched — and it is
+# reported loudly rather than hidden, because the alternative (claiming every
+# file under a cited file's directory) is inferring a boundary, which is the
+# one thing the module map forbids.
+#
+# Two specificity levels, both declared, neither inferred:
+#   file citation       a cited path that exactly equals an enumerated file
+#   directory citation  a cited path that is a parent directory of enumerated
+#                       files (the bullet named a directory)
+# A file citation beats a directory citation — more specific declared evidence,
+# not a guess. A tie at the same level (two modules citing the same file, or the
+# same directory) is AMBIGUOUS and lands in MOD-UNASSIGNED with its own count in
+# the summary. Picking one would be exactly the silent assignment module-map.md
+# raises a pending question for.
+#
+# Withdrawn modules are tombstones: their citations are ignored.
+parse_module_citations() {
+  local map_file="$1" out="$2"
+  : > "$out"
+  [ -f "$map_file" ] || return 0
+  awk '
+    /^### MOD-[0-9]+/ {
+      mod = ""; inev = 0
+      if ($0 !~ /WITHDRAWN/) { match($0, /MOD-[0-9]+/); mod = substr($0, RSTART, RLENGTH) }
+      next
+    }
+    /^## / { mod = ""; inev = 0; next }
+    mod == "" { next }
+    /\*\*Evidence:\*\*/ { inev = 1; print mod "\t" $0; next }
+    /^[[:space:]]*-[[:space:]]*\*\*[A-Za-z]/ { inev = 0; next }
+    inev { print mod "\t" $0 }
+  ' "$map_file" > "$out.raw" || true
+
+  # One citation per line. A path is a token carrying a slash, or a bare
+  # filename with an extension the capability table knows; a trailing :NNN line
+  # reference is stripped, as are wrapping backticks and quotes.
+  # `|| true` on the extraction pipeline is load-bearing, not defensive tidiness:
+  # most Evidence bullets are prose and match no path, and under
+  # `set -euo pipefail` a grep that finds nothing fails the whole pipeline and
+  # kills the run — silently, since the trap cleans up before anything is
+  # printed. A bullet with no path in it is the normal case, not an error.
+  while IFS=$'\t' read -r mod text; do
+    [ -z "$mod" ] && continue
+    { printf '%s' "$text" \
+        | tr '`"'"'"'()[],;' '\n' \
+        | sed -E 's/:[0-9]+$//' \
+        | grep -E '^[A-Za-z0-9_.@+-]+(/[A-Za-z0-9_.@+-]+)+$|^[A-Za-z0-9_.@+-]+\.[A-Za-z0-9]+$' \
+        | sed -E 's|^\./||; s|/+$||' \
+        | while IFS= read -r p; do
+            [ -n "$p" ] && printf '%s\t%s\n' "$p" "$mod"
+          done
+    } || true
+  done < "$out.raw" | LC_ALL=C sort -u > "$out" || true
+  rm -f "$out.raw"
+}
+
+# filemod.tsv: relpath <TAB> MOD-### | MOD-UNASSIGNED
+join_files_to_modules() {
+  local files="$1" citations="$2" out="$3" ambig_out="$4"
+  : > "$out"; : > "$ambig_out"
+
+  if [ ! -s "$citations" ]; then
+    sed 's/$/\tMOD-UNASSIGNED/' "$files" > "$out"
+    return 0
+  fi
+
+  awk -F'\t' -v ambig="$ambig_out" '
+    NR == FNR { cite[$1] = cite[$1] " " $2; next }
+    {
+      f = $0
+      # Level 1: exact file citation.
+      hit = ""; n = 0
+      if (f in cite) { split(cite[f], a, " "); for (i in a) if (a[i] != "") { if (a[i] != hit) { n++; hit = a[i] } } }
+      if (n == 1) { print f "\t" hit; next }
+      if (n > 1)  { print f > ambig; print f "\tMOD-UNASSIGNED"; next }
+
+      # Level 2: directory citation — the longest cited prefix wins on
+      # specificity; ties at that same length are ambiguous.
+      best = 0; hit = ""; n = 0
+      for (c in cite) {
+        if (index(f, c "/") == 1) {
+          L = length(c)
+          if (L > best) { best = L; split(cite[c], b, " "); n = 0; hit = ""; for (i in b) if (b[i] != "") { if (b[i] != hit) { n++; hit = b[i] } } }
+          else if (L == best) { split(cite[c], b, " "); for (i in b) if (b[i] != "" && b[i] != hit) n++ }
+        }
+      }
+      if (n == 1) { print f "\t" hit; next }
+      if (n > 1)  { print f > ambig; print f "\tMOD-UNASSIGNED"; next }
+      print f "\tMOD-UNASSIGNED"
+    }
+  ' "$citations" "$files" > "$out"
+}
+
+read_module_map_status() {
+  local map_file="$1"
+  [ -f "$map_file" ] || { printf 'ABSENT'; return 0; }
+  local s
+  s="$(grep -m1 -E '^\*\*Status:\*\*' "$map_file" 2>/dev/null | sed -E 's/^\*\*Status:\*\*[[:space:]]*//' || true)"
+  printf '%s' "${s:-UNKNOWN}"
+}
+
+# ─── metric collection ───────────────────────────────────────────────────────
+#
+# Every runner writes a TSV keyed by repo-relative path, intersected with the
+# enumerated file list. Paths are normalised to forward slashes: a tool built
+# for Windows may hand back backslashes, and a path that differs only by
+# separator silently fails to join, which shows up as a plausible-looking
+# smaller denominator rather than as an error.
+
+norm_paths() { sed -e 's|\\|/|g' -e 's|^\./||'; }
+
+# loc.tsv: relpath <TAB> lines <TAB> code
+run_scc() {
+  local project_root="$1" scope_arg="$2" files="$3" out="$4"
+  : > "$out"
+  local raw; raw="$(mktemp)"
+  if ! ( cd "$project_root" && scc --by-file --format json \
+            --exclude-dir '.git,node_modules,.specclaw,vendor,dist,build' \
+            "$scope_arg" ) > "$raw" 2>/dev/null; then
+    rm -f "$raw"
+    return 1
+  fi
+  jq -r '
+    (if type == "array" then . else [.] end)
+    | .[]? | .Files[]?
+    | [ (.Location // .Filename // ""), (.Lines // 0), (.Code // 0) ]
+    | @tsv
+  ' "$raw" 2>/dev/null | norm_paths | LC_ALL=C sort -u > "$raw.norm" || { rm -f "$raw" "$raw.norm"; return 1; }
+  LC_ALL=C sort -u "$files" > "$raw.files"
+  LC_ALL=C join -t$'\t' -1 1 -2 1 "$raw.files" "$raw.norm" > "$out" || true
+  rm -f "$raw" "$raw.norm" "$raw.files"
+  return 0
+}
+
+# funcs.tsv: relpath <TAB> function <TAB> ccn <TAB> length <TAB> params
+run_lizard() {
+  local project_root="$1" scope_arg="$2" files="$3" out="$4"
+  : > "$out"
+  local raw; raw="$(mktemp)"
+  # lizard exits non-zero when its own warning thresholds trip, which is not an
+  # error here — we classify against our own config, not its defaults. Judge it
+  # on whether it produced parseable rows instead.
+  ( cd "$project_root" && lizard --csv \
+      -x './.git/*' -x './node_modules/*' -x './.specclaw/*' \
+      -x './vendor/*' -x './dist/*' -x './build/*' \
+      "$scope_arg" ) > "$raw" 2>/dev/null || true
+  [ -s "$raw" ] || { rm -f "$raw"; return 1; }
+  # lizard --csv columns: nloc,ccn,tokens,params,length,location,file,function,...
+  # Fields 1-5 are numeric by contract. A row where they are not is a
+  # parse_error for that row, never a silently coerced zero — and it is exactly
+  # what a comma inside a path would produce, shifting every later field.
+  awk -F',' -v OFS='\t' '
+    NF < 8 { next }
+    ($1 ~ /^[0-9]+$/) && ($2 ~ /^[0-9]+$/) && ($4 ~ /^[0-9]+$/) && ($5 ~ /^[0-9]+$/) {
+      print $7, $8, $2, $5, $4
+    }
+  ' "$raw" > "$raw.rows" || true
+  cut -f1 "$raw.rows" | norm_paths > "$raw.p"
+  cut -f2- "$raw.rows" > "$raw.r"
+  paste "$raw.p" "$raw.r" | LC_ALL=C sort -t$'\t' -k1,1 > "$raw.norm"
+  LC_ALL=C sort -u "$files" > "$raw.files"
+  LC_ALL=C join -t$'\t' -1 1 -2 1 "$raw.files" "$raw.norm" > "$out" || true
+  rm -f "$raw" "$raw.rows" "$raw.p" "$raw.r" "$raw.norm" "$raw.files"
+  return 0
+}
+
+# dup.tsv: relpath <TAB> lines <TAB> duplicated_lines
+run_jscpd() {
+  local project_root="$1" scope_arg="$2" files="$3" out="$4"
+  : > "$out"
+  local rdir raw; rdir="$(mktemp -d)"
+  # jscpd exits non-zero once its own --threshold trips. Same reasoning as
+  # lizard: its exit code is about its policy, not ours.
+  ( cd "$project_root" && jscpd --silent --reporters json --output "$rdir" \
+      --ignore '**/.git/**,**/node_modules/**,**/.specclaw/**,**/vendor/**,**/dist/**,**/build/**' \
+      "$scope_arg" ) >/dev/null 2>&1 || true
+  raw="$rdir/jscpd-report.json"
+  [ -f "$raw" ] || { rm -rf "$rdir"; return 1; }
+  # Two report shapes in the wild: per-format `sources`, and a flat `paths`.
+  # Read whichever is present rather than pinning a tool version.
+  jq -r --arg root "$project_root" '
+    def rows:
+      ( (.statistics.formats // {}) | to_entries[]? | (.value.sources // {}) | to_entries[]? ),
+      ( (.statistics.paths  // {}) | to_entries[]? );
+    [ rows ] | unique_by(.key) | .[]
+    | [ .key, (.value.lines // 0), (.value.duplicatedLines // 0) ] | @tsv
+  ' "$raw" 2>/dev/null \
+    | sed -e "s|^${project_root}/||" \
+    | norm_paths | LC_ALL=C sort -u > "$rdir/norm" || { rm -rf "$rdir"; return 1; }
+  LC_ALL=C sort -u "$files" > "$rdir/files"
+  LC_ALL=C join -t$'\t' -1 1 -2 1 "$rdir/files" "$rdir/norm" > "$out" || true
+  rm -rf "$rdir"
+  return 0
+}
+
+# ─── the QI registry (.specclaw/analysis/quality-issues.md) ──────────────────
+#
+# Same mechanism as next_stub_id/next_split_id in specclaw-bf-rebuild-collect:
+# scan for the highest assigned number and add one. Ids are permanent, so a
+# resolved or malformed entry still holds its number.
+qi_registry_path() { printf '%s/analysis/quality-issues.md' "$1"; }
+
+next_qi_num() {
+  local reg="$1" max=0 n
+  if [ -f "$reg" ]; then
+    while IFS= read -r n; do
+      [ -z "$n" ] && continue
+      n=$((10#$n))
+      [ "$n" -gt "$max" ] && max="$n"
+    done < <({ grep -oE '^### QI-[0-9]+' "$reg" 2>/dev/null | grep -oE '[0-9]+'; } || true)
+  fi
+  printf '%s' $((max + 1))
+}
+
+# prior.tsv: key <TAB> qi_id <TAB> first_seen <TAB> status
+read_qi_registry() {
+  local reg="$1" out="$2"
+  : > "$out"
+  [ -f "$reg" ] || return 0
+  awk -v OFS='\t' '
+    /^### QI-[0-9]+/ {
+      if (id != "") print key, id, first, status
+      match($0, /QI-[0-9]+/); id = substr($0, RSTART, RLENGTH)
+      key = ""; first = ""; status = ""
+      next
+    }
+    id == "" { next }
+    /^[[:space:]]*-[[:space:]]*\*\*Key:\*\*/        { sub(/^[^:]*:\*\*[[:space:]]*/, ""); key = $0; next }
+    /^[[:space:]]*-[[:space:]]*\*\*First seen:\*\*/ { sub(/^[^:]*:\*\*[[:space:]]*/, ""); first = $0; next }
+    /^[[:space:]]*-[[:space:]]*\*\*Status:\*\*/     { sub(/^[^:]*:\*\*[[:space:]]*/, ""); status = $0; next }
+    END { if (id != "") print key, id, first, status }
+  ' "$reg" | grep -v '^[[:space:]]*$' > "$out" || true
+}
+
+# ─── the aggregation + classification program ────────────────────────────────
+#
+# Every status, severity and rollup in the emitted artifact is decided here.
+# Thresholds arrive as $th and appear nowhere as a literal, so a policy change is
+# a config edit. Written to a file by its caller rather than piped in — see the
+# note at the call site.
+write_agg_jq() {
+  cat <<'AGGJQ'
+def NM: "NOT-MEASURED";
+def band($v; $w; $h): if $v >= $h then "HIGH" elif $v >= $w then "WARN" else "PASS" end;
+def rank: {"NOT-MEASURED": -1, "PASS": 0, "WARN": 1, "HIGH": 2}[.] // -1;
+def worst($a; $b): if ($a | rank) >= ($b | rank) then $a else $b end;
+
+# reason precedence: language support is the more fundamental fact. When the
+# table says a tool cannot parse a language, installing the tool would not help,
+# so language_unsupported wins over tool_missing.
+def reason($cap; $ran; $onPath):
+  if $cap != "1" then "language_unsupported"
+  elif $onPath | not then "tool_missing"
+  elif $ran | not then "parse_error"
+  else null end;
+
+($files  | map({key: .[0], value: {language: .[1], scc: .[2], lizard: .[3], jscpd: .[4]}}) | from_entries) as $F
+| ($loc     | map({key: .[0], value: {lines: (.[1] | tonumber), code: (.[2] | tonumber)}}) | from_entries) as $L
+| ($dup     | map({key: .[0], value: {lines: (.[1] | tonumber), dup: (.[2] | tonumber)}}) | from_entries) as $D
+| ($filemod | map({key: .[0], value: .[1]}) | from_entries) as $M
+| ($prior   | map({key: .[0], value: {id: .[1], first_seen: .[2], status: .[3]}}) | from_entries) as $P
+| ($funcs | map({
+      file: .[0], function: .[1],
+      ccn: (.[2] | tonumber), length: (.[3] | tonumber), params: (.[4] | tonumber),
+      module: ($M[.[0]] // "MOD-UNASSIGNED")
+    })) as $FN
+
+# ── per-language coverage, incl. NOT-MEASURED with its reason ───────────────
+| ( $F | to_entries | group_by(.value.language) | map(
+      .[0].value.language as $lang
+    | (map(.value.scc)    | first) as $cs
+    | (map(.value.lizard) | first) as $cl
+    | (map(.value.jscpd)  | first) as $cj
+    | [ {m: "loc",         r: reason($cs; $tools.scc;    $toolsOnPath.scc)},
+        {m: "complexity",  r: reason($cl; $tools.lizard; $toolsOnPath.lizard)},
+        {m: "duplication", r: reason($cj; $tools.jscpd;  $toolsOnPath.jscpd)} ] as $probe
+    | { language: $lang,
+        files: length,
+        metrics_available: ($probe | map(select(.r == null) | .m)),
+        metrics_not_measured: ($probe | map(select(.r != null) | {metric: .m, reason: .r})) }
+    ) | sort_by(-.files) ) as $coverage
+
+# ── per-module rollups. Every status below is computed here. ────────────────
+| ( ($F | keys) + ($M | keys) | unique | map($M[.] // "MOD-UNASSIGNED") | unique ) as $modIds
+| ( $modIds | map(
+      . as $mid
+    | ([ $F | keys[] | select(($M[.] // "MOD-UNASSIGNED") == $mid) ]) as $mf
+    | ([ $mf[] | select($L[.] != null) ]) as $sized
+    | ([ $FN[] | select(.module == $mid) ]) as $mfn
+    | ([ $mf[] | select($D[.] != null) ]) as $duped
+
+    # complexity + function length, from lizard
+    | ( if ($mfn | length) == 0 then
+          {max: null, mean: null, functions_warn: 0, functions_high: 0, status: NM}
+        else
+          ( [$mfn[] | .ccn] ) as $c
+          | { max: ($c | max),
+              mean: (($c | add) / ($c | length) * 10 | round / 10),
+              functions_warn: ([$mfn[] | select(.ccn >= $th.complexity_warn and .ccn < $th.complexity_high)] | length),
+              functions_high: ([$mfn[] | select(.ccn >= $th.complexity_high)] | length),
+              status: ( [ $mfn[] | band(.ccn; $th.complexity_warn; $th.complexity_high) ]
+                        | reduce .[] as $s ("PASS"; worst(.; $s)) ) }
+        end ) as $cx
+    | ( if ($mfn | length) == 0 then
+          {max: null, functions_warn: 0, functions_high: 0, status: NM}
+        else
+          { max: ([$mfn[] | .length] | max),
+            functions_warn: ([$mfn[] | select(.length >= $th.function_length_warn and .length < $th.function_length_high)] | length),
+            functions_high: ([$mfn[] | select(.length >= $th.function_length_high)] | length),
+            status: ( [ $mfn[] | band(.length; $th.function_length_warn; $th.function_length_high) ]
+                      | reduce .[] as $s ("PASS"; worst(.; $s)) ) }
+        end ) as $fl
+
+    # duplication, from jscpd — a module's percentage over only the files jscpd
+    # could measure. Unmeasurable files are excluded from BOTH numerator and
+    # denominator; folding them in as zero-duplication would quietly dilute the
+    # figure toward a healthier number than anyone measured.
+    | ( if ($duped | length) == 0 then {pct: null, files_measured: 0, status: NM}
+        else ([$duped[] | $D[.].lines] | add) as $tl
+          | ([$duped[] | $D[.].dup] | add) as $td
+          | ( if $tl == 0 then 0 else ($td / $tl * 1000 | round / 10) end ) as $pct
+          | {pct: $pct, files_measured: ($duped | length),
+             status: band($pct; $th.duplication_warn; $th.duplication_high)}
+        end ) as $dp
+
+    # file length, from scc's per-file line counts
+    | ( if ($sized | length) == 0 then {max: null, files_warn: 0, files_high: 0, status: NM}
+        else { max: ([$sized[] | $L[.].lines] | max),
+               files_warn: ([$sized[] | select($L[.].lines >= $th.file_length_warn and $L[.].lines < $th.file_length_high)] | length),
+               files_high: ([$sized[] | select($L[.].lines >= $th.file_length_high)] | length),
+               status: ( [ $sized[] | band($L[.].lines; $th.file_length_warn; $th.file_length_high) ]
+                         | reduce .[] as $s ("PASS"; worst(.; $s)) ) }
+        end ) as $fls
+
+    | { module_id: $mid,
+        files: ($mf | length),
+        files_sized: ($sized | length),
+        loc: ( if ($sized | length) == 0 then null else ([$sized[] | $L[.].code] | add) end ),
+        complexity: $cx, function_length: $fl, duplication: $dp, file_length: $fls,
+        rollup_status: ( [$cx.status, $fl.status, $dp.status, $fls.status]
+                         | reduce .[] as $s (NM; worst(.; $s)) ) }
+    ) | sort_by(.module_id) ) as $modules
+
+# ── candidate hotspots at the registering severity ──────────────────────────
+| ( [ $FN[] | select(band(.ccn; $th.complexity_warn; $th.complexity_high) | rank >= ($th.register_severity | rank))
+        | {module_id: .module, file: .file, function: .function, metric: "complexity",
+           value: .ccn, severity: band(.ccn; $th.complexity_warn; $th.complexity_high)} ]
+  + [ $FN[] | select(band(.length; $th.function_length_warn; $th.function_length_high) | rank >= ($th.register_severity | rank))
+        | {module_id: .module, file: .file, function: .function, metric: "function_length",
+           value: .length, severity: band(.length; $th.function_length_warn; $th.function_length_high)} ]
+  + [ $L | to_entries[] | select(band(.value.lines; $th.file_length_warn; $th.file_length_high) | rank >= ($th.register_severity | rank))
+        | {module_id: ($M[.key] // "MOD-UNASSIGNED"), file: .key, function: null, metric: "file_length",
+           value: .value.lines, severity: band(.value.lines; $th.file_length_warn; $th.file_length_high)} ]
+  + [ $modules[] | select(.duplication.status != NM)
+        | select(.duplication.status | rank >= ($th.register_severity | rank))
+        | {module_id: .module_id, file: null, function: null, metric: "duplication",
+           value: .duplication.pct, severity: .duplication.status} ]
+  ) as $candidates
+
+# Identity key: what makes a hotspot THE SAME hotspot across runs. Never the
+# value (it moves) and never the position (it moves more). A renamed file is a
+# new hotspot plus a resolved old one — guessing a rename would silently carry a
+# QI onto code nobody checked.
+| ( $candidates | map(. + {key: ([.metric, (.file // ""), (.function // ""), .module_id] | join("|"))}) ) as $cand
+# A SET, not a list, and tested by key lookup. `inside`/`contains` compare
+# strings by SUBSTRING in jq, so a membership test written that way reports a key
+# as still live whenever any longer live key happens to contain it — and
+# "complexity|x||M" is a substring of nothing here only by luck. A missed
+# resolution is a hotspot the report claims is still open.
+| ( $cand | map({key: .key, value: true}) | from_entries ) as $liveSet
+| ( reduce ($cand | to_entries)[] as $e
+      ( {n: $nextQi, out: []};
+        ($P[$e.value.key]) as $known
+        | if $known then .out += [$e.value + {id: $known.id, first_seen: $known.first_seen, status: "open"}]
+          else .out += [$e.value + {id: ("QI-" + (.n | tostring | if length < 3 then ("00" + .)[-3:] else . end)),
+                                    first_seen: $at, status: "open"}] | .n += 1
+          end )
+    | .out ) as $openIssues
+# A hotspot that no longer exceeds its threshold is RESOLVED, never removed. Both
+# branches below cover the same set (every prior id whose key is no longer live);
+# they are kept separate only so a first-time resolution is distinguishable in the
+# reduce above from one that was already resolved on the previous run.
+#
+# `blank_to_null`, not `select(. != "")`: a `select` that fails inside an object
+# construction emits NOTHING, and an object one of whose values emitted nothing
+# vanishes in its entirety. That is what silently dropped every file-level
+# hotspot — their key carries an empty function field — so a resolved
+# file_length or duplication entry disappeared from the registry instead of
+# being marked resolved, which is exactly the deletion ID permanence forbids.
+| ( def blank_to_null: if . == "" then null else . end;
+    [ $P | to_entries[]
+        | select($liveSet[.key] | not)
+        | (.key | split("|")) as $k
+        | {id: .value.id, key: .key, first_seen: .value.first_seen, status: "resolved",
+           module_id: ($k[3] // "MOD-UNASSIGNED"),
+           file: ($k[1] | blank_to_null), function: ($k[2] | blank_to_null),
+           metric: $k[0], value: null, severity: null} ] ) as $resolved
+
+| { schema_version: 1,
+    generated_at: $at,
+    scope: $scope,
+    path: $path,
+    tool_availability: $tools,
+    tools_on_path: $toolsOnPath,
+    thresholds: $th,
+    module_map_status: $mapStatus,
+    files: { enumerated: $enumerated, classified: ($F | length),
+             sized: ($L | length), function_measured: ([$FN[] | .file] | unique | length),
+             duplication_measured: ($D | length),
+             module_ambiguous: $ambiguous },
+    coverage: $coverage,
+    modules: $modules,
+    quality_issues: (($openIssues + $resolved) | sort_by(.id)) }
+AGGJQ
+}
+
+# ─── main: collect ───────────────────────────────────────────────────────────
+
+cmd_collect() {
+  local specclaw_dir="" target_path="" is_target=false
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --target) is_target=true; shift ;;
+      -*) die "unknown flag for collect: $1" ;;
+      *)
+        if [ -z "$specclaw_dir" ]; then specclaw_dir="$1"
+        elif [ -z "$target_path" ]; then target_path="$1"
+        else die "collect takes at most <specclaw_dir> and [path]; got an extra argument '$1'."
+        fi
+        shift ;;
+    esac
+  done
+  [ -n "$specclaw_dir" ] || die "collect requires <specclaw_dir> (e.g. .specclaw)."
+  [ -d "$specclaw_dir" ] || die "no such specclaw directory: ${specclaw_dir} — run specclaw-ensure-init first."
+  command -v jq >/dev/null 2>&1 \
+    || die "jq is required by specclaw-bf-quality-collect (the metric tools' machine-readable output is nested JSON) but was not found on PATH."
+
+  local specclaw_abs project_root analysis_dir
+  specclaw_abs="$(cd "$specclaw_dir" && pwd)"
+  project_root="$(cd "$specclaw_abs/.." && pwd)"
+  analysis_dir="$specclaw_abs/analysis"
+  mkdir -p "$analysis_dir"
+
+  local scope_dir rel_scope
+  scope_dir="$(cd "${target_path:-$project_root}" 2>/dev/null && pwd)" \
+    || die "path does not exist or is not a directory: ${target_path}"
+  case "$scope_dir" in
+    "$specclaw_abs") die "path may not be the specclaw directory itself: ${target_path}" ;;
+    "$specclaw_abs"/*) die "path may not be nested inside the specclaw directory: ${target_path}" ;;
+  esac
+  case "$scope_dir" in
+    "$project_root") rel_scope="" ;;
+    "$project_root"/*) rel_scope="${scope_dir#"$project_root"/}" ;;
+    *) die "path must be inside the project root (${project_root}); got ${scope_dir}. A tree outside the repo has no enumerable file list and no module map to join to." ;;
+  esac
+  local scope_arg="${rel_scope:-.}"
+  local display_path="${rel_scope:-.}"
+
+  local scope_label out_json
+  if $is_target; then
+    scope_label="target"; out_json="$analysis_dir/quality-target.json"
+  else
+    scope_label="legacy"; out_json="$analysis_dir/quality.json"
+  fi
+
+  local W; W="$(mktemp -d)"
+  # shellcheck disable=SC2064  # expand $W now: the trap must survive any later unset
+  trap "rm -rf '$W'" EXIT
+
+  local thresholds; thresholds="$(load_thresholds "$project_root/.specclaw/config.yaml")"
+
+  local scc_ok=false lizard_ok=false jscpd_ok=false
+  have_tool scc    && scc_ok=true
+  have_tool lizard && lizard_ok=true
+  have_tool jscpd  && jscpd_ok=true
+
+  enumerate_files "$project_root" "$rel_scope" "$W/files.txt"
+
+  # files.tsv: relpath <TAB> language <TAB> scc_cap <TAB> lizard_cap <TAB> jscpd_cap
+  capability_table > "$W/cap.tsv"
+  # Longest-suffix match against the table, so a dotted filename resolves on its
+  # real extension rather than on its first dot. An extension the table does not
+  # carry is out of scope for every metric and is simply not emitted — counted as
+  # unclassified, never folded into a language it might be.
+  awk -F'\t' -v OFS='\t' '
+    NR == FNR { lang[$1] = $2; scap[$1] = $3; lcap[$1] = $4; jcap[$1] = $5; next }
+    {
+      f = $0
+      n = split(f, parts, "/")
+      base = tolower(parts[n])
+      chosen = ""
+      for (e in lang) {
+        le = length(e)
+        if (le < length(base) && substr(base, length(base) - le + 1) == e && le > length(chosen)) chosen = e
+      }
+      if (chosen == "") next
+      print f, lang[chosen], scap[chosen], lcap[chosen], jcap[chosen]
+    }
+  ' "$W/cap.tsv" "$W/files.txt" > "$W/files.tsv"
+
+  local n_enumerated n_classified
+  n_enumerated="$(wc -l < "$W/files.txt" | tr -d ' ')"
+  n_classified="$(wc -l < "$W/files.tsv" | tr -d ' ')"
+  cut -f1 "$W/files.tsv" > "$W/measurable.txt"
+
+  # ── run the tools ──────────────────────────────────────────────────────────
+  local scc_ran=false lizard_ran=false jscpd_ran=false
+  : > "$W/loc.tsv"; : > "$W/funcs.tsv"; : > "$W/dup.tsv"
+  if $scc_ok; then
+    if run_scc "$project_root" "$scope_arg" "$W/measurable.txt" "$W/loc.tsv"; then scc_ran=true
+    else warn "scc is on PATH but produced no parseable output — size metrics fall back to NOT-MEASURED (parse_error)."; fi
+  fi
+  if $lizard_ok; then
+    if run_lizard "$project_root" "$scope_arg" "$W/measurable.txt" "$W/funcs.tsv"; then lizard_ran=true
+    else warn "lizard is on PATH but produced no parseable rows — complexity falls back to NOT-MEASURED (parse_error)."; fi
+  fi
+  if $jscpd_ok; then
+    if run_jscpd "$project_root" "$scope_arg" "$W/measurable.txt" "$W/dup.tsv"; then jscpd_ran=true
+    else warn "jscpd is on PATH but produced no parseable report — duplication falls back to NOT-MEASURED (parse_error)."; fi
+  fi
+
+  # ── module join ────────────────────────────────────────────────────────────
+  local map_file="$analysis_dir/module-map.md" map_status
+  map_status="$(read_module_map_status "$map_file")"
+  parse_module_citations "$map_file" "$W/citations.tsv"
+  join_files_to_modules "$W/measurable.txt" "$W/citations.tsv" "$W/filemod.tsv" "$W/ambiguous.txt"
+  local n_ambiguous; n_ambiguous="$(wc -l < "$W/ambiguous.txt" | tr -d ' ')"
+
+  # ── prior QI registry, read BEFORE anything is written ─────────────────────
+  local reg; reg="$(qi_registry_path "$specclaw_abs")"
+  read_qi_registry "$reg" "$W/prior_qi.tsv"
+  local next_qi; next_qi="$(next_qi_num "$reg")"
+
+  local generated_at; generated_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+  # ── aggregate + classify (all verdicts computed here) ──────────────────────
+  tsv_json() {
+    jq -R -s 'split("\n") | map(sub("\r$";"")) | map(select(length > 0) | split("\t"))' "$1"
+  }
+  tsv_json "$W/files.tsv"   > "$W/files.json"
+  tsv_json "$W/loc.tsv"     > "$W/loc.json"
+  tsv_json "$W/funcs.tsv"   > "$W/funcs.json"
+  tsv_json "$W/dup.tsv"     > "$W/dup.json"
+  tsv_json "$W/filemod.tsv" > "$W/filemod.json"
+  tsv_json "$W/prior_qi.tsv" > "$W/prior_qi.json"
+
+  # The aggregation program goes to a file rather than through `jq -f /dev/stdin`:
+  # /dev/stdin resolves to /proc/self/fd/0 on some platforms and simply is not
+  # there, which fails the whole run with a message about a missing file rather
+  # than anything to do with quality.
+  write_agg_jq > "$W/agg.jq"
+
+  jq -n \
+    --argjson th "$thresholds" \
+    --argjson files    "$(cat "$W/files.json")" \
+    --argjson loc      "$(cat "$W/loc.json")" \
+    --argjson funcs    "$(cat "$W/funcs.json")" \
+    --argjson dup      "$(cat "$W/dup.json")" \
+    --argjson filemod  "$(cat "$W/filemod.json")" \
+    --argjson prior    "$(cat "$W/prior_qi.json")" \
+    --argjson tools "$(printf '{"scc":%s,"lizard":%s,"jscpd":%s}' "$scc_ran" "$lizard_ran" "$jscpd_ran")" \
+    --argjson toolsOnPath "$(printf '{"scc":%s,"lizard":%s,"jscpd":%s}' "$scc_ok" "$lizard_ok" "$jscpd_ok")" \
+    --arg scope "$scope_label" \
+    --arg path "$display_path" \
+    --arg at "$generated_at" \
+    --arg mapStatus "$map_status" \
+    --argjson nextQi "$next_qi" \
+    --argjson enumerated "$n_enumerated" \
+    --argjson ambiguous "$n_ambiguous" \
+    -f "$W/agg.jq" > "$W/quality.json"
+
+  # ── snapshot the prior artifact, then write (PD-08) ────────────────────────
+  if [ -f "$out_json" ]; then
+    mkdir -p "$analysis_dir/archive"
+    local stamp base archived
+    stamp="$(date +%Y-%m-%d-%H%M%S)"
+    base="$(basename "$out_json")"
+    archived="$analysis_dir/archive/${stamp}-${base}"
+    # The one mutation a superseded snapshot receives is the flag saying it IS
+    # superseded — so a reader who finds it cannot mistake it for current. Its
+    # measurements are untouched.
+    if jq --arg at "$generated_at" '. + {superseded: true, superseded_at: $at}' "$out_json" > "$archived" 2>/dev/null; then
+      rm -f "$out_json"
+    else
+      mv "$out_json" "$archived"
+      warn "prior $(basename "$out_json") was not valid JSON — archived verbatim, without the superseded flag."
+    fi
+    echo "Archived prior $(basename "$out_json") to ${archived#"$project_root"/}" >&2
+  fi
+  cp "$W/quality.json" "$out_json"
+
+  # ── write the QI registry (legacy scope only) ─────────────────────────────
+  #
+  # QI ids name legacy hotspots. A target-scope run measures the rebuild and
+  # registers nothing: minting an id there would put a rebuild hotspot into the
+  # legacy registry's permanent numbering, and no later run could tell the two
+  # apart.
+  local new_count=0 open_count=0 resolved_count=0
+  if $is_target; then
+    echo "Target scope: no QI registered (QI ids name legacy hotspots only)." >&2
+  else
+    write_qi_registry "$reg" "$W/quality.json" "$generated_at" "$display_path" "$project_root"
+    new_count="$(jq -r --arg at "$generated_at" '[.quality_issues[] | select(.status == "open" and .first_seen == $at)] | length' "$W/quality.json")"
+    open_count="$(jq -r '[.quality_issues[] | select(.status == "open")] | length' "$W/quality.json")"
+    resolved_count="$(jq -r '[.quality_issues[] | select(.status == "resolved")] | length' "$W/quality.json")"
+  fi
+
+  print_collect_summary "$W/quality.json" "$scope_label" "$display_path" \
+    "$new_count" "$open_count" "$resolved_count" "$n_enumerated" "$n_classified" "$n_ambiguous" "$map_status"
+
+  cat "$out_json"
+}
+
+# ─── QI registry writer ──────────────────────────────────────────────────────
+# ─── QI registry writer ──────────────────────────────────────────────────────
+#
+# One writer, and the document is rewritten in full each run — because every
+# entry's Status, Value and Last checked come from a fresh measurement, and a
+# stale Status here would be indistinguishable from a hotspot nobody got round
+# to. That is safe only because of the invariant the projection guarantees: the
+# JSON it renders from contains an entry for every key the PRIOR registry held,
+# plus one per newly-found hotspot. No id can be lost, so the id space only ever
+# grows. See templates/quality-issues.md for the full contract.
+write_qi_registry() {
+  local reg="$1" qjson="$2" at="$3" path="$4" project_root="$5"
+  mkdir -p "$(dirname "$reg")"
+  local tmp entries template_file
+  tmp="$(mktemp)"
+
+  entries="$(jq -r '
+    .quality_issues[]
+    | "### " + .id + "\n"
+      + "\n"
+      + "- **Key:** " + .key + "\n"
+      + "- **Module:** " + .module_id + "\n"
+      + "- **File:** " + (.file // "—") + "\n"
+      + "- **Function:** " + (.function // "—") + "\n"
+      + "- **Metric:** " + .metric + "\n"
+      + "- **Value:** " + (if .value == null then "—" else (.value | tostring) end) + "\n"
+      + "- **Severity:** " + (.severity // "—") + "\n"
+      + "- **Status:** " + .status + "\n"
+      + "- **First seen:** " + .first_seen + "\n"
+      + "- **Last checked:** " + $at
+  ' --arg at "$at" "$qjson")"
+  [ -n "$entries" ] || entries="_No hotspot has ever reached the registering severity band for this codebase._"
+
+  template_file="$SCRIPT_DIR/../templates/quality-issues.md"
+  [ -f "$template_file" ] || die "Template missing: ${template_file}"
+  local doc
+  doc="$(cat "$template_file")"
+  doc="$(substitute "$doc" '{{title}}' "$(project_title "$project_root")")"
+  doc="$(substitute "$doc" '{{path}}' "$path")"
+  doc="$(substitute "$doc" '{{date}}' "$at")"
+  doc="$(substitute "$doc" '{{quality_issues}}' "$entries")"
+  printf '%s\n' "$doc" > "$tmp"
+
+  mv "$tmp" "$reg"
+}
+
+# ─── raw-output summary ──────────────────────────────────────────────────────
+
+print_collect_summary() {
+  local qjson="$1" scope="$2" path="$3" newc="$4" openc="$5" resc="$6"
+  local enumerated="$7" classified="$8" ambiguous="$9" map_status="${10}"
+
+  {
+    echo "specclaw-bf-quality-collect: scope=${scope} path=${path}"
+    jq -r '
+      "  tools:        scc=" + (if .tool_availability.scc then "ran" elif .tools_on_path.scc then "present-but-unparseable" else "MISSING" end)
+        + " lizard=" + (if .tool_availability.lizard then "ran" elif .tools_on_path.lizard then "present-but-unparseable" else "MISSING" end)
+        + " jscpd=" + (if .tool_availability.jscpd then "ran" elif .tools_on_path.jscpd then "present-but-unparseable" else "MISSING" end)
+    ' "$qjson"
+    echo "  files:        ${enumerated} enumerated, ${classified} of a known language"
+    jq -r '
+      "                " + (.files.sized | tostring) + " sized, "
+        + (.files.function_measured | tostring) + " function-measured, "
+        + (.files.duplication_measured | tostring) + " duplication-measured"
+    ' "$qjson"
+    jq -r '
+      [ .coverage[] | select((.metrics_not_measured | length) > 0)
+        | .language as $l | .files as $n
+        | .metrics_not_measured[] | "  not measured: " + .metric + " — " + ($n | tostring) + " " + $l + " file(s) (" + .reason + ")" ]
+      | if length == 0 then "  not measured: nothing — every metric was computed for every classified file" else .[] end
+    ' "$qjson"
+    jq -r '
+      .modules as $m
+      | "  modules:      " + ($m | length | tostring) + " ("
+        + ([ "HIGH", "WARN", "PASS", "NOT-MEASURED" ]
+           | map(. as $s | ($s + " " + ([ $m[] | select(.rollup_status == $s) ] | length | tostring)))
+           | join(", ")) + ")"
+    ' "$qjson"
+    jq -r '
+      [ .modules[] | select(.module_id == "MOD-UNASSIGNED") | .files ]
+      | if length == 0 then "  unassigned:   0 file(s) under MOD-UNASSIGNED"
+        else "  unassigned:   " + (.[0] | tostring) + " file(s) under MOD-UNASSIGNED" end
+    ' "$qjson"
+    echo "                module-map.md: ${map_status}; ${ambiguous} file(s) cited by more than one module (left unassigned, never guessed)"
+    if [ "$scope" = "legacy" ]; then
+      echo "  quality issues: ${newc} new, ${openc} open, ${resc} resolved"
+    fi
+    echo "  advisory: this run blocks nothing and exits 0. The only enforcing path is 'compare --gate'."
+  } >&2
+}
+
+# ─── main: compare ───────────────────────────────────────────────────────────
+
+cmd_compare() {
+  local specclaw_dir="" gate=false
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --gate) gate=true; shift ;;
+      -*) die "unknown flag for compare: $1" ;;
+      *)
+        if [ -z "$specclaw_dir" ]; then specclaw_dir="$1"
+        else die "compare takes only <specclaw_dir>; got an extra argument '$1'."
+        fi
+        shift ;;
+    esac
+  done
+  [ -n "$specclaw_dir" ] || die "compare requires <specclaw_dir> (e.g. .specclaw)."
+  [ -d "$specclaw_dir" ] || die "no such specclaw directory: ${specclaw_dir}"
+  command -v jq >/dev/null 2>&1 || die "jq is required by specclaw-bf-quality-collect but was not found on PATH."
+
+  local specclaw_abs analysis_dir
+  specclaw_abs="$(cd "$specclaw_dir" && pwd)"
+  analysis_dir="$specclaw_abs/analysis"
+  local legacy="$analysis_dir/quality.json" target="$analysis_dir/quality-target.json"
+
+  local missing=""
+  [ -f "$legacy" ] || missing="${missing}  ${legacy#"$specclaw_abs"/} — run /specclaw:bf-quality first
+"
+  [ -f "$target" ] || missing="${missing}  ${target#"$specclaw_abs"/} — run /specclaw:bf-quality --target <path> first
+"
+  [ -z "$missing" ] || die "compare needs both quality snapshots and is missing:
+${missing}Nothing was compared. A one-sided comparison would report every unmeasured dimension as a change."
+
+  local out="$analysis_dir/quality-delta.json"
+  local generated_at; generated_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+  jq -n --slurpfile L "$legacy" --slurpfile T "$target" --arg at "$generated_at" '
+    def NM: "NOT-MEASURED";
+    def rank: {"NOT-MEASURED": -1, "PASS": 0, "WARN": 1, "HIGH": 2}[.] // -1;
+    ($L[0]) as $l | ($T[0]) as $t
+    | ($l.modules | map({key: .module_id, value: .}) | from_entries) as $lm
+    | ($t.modules | map({key: .module_id, value: .}) | from_entries) as $tm
+    | ["complexity", "function_length", "duplication", "file_length"] as $dims
+    | ( ($lm | keys) + ($tm | keys) | unique ) as $mids
+    | ( [ $mids[] as $mid
+          | $dims[] as $d
+          | ($lm[$mid][$d].status // NM) as $ls
+          | ($tm[$mid][$d].status // NM) as $ts
+          | { module_id: $mid, metric: $d,
+              legacy_status: $ls, target_status: $ts,
+              legacy_present: ($lm[$mid] != null), target_present: ($tm[$mid] != null),
+              # A dimension measured on only one side is NOT-COMPARABLE and is
+              # never reported as a change. Calling an unmeasured legacy
+              # dimension an "improvement" because the target measured it is the
+              # single most flattering lie this command could tell.
+              classification: (
+                if ($ls | rank) < 0 or ($ts | rank) < 0 then "NOT-COMPARABLE"
+                elif ($ts | rank) > ($ls | rank) then "regressed"
+                elif ($ts | rank) < ($ls | rank) then "improved"
+                else "unchanged" end ) } ] ) as $deltas
+    | ( [ $deltas[] | select(.classification == "regressed") ] ) as $regressions
+    | { schema_version: 1, generated_at: $at,
+        legacy: {generated_at: $l.generated_at, path: $l.path, tool_availability: $l.tool_availability},
+        target: {generated_at: $t.generated_at, path: $t.path, tool_availability: $t.tool_availability},
+        thresholds: $l.thresholds,
+        thresholds_match: ($l.thresholds == $t.thresholds),
+        modules_legacy_only: [ $mids[] | select($lm[.] != null and $tm[.] == null) ],
+        modules_target_only: [ $mids[] | select($tm[.] != null and $lm[.] == null) ],
+        summary: { improved: ([$deltas[] | select(.classification == "improved")] | length),
+                   unchanged: ([$deltas[] | select(.classification == "unchanged")] | length),
+                   regressed: ($regressions | length),
+                   not_comparable: ([$deltas[] | select(.classification == "NOT-COMPARABLE")] | length) },
+        deltas: $deltas,
+        regressions: $regressions,
+        gate: { verdict: (if ($regressions | length) == 0 then "PASS" else "FAIL" end),
+                regression_count: ($regressions | length) } }
+  ' > "$out"
+
+  {
+    echo "specclaw-bf-quality-collect: compare"
+    jq -r '
+      "  legacy: " + .legacy.path + " @ " + .legacy.generated_at + "\n" +
+      "  target: " + .target.path + " @ " + .target.generated_at + "\n" +
+      "  module-metric dimensions: " + (.summary.improved | tostring) + " improved, "
+        + (.summary.unchanged | tostring) + " unchanged, "
+        + (.summary.regressed | tostring) + " regressed, "
+        + (.summary.not_comparable | tostring) + " NOT-COMPARABLE"
+    ' "$out"
+    jq -r 'if .thresholds_match then empty else "  WARN: the two snapshots were classified against DIFFERENT thresholds — every status comparison below is between two different questions." end' "$out"
+    jq -r 'if (.modules_legacy_only | length) > 0 then "  legacy-only modules (nothing to compare): " + (.modules_legacy_only | join(", ")) else empty end' "$out"
+    jq -r 'if (.modules_target_only | length) > 0 then "  target-only modules (nothing to compare): " + (.modules_target_only | join(", ")) else empty end' "$out"
+    jq -r '.regressions[] | "  REGRESSED: " + .module_id + " " + .metric + " " + .legacy_status + " -> " + .target_status' "$out"
+    echo "  wrote ${out}"
+  } >&2
+
+  if $gate; then
+    local verdict count
+    verdict="$(jq -r '.gate.verdict' "$out")"
+    count="$(jq -r '.gate.regression_count' "$out")"
+    if [ "$verdict" = "PASS" ]; then
+      echo "QUALITY-GATE: PASS"
+      return 0
+    fi
+    echo "QUALITY-GATE: FAIL (${count} regressions)"
+    return 1
+  fi
+  return 0
+}
+
+# ─── dispatch ────────────────────────────────────────────────────────────────
+
+usage() {
+  cat >&2 <<'USAGE'
+Usage:
+  specclaw-bf-quality-collect collect <specclaw_dir> [path] [--target]
+  specclaw-bf-quality-collect compare <specclaw_dir> [--gate]
+USAGE
+  exit 2
+}
+
+[ $# -gt 0 ] || usage
+sub="$1"; shift
+case "$sub" in
+  collect) cmd_collect "$@" ;;
+  compare) cmd_compare "$@" ;;
+  -h|--help|help) usage ;;
+  *) die "unknown subcommand '${sub}'. Expected 'collect' or 'compare'." ;;
+esac
