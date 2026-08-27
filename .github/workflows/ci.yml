@@ -39,6 +39,8 @@ jobs:
         run: bash plugins/specclaw/tests/run-blueprint-tests.sh
       - name: Run C#/Pascal validation-body parser tests
         run: bash plugins/specclaw/tests/run-cs-body-parser-tests.sh
+      - name: Run bf-status dashboard tests
+        run: bash plugins/specclaw/tests/run-bf-status-tests.sh
 
   shellcheck:
     name: ShellCheck bin scripts

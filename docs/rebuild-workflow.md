@@ -239,6 +239,14 @@ stands: items planned, scenarios captured, latest module-scoped replay verdict,
 open questions. It is a status view — no number in it says a module is *done*,
 because specclaw records no built state for a backlog item.
 
+`/specclaw:bf-status` is the other half of that picture, and answers the
+question the per-module table cannot: **which of these commands have I actually
+run, and what comes next.** One row per `bf-*` phase, every open item holding a
+phase back, and a single recommended next command. It writes nothing at all and
+runs in a second, so it is the cheapest way to pick a rebuild back up after a
+break or hand it to someone else. Where `module-status.md` asks "how far along
+is MOD-002", this asks "where is the rebuild".
+
 ## Step 4d — Bootstrap the target foundation (in the NEW repo)
 
 **This step runs once per rebuild repo, after the Phase B copy set (Step 6) is
