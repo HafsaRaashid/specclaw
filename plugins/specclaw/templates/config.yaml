@@ -152,6 +152,35 @@ pr:
                     # e2e   — requires e2e test evidence in verify-report + build.test_command set
                     # both  — requires unit + e2e evidence
 
+# Code quality thresholds (optional — /specclaw:bf-quality only)
+#
+# The ONLY place these numbers live. The collector holds the same values as its
+# documented defaults and reads nothing else, so a policy change is a config
+# edit rather than a code edit — and any status in a quality report can be
+# checked against the block that produced it.
+#
+# A metric no available tool can compute for a language is reported as
+# NOT-MEASURED with a reason, never estimated, so raising a threshold never
+# manufactures coverage. Nothing here gates anything: quality runs are advisory
+# unless invoked as `--compare --gate`.
+quality:
+  complexity_warn: 10          # cyclomatic complexity per function
+  complexity_high: 20
+  function_length_warn: 60     # lines per function
+  function_length_high: 120
+  duplication_warn: 5          # percent duplicated lines, per module
+  duplication_high: 15
+  file_length_warn: 500        # lines per file
+  file_length_high: 1000
+
+  # Which severity band earns a permanent QI-### id. HIGH | WARN.
+  # HIGH by default and deliberately: QI ids are permanent and entries are never
+  # deleted, so registering every WARN on a large legacy tree accumulates
+  # thousands of rows that outlive the code they describe. WARN findings are
+  # still counted in every module rollup — they are just not individually
+  # immortalised.
+  register_severity: HIGH
+
 # Plugin housekeeping
 plugin:
   update_check: true   # /specclaw:status checks the plugin repo for a newer published

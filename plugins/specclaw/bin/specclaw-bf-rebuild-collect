@@ -2371,6 +2371,33 @@ ${draft_coverage}"
   # does not replace them with a coarser unit. An agent declares what it
   # covered; bash counts. When no line matches the grammar the rollup says so
   # rather than reporting a confident 0/0 that reads as "nothing to cover."
+  # ── Optional quality annotation ───────────────────────────────────────────
+  #
+  # /specclaw:bf-quality is entirely optional and nothing here requires it. When
+  # .specclaw/analysis/quality.json happens to exist, each module's rollup line
+  # gains its measured quality status and open-hotspot count, because "this
+  # module has 12 capability bullets covered" and "this module is the worst-
+  # measured code in the tree" are the two facts you want side by side when
+  # deciding what to rebuild next.
+  #
+  # ABSENT FILE MEANS EMPTY SUFFIX, so a project that never runs that command
+  # gets byte-identical output to a run predating this hook. That is the whole
+  # contract of the annotation and it is what the regression suite asserts.
+  # Every failure mode degrades to the same empty string: no file, no jq, a
+  # module the snapshot never measured, unreadable JSON.
+  local quality_json="$analysis_dir/quality.json"
+  quality_suffix_for() {
+    local mid="$1"
+    [ -f "$quality_json" ] || return 0
+    command -v jq >/dev/null 2>&1 || return 0
+    jq -r --arg m "$mid" '
+      (.modules[]? | select(.module_id == $m)) as $mod
+      | "; quality " + $mod.rollup_status
+        + " (" + ([.quality_issues[]? | select(.module_id == $m and .status == "open")] | length | tostring)
+        + " open QI)"
+    ' "$quality_json" 2>/dev/null || true
+  }
+
   local rollup_lines="" rollup_any=false
   printf '%s\n' "$coverage_check" > "$workdir/cov.tmp"
   for m in $mod_order; do
@@ -2380,10 +2407,20 @@ ${draft_coverage}"
     cov_excl=$(grep -E "^- \*\*${m}\*\*[[:space:]]" "$workdir/cov.tmp" 2>/dev/null | grep -c '→ EXCLUDED:' || true)
     cov_orph=$(grep -E "^- \*\*${m}\*\*[[:space:]]" "$workdir/cov.tmp" 2>/dev/null | grep -c '→ ORPHAN' || true)
     [ "$cov_total" -gt 0 ] && rollup_any=true
-    rollup_lines="${rollup_lines}- **${m} — ${MOD_NAME[$m]}:** ${cov_bl}/${cov_total} capability bullets covered; ${cov_excl} excluded; ${cov_orph} orphaned
+    rollup_lines="${rollup_lines}- **${m} — ${MOD_NAME[$m]}:** ${cov_bl}/${cov_total} capability bullets covered; ${cov_excl} excluded; ${cov_orph} orphaned$(quality_suffix_for "$m")
 "
   done
   rm -f "$workdir/cov.tmp"
+
+  local quality_note=""
+  if [ -f "$quality_json" ] && command -v jq >/dev/null 2>&1; then
+    local high_mods
+    high_mods="$(jq -r '[.modules[]? | select(.rollup_status == "HIGH") | .module_id] | join(", ")' "$quality_json" 2>/dev/null || true)"
+    if [ -n "$high_mods" ]; then
+      quality_note="
+Modules measured HIGH on at least one code-quality dimension warrant extra rebuild attention — their legacy implementation is the hardest to read, so it is the easiest to reproduce a bug from or to under-scope: ${high_mods}."
+    fi
+  fi
   if $rollup_any; then
     coverage_check="${coverage_check}
 
@@ -2391,7 +2428,7 @@ ${draft_coverage}"
 
 _Bash-computed by counting the per-module capability-coverage lines above. Bullet granularity is unchanged — every bullet is still accounted for individually; this only rolls those counts up per module._
 
-${rollup_lines}"
+${rollup_lines}${quality_note}"
   else
     coverage_check="${coverage_check}
 

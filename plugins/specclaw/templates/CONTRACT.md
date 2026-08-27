@@ -204,8 +204,8 @@ Each `fixtures[]` entry carries:
 `MOD-NNN` (modules), `GM-NNN` (scenarios), `DR-NNN` (business rules),
 `CQ-NNN`/`SQ-NNN`/`UQ-NNN` (clarify questions), `BL-NNN` (backlog items),
 `ST-NNN` (dependency-bypass stubs, section (m)), `IS-NNN` (item splits,
-section (o)) are permanent once assigned — never renumbered, never
-reformatted, across any regeneration or archive cycle.
+section (o)), `QI-NNN` (code-quality hotspots) are permanent once assigned —
+never renumbered, never reformatted, across any regeneration or archive cycle.
 
 `ST-NNN` and `IS-NNN` carry the same carve-out from the rest of this section:
 their documents (`module-stubs.md`, `item-splits.md`) are **append/update-in-
@@ -214,6 +214,25 @@ place and are never archived**, on the same terms as `pending-questions.md` and
 or completing a split updates that entry's own `Status` line and leaves the
 entry in place, because the record that an item was built out of order, or
 built in halves, is the finding, and it outlives the stub or the split.
+
+`QI-NNN` (code-quality hotspots, `templates/quality-issues.md`, produced by the
+optional `/specclaw:bf-quality`) takes that same carve-out, for the same reason
+and with one addition. Its registry is never archived while the `quality.json`
+snapshot beside it *is* archived on every run — which is precisely why the
+registry is a separate document rather than a section of the snapshot: an id
+space that gets rotated with the evidence it labels is the silent re-pointing
+this section exists to prevent. A hotspot that no longer exceeds its threshold
+has its `Status` flipped to `resolved` and keeps its id and `First seen` date
+permanently; it never becomes a tombstone and is never removed, because "this
+used to be a hotspot" is what makes a module somebody cleaned up
+distinguishable from one that was never bad. Identity is the entry's declared
+`Key` (`metric|file|function|module`), never the measured value — values move
+on every commit, and keying on one would mint a fresh id per run and make two
+reports months apart incomparable, which is the only thing a permanent id is
+for. A renamed file therefore yields a new `QI-NNN` plus a resolved old one:
+inferring the rename would carry an id, and its whole history, onto code nobody
+measured. Unlike every other id in this section, nothing reads a `QI-NNN` and
+no command's behaviour changes because of one — it is a record, not a gate.
 
 An id that no longer describes anything becomes a **tombstone** rather than
 disappearing (`### MOD-004 — WITHDRAWN <date>, superseded by MOD-002`, and the
