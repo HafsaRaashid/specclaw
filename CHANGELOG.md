@@ -4,24 +4,6 @@ All notable changes to specclaw are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.14.2] — 2026-08-27
-
-### Added
-- **`/specclaw:bf-status` — a per-phase dashboard for the brownfield workstream.**
-  `/specclaw:status` covers the propose → plan → build → verify lifecycle only;
-  nothing previously answered "where does this rebuild actually stand" without
-  listing `.specclaw/` and already knowing what each file means. This computes
-  it: one row per `bf-*` phase (analyze, architecture, domain, clarify, ui,
-  baseline, rebuild-plan, blueprint, bootstrap, replay), read strictly from
-  that phase's own declared artifact, plus every open item holding a phase
-  back and a single recommended next command.
-
-  It writes nothing — no file, no cache, no archive entry — so it needs none
-  of the archive-then-replace discipline every other `.specclaw/` document
-  follows. The replay row reports the latest verdict **per target**, not the
-  latest run overall, so an older `FAIL` on one change can't hide behind a
-  newer `PASS` on an unrelated module.
-
 ## [0.14.0] — 2026-08-19
 
 ### Added
