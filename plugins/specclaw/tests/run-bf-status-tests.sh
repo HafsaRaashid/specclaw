@@ -332,9 +332,13 @@ printf '{"not_applicable":null,"foundation_ready":true,"stack":{"api":"Go"}}\n' 
 seed_run "$R" "replay/evidence" "20260820-101500" "MOD-001" "PASS" "2026-08-20" "false"
 
 # An empty PATH entry ahead of the real one is not enough — hide jq by
-# restricting PATH to the core utility directories it is not installed in.
-NOJQ_OUT="$(env PATH="/usr/bin:/bin" bash "$STATUS_BIN" "$R/.specclaw" 2>&1)"; NOJQ_RC=$?
-if env PATH="/usr/bin:/bin" command -v jq >/dev/null 2>&1; then
+# stripping whichever directory it actually resolves from (on most Linux
+# distros, including GitHub Actions runners, that IS /usr/bin — so a fixed
+# "/usr/bin:/bin" allowlist does not hide it there).
+JQ_DIR="$(command -v jq >/dev/null 2>&1 && dirname "$(command -v jq)" || true)"
+NOJQ_PATH="$(printf '%s' "$PATH" | tr ':' '\n' | grep -vFx "$JQ_DIR" | paste -sd: -)"
+NOJQ_OUT="$(env PATH="$NOJQ_PATH" bash "$STATUS_BIN" "$R/.specclaw" 2>&1)"; NOJQ_RC=$?
+if env PATH="$NOJQ_PATH" bash -c 'command -v jq' >/dev/null 2>&1; then
   echo "  (skipped — jq is on the restricted PATH too, cannot simulate its absence)"
 else
   assert_eq "0" "$NOJQ_RC" "exits 0 with no jq"
