@@ -1310,6 +1310,19 @@ cmd_render() {
           { print }
         ' | strip_trailing_separator)"
       fi
+      # LEADING BLANK LINES ARE DROPPED (the `sed '/./,$!d'` below, the same
+      # idiom the Sequencing/Coverage reads use), and that fixes a real,
+      # unbounded drift rather than tidying whitespace.
+      #
+      # render writes an item as "heading, blank, body". `tail -n +2` therefore
+      # hands this parse a body whose FIRST line is that blank, the next render
+      # prepends its own, and the item grows one blank line under its heading on
+      # every single --refresh, forever. Four refreshes, four blank lines. It is
+      # invisible in review and it never stops.
+      #
+      # The blank between heading and body belongs to the RENDERER, so the body
+      # must not carry a copy of it. The same strip is applied on the draft path
+      # for the same reason, so a first render and every refresh after it agree.
       # Static head = every line except the heading itself, the two fields
       # bash recomputes from scratch every run (Gate:/Verification:), and
       # the Deferred status marker/Status-notes tail (handled separately
@@ -1360,7 +1373,7 @@ cmd_render() {
         /^\*\*Settled constraints/ { skip=0 }
         skip { next }
         { print }
-      ' | strip_trailing_separator)"
+      ' | sed '/./,$!d' | strip_trailing_separator)"
       EXIST_TAIL[$id]="$(awk '
         /^\*\*Status notes \(human-added\):\*\*/ { intail=1 }
         intail { print }
@@ -1604,7 +1617,7 @@ cmd_render() {
     [ -n "${STRIKE_REASON[$id]:-}" ] && continue
     [ -n "${DEFER_REASON[$id]:-}" ] && continue
     FINAL_TITLE[$id]="$(block_title_after_dash "$f")"
-    FINAL_BODY[$id]="$(tail -n +2 "$f" | strip_trailing_separator)"
+    FINAL_BODY[$id]="$(tail -n +2 "$f" | sed '/./,$!d' | strip_trailing_separator)"
     if [[ " ${existing_ids} " == *" ${id} "* ]]; then
       FINAL_TAIL[$id]="${EXIST_TAIL[$id]:-}"
       revised_ids="${revised_ids} ${id}"

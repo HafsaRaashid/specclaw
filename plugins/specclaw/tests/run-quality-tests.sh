@@ -1113,33 +1113,34 @@ fi
 assert_eq "13c2 and the remediation ids are unchanged across both runs" "BL-004 BL-005" \
   "$(grep -B4 '^\*\*Item type:\*\* QUALITY-REMEDIATION' "$(qr_backlog "$QRC")" | grep -oE 'BL-[0-9]{3}' | paste -sd' ' -)"
 
-# The rest of the Backlog section is unchanged too, once runs of blank lines are
-# collapsed — no item appears, disappears, or changes a field.
-if [[ "$(printf '%s' "$qrc_one" | cat -s)" == "$(printf '%s' "$qrc_two" | cat -s)" ]]; then
-  pass "13c3 and nothing else in the Backlog section changes"
+# And the whole Backlog section is byte-identical — no item appears, disappears,
+# changes a field, or gains a line. Strict equality, no whitespace normalization:
+# see 13c4 for why that is now assertable.
+if [[ -n "$qrc_one" && "$qrc_one" == "$qrc_two" ]]; then
+  pass "13c3 and the whole Backlog section is byte-identical between the two runs"
 else
-  fail "13c3 and nothing else in the Backlog section changes ($(diff <(printf '%s' "$qrc_one" | cat -s) <(printf '%s' "$qrc_two" | cat -s) | head -c 300))"
+  fail "13c3 and the whole Backlog section is byte-identical between the two runs ($(diff <(printf '%s' "$qrc_one") <(printf '%s' "$qrc_two") | head -c 300))"
 fi
 
-# 13c4 DOCUMENTS A PRE-EXISTING DEFECT, deliberately, rather than leaving it to
-# be rediscovered as a mystery diff. Every refresh adds one blank line under each
-# PRESERVED item's heading: render writes "heading, blank, body", the next run's
-# EXIST_STATIC parse keeps that blank as the body's first line, and the run after
-# that prepends another. It is unbounded, it predates this change (the collector
-# on main does it identically, with and without quality.json), and it is left
-# alone here because fixing it rewrites the whitespace of every existing
-# project's backlog — a behavioural change that deserves its own decision rather
-# than a ride-along on this one.
+# 13c4 GUARDS A FIXED DEFECT. render writes an item as "heading, blank, body", so
+# the parse that reads a preserved item back handed the body that blank as its
+# own first line — and the next render prepended another. Every --refresh added
+# one blank line under every preserved item's heading, without bound and without
+# ever being visible in review. Four refreshes, four blank lines.
 #
-# Remediation items are IMMUNE, which is what 13c above asserts: their bodies are
-# regenerated from quality.json every run and never parsed back out of the
-# document, so there is nothing for a stray blank line to accumulate in.
-qrc_pre_blanks="$(qr_block "$(qr_backlog "$QRC")" BL-001 | sed -n '1,4p' | grep -c '^$')"
-qrc_rem_blanks="$(qr_block "$(qr_backlog "$QRC")" BL-004 | sed -n '1,4p' | grep -c '^$')"
-if [[ "$qrc_pre_blanks" -gt "$qrc_rem_blanks" ]]; then
-  pass "13c4 (documents a pre-existing defect) preserved items accumulate a blank line per refresh; regenerated remediation items do not"
+# Leading blanks are now stripped on both the preserved and the draft path, so a
+# first render and every refresh after it agree. This asserts the invariant
+# directly rather than only through 13c3's equality, so a regression names the
+# cause instead of printing a whitespace diff.
+qrc_drift_ok=true
+for qrc_id in BL-001 BL-002 BL-003 BL-004 BL-005; do
+  qrc_n="$(qr_block "$(qr_backlog "$QRC")" "$qrc_id" | sed -n '1,4p' | grep -c '^$')"
+  [[ "$qrc_n" -le 1 ]] || { qrc_drift_ok=false; qrc_bad="${qrc_id} has ${qrc_n}"; }
+done
+if $qrc_drift_ok; then
+  pass "13c4 no item accumulates blank lines under its heading across refreshes"
 else
-  fail "13c4 (documents a pre-existing defect) expected preserved-item blank drift to exceed the remediation item's (got $qrc_pre_blanks vs $qrc_rem_blanks)"
+  fail "13c4 no item accumulates blank lines under its heading across refreshes (${qrc_bad})"
 fi
 
 # ── 13d — a newly measured hotspot APPENDS to the module's existing item ─────
