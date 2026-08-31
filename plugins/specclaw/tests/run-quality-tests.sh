@@ -41,6 +41,12 @@
 #                                   is left unassigned, never guessed
 #  10  client-safe template       → the report template body carries no internal
 #                                   command name outside the provenance section
+#  11  ARG_MAX regression          → a >2 MB joined file list does not overflow
+#                                   argv; collector exits 0 (the fixed --slurpfile
+#                                   path); pre-fix binary shown to fail (informational)
+#  12  spaces / unicode paths      → filenames with spaces and non-ASCII survive
+#                                   enumeration, classification, the scc join and
+#                                   the module join, and register hotspots intact
 #
 # Plain bash + coreutils, plus jq for assertions (same as run-parser-tests.sh
 # and run-cs-body-parser-tests.sh). Run from anywhere:
@@ -745,6 +751,143 @@ else
   fail "10c the quality agent prompt exists"
   fail "10d the agent is granted Read and Write only"
 fi
+
+# ── Case 11 — the ARG_MAX regression: a file list too big for argv ────────────
+#
+# The bug: the aggregation step passed each per-file JSON array as
+# `--argjson X "$(cat X.json)"`. Those arrays carry one element per source file,
+# so on a large repo the substitution put multiple megabytes into a single argv
+# slot and the run died with "Argument list too long" (E2BIG) before jq started
+# — a single argument over MAX_ARG_STRLEN (128 KiB on Linux) is enough to trip
+# it, well below the total ARG_MAX. The fix reads those files with --slurpfile,
+# off argv entirely. This case builds a tree whose joined path list is over 2 MB
+# and requires the collector to complete with exit 0.
+#
+# Metric tools are deliberately ABSENT here: the file list is built from the
+# extension classification, independent of any tool, so the argv pressure is
+# reproduced without invoking scc/lizard/jscpd across thousands of files (which
+# would make the case slow without testing anything new). loc/funcs/dup come
+# back empty; files.json and filemod.json are what get large.
+
+echo "--- Case 11: a >2 MB joined file list does not overflow argv (ARG_MAX) ---"
+C11="$WORK/c11"
+mkdir -p "$C11/.specclaw/analysis"
+# Long nested paths: a handful of long-named directories, each holding many
+# long-named files, reaches >2 MB of path text with far fewer inodes than flat
+# files would — so the case stays fast while genuinely exceeding the threshold.
+DIRPAD="dir_$(printf 'd%.0s' $(seq 1 96))"          # ~100-char directory names
+FILEPAD="$(printf 'f%.0s' $(seq 1 196))"            # ~200-char file stems
+mkdir -p "$C11/src"
+n_created=0
+for d in $(seq 1 10); do
+  sub="$C11/src/${DIRPAD}_${d}"
+  mkdir -p "$sub"
+  for i in $(seq 1 800); do
+    printf 'class C{}' > "$sub/${FILEPAD}_${i}.cs"
+    n_created=$((n_created + 1))
+  done
+done
+# No module-map: every file rolls up under MOD-UNASSIGNED, which is fine — the
+# point is the size of the list, not the join.
+list_bytes="$(find "$C11/src" -type f -name '*.cs' | wc -c | tr -d ' ')"
+if [[ "$list_bytes" -gt 2097152 ]]; then
+  pass "11a the generated path list exceeds 2 MB (${list_bytes} bytes across ${n_created} files)"
+else
+  fail "11a the generated path list exceeds 2 MB (only ${list_bytes} bytes) — case would not exercise the bug"
+fi
+
+# The regression itself: the FIXED collector must complete cleanly.
+c11_out="$( cd "$C11" && PATH="$(clean_path "$WORK/empty-stub")" bash "$QUALITY_BIN" collect .specclaw 2>/dev/null )"
+c11_exit=$?
+assert_eq "11b collect exits 0 on a >2 MB file list" "0" "$c11_exit"
+if [[ -n "$c11_out" ]]; then
+  c11_classified="$(printf '%s' "$c11_out" | jq -r '.files.classified')"
+  assert_eq "11c every generated .cs file was classified and measured" "$n_created" "$c11_classified"
+else
+  fail "11c every generated .cs file was classified and measured (collector produced no JSON)"
+fi
+
+# Belt and braces: prove the PRE-fix code actually failed on this same tree, so
+# the case is known to exercise the bug rather than passing vacuously. This is
+# informational — some platforms (notably MSYS2) raise the single-arg limit, so
+# a clean pre-run is reported, not asserted.
+PRE_COLLECT="$WORK/pre-collect"
+if git -C "$SCRIPT_DIR" show "feat/bf-quality:plugins/specclaw/bin/specclaw-bf-quality-collect" > "$PRE_COLLECT" 2>/dev/null && [[ -s "$PRE_COLLECT" ]]; then
+  ( cd "$C11" && PATH="$(clean_path "$WORK/empty-stub")" bash "$PRE_COLLECT" collect .specclaw >/dev/null 2>&1 )
+  pre_exit=$?
+  if [[ "$pre_exit" -ne 0 ]]; then
+    pass "11d (informational) the pre-fix collector failed on this tree (exit ${pre_exit}), confirming the case bites"
+  else
+    echo "NOTE: 11d the pre-fix collector did NOT fail here (exit 0) — this platform's single-arg limit is above the list size; the fix is still exercised by 11b."
+    PASS=$((PASS + 1))
+  fi
+else
+  echo "NOTE: 11d pre-fix binary not retrievable (feat/bf-quality not present) — skipping the informational pre-run."
+  PASS=$((PASS + 1))
+fi
+
+# ── Case 12 — paths with spaces and unicode are measured, not mangled ─────────
+
+echo "--- Case 12: filenames with spaces and unicode survive the whole pipeline ---"
+C12="$WORK/c12"
+mkdir -p "$C12/.specclaw/analysis" "$C12/src"
+printf 'public class A { }\n' > "$C12/src/My Invoice Calc.cs"
+printf 'public class B { }\n' > "$C12/src/naïve café résumé.cs"
+cat > "$C12/.specclaw/analysis/module-map.md" <<'MM'
+# Module Map: Unicode
+
+**Status:** CONFIRMED by fixture, 2026-08-25
+
+## Modules
+
+### MOD-001 — Billing
+
+- **Evidence:**
+  - `src/My Invoice Calc.cs:1` — the calculator with spaces in its name
+MM
+S12="$WORK/c12-stub"
+# scc/lizard emit rows keyed by the exact spaced/unicode paths, to prove the
+# join survives them too (not just enumeration).
+stub_scc "$S12" '[{"Name":"C#","Files":[
+ {"Location":"src/My Invoice Calc.cs","Lines":1400,"Code":1300},
+ {"Location":"src/naïve café résumé.cs","Lines":50,"Code":40}]}]'
+stub_lizard "$S12" "$(liz_row 'src/My Invoice Calc.cs' 'Run' 34 150)"
+
+c12_out="$( cd "$C12" && PATH="$(clean_path "$S12")" bash "$QUALITY_BIN" collect .specclaw 2>/dev/null )"
+c12_exit=$?
+assert_eq "12a collect exits 0 with spaced/unicode paths" "0" "$c12_exit"
+
+c12_classified="$(printf '%s' "$c12_out" | jq -r '.files.classified')"
+assert_eq "12b both files were classified, neither split on its space" "2" "$c12_classified"
+
+# Both files' size rows joined — proving the scc join keys survive the space and
+# the non-ASCII bytes intact, not just enumeration.
+c12_sized="$(printf '%s' "$c12_out" | jq -r '.files.sized')"
+assert_eq "12c both spaced/unicode files joined to their scc size rows" "2" "$c12_sized"
+
+# Their LOC is summed correctly (1300 + 40). This is the "measured correctly"
+# guarantee: every metric is computed with the path intact and no word-splitting.
+c12_loc="$(printf '%s' "$c12_out" | jq -r '[.modules[].loc] | add')"
+assert_eq "12d the LOC of both files is measured and summed correctly" "1340" "$c12_loc"
+
+# A complexity hotspot on the spaced path is registered with the path byte-exact
+# in its key — the path travelled intact all the way into the QI registry.
+c12_hot="$(printf '%s' "$c12_out" | jq -r '[.quality_issues[] | select(.file == "src/My Invoice Calc.cs")] | length')"
+if [[ "$c12_hot" -ge 1 ]]; then
+  pass "12e a hotspot on the spaced path is registered with the path intact"
+else
+  fail "12e a hotspot on the spaced path is registered with the path intact (got $c12_hot)"
+fi
+
+# KNOWN LIMITATION, asserted so it is documented rather than surprising: the
+# module-map Evidence citation `src/My Invoice Calc.cs` does NOT match this file,
+# because parse_module_citations' path regex has no space in its character
+# class. So a spaced path cited in the map rolls up under MOD-UNASSIGNED. This
+# is pre-existing, unrelated to the ARG_MAX fix, and deliberately not changed
+# here (that would be a second behavioural change under a fix ticket). The file
+# is still fully measured — it just is not attributed to its module.
+c12_unassigned_loc="$(printf '%s' "$c12_out" | jq -r '.modules[] | select(.module_id == "MOD-UNASSIGNED") | .loc')"
+assert_eq "12f (documents a pre-existing gap) a spaced citation is unmatched, so both files sit under MOD-UNASSIGNED" "1340" "$c12_unassigned_loc"
 
 # ── Result ───────────────────────────────────────────────────────────────────
 
