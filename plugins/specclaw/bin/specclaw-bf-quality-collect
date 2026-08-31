@@ -452,8 +452,24 @@ read_module_map_status() {
 # for Windows may hand back backslashes, and a path that differs only by
 # separator silently fails to join, which shows up as a plausible-looking
 # smaller denominator rather than as an error.
-
-norm_paths() { sed -e 's|\\|/|g' -e 's|^\./||'; }
+#
+# On Windows the raw separator is only half the story:
+#   - scc emits native backslash paths, but run_scc serialises them through
+#     jq's @tsv, which ESCAPES each backslash to "\\"; converting "\" -> "/"
+#     then yields a doubled "//", so the collapse step below is what actually
+#     lets an scc path join.
+#   - lizard --csv wraps its location field in double quotes and prefixes it
+#     with ".\", so the surrounding quotes and a leading "./" must both go.
+#   - jq/tools on Windows can leave a trailing CR on the final field.
+# Order matters: strip CR and quotes first, fold separators, THEN collapse and
+# trim the leading "./".
+norm_paths() {
+  sed -e 's|\r$||' \
+      -e 's|^"||' -e 's|"$||' \
+      -e 's|\\|/|g' \
+      -e 's|//*|/|g' \
+      -e 's|^\./||'
+}
 
 # loc.tsv: relpath <TAB> lines <TAB> code
 run_scc() {
