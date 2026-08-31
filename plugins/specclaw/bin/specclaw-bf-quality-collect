@@ -600,12 +600,15 @@ def reason($cap; $ran; $onPath):
   elif $ran | not then "parse_error"
   else null end;
 
-($files  | map({key: .[0], value: {language: .[1], scc: .[2], lizard: .[3], jscpd: .[4]}}) | from_entries) as $F
-| ($loc     | map({key: .[0], value: {lines: (.[1] | tonumber), code: (.[2] | tonumber)}}) | from_entries) as $L
-| ($dup     | map({key: .[0], value: {lines: (.[1] | tonumber), dup: (.[2] | tonumber)}}) | from_entries) as $D
-| ($filemod | map({key: .[0], value: .[1]}) | from_entries) as $M
-| ($prior   | map({key: .[0], value: {id: .[1], first_seen: .[2], status: .[3]}}) | from_entries) as $P
-| ($funcs | map({
+# $files[0] etc: each --slurpfile wraps its file's single top-level array in a
+# one-element array, so the real data is at [0]. See the --slurpfile note at the
+# call site for why they are passed that way (ARG_MAX on large repos).
+($files[0]  | map({key: .[0], value: {language: .[1], scc: .[2], lizard: .[3], jscpd: .[4]}}) | from_entries) as $F
+| ($loc[0]     | map({key: .[0], value: {lines: (.[1] | tonumber), code: (.[2] | tonumber)}}) | from_entries) as $L
+| ($dup[0]     | map({key: .[0], value: {lines: (.[1] | tonumber), dup: (.[2] | tonumber)}}) | from_entries) as $D
+| ($filemod[0] | map({key: .[0], value: .[1]}) | from_entries) as $M
+| ($prior[0]   | map({key: .[0], value: {id: .[1], first_seen: .[2], status: .[3]}}) | from_entries) as $P
+| ($funcs[0] | map({
       file: .[0], function: .[1],
       ccn: (.[2] | tonumber), length: (.[3] | tonumber), params: (.[4] | tonumber),
       module: ($M[.[0]] // "MOD-UNASSIGNED")
@@ -896,14 +899,22 @@ cmd_collect() {
   # than anything to do with quality.
   write_agg_jq > "$W/agg.jq"
 
+  # --slurpfile, NOT --argjson "$(cat …)", for the six per-file arrays. Those
+  # arrays grow one element per source file, so on a large repo the command
+  # substitution put multiple megabytes onto argv and the whole run died with
+  # "Argument list too long" (ARG_MAX) before jq ever started. --slurpfile reads
+  # each file directly, off the command line entirely. It wraps the file's JSON
+  # stream in an array — each file here holds exactly one value (a top-level
+  # array from tsv_json) — so every reference in agg.jq derefs $X[0]. Same idiom
+  # the compare path already uses. The small fixed-size args stay on argv.
   jq -n \
     --argjson th "$thresholds" \
-    --argjson files    "$(cat "$W/files.json")" \
-    --argjson loc      "$(cat "$W/loc.json")" \
-    --argjson funcs    "$(cat "$W/funcs.json")" \
-    --argjson dup      "$(cat "$W/dup.json")" \
-    --argjson filemod  "$(cat "$W/filemod.json")" \
-    --argjson prior    "$(cat "$W/prior_qi.json")" \
+    --slurpfile files    "$W/files.json" \
+    --slurpfile loc      "$W/loc.json" \
+    --slurpfile funcs    "$W/funcs.json" \
+    --slurpfile dup      "$W/dup.json" \
+    --slurpfile filemod  "$W/filemod.json" \
+    --slurpfile prior    "$W/prior_qi.json" \
     --argjson tools "$(printf '{"scc":%s,"lizard":%s,"jscpd":%s}' "$scc_ran" "$lizard_ran" "$jscpd_ran")" \
     --argjson toolsOnPath "$(printf '{"scc":%s,"lizard":%s,"jscpd":%s}' "$scc_ok" "$lizard_ok" "$jscpd_ok")" \
     --arg scope "$scope_label" \
