@@ -181,6 +181,19 @@ quality:
   # immortalised.
   register_severity: HIGH
 
+  # Which severity band earns a REBUILD REMEDIATION BACKLOG ITEM in
+  # /specclaw:bf-rebuild-plan. HIGH | WARN.
+  #
+  # Deliberately INDEPENDENT of register_severity above. That one decides which
+  # hotspots get a permanent QI-### id; this one decides which of those the
+  # rebuild is held ACCOUNTABLE for. A project can immortalise every WARN and
+  # still only be answerable for the HIGH ones.
+  #
+  # A QI below this floor generates no backlog item — it is reported as an
+  # advisory count on its module's coverage-rollup line, so it stays visible
+  # without becoming something the rebuild must clear.
+  remediation_severity_floor: HIGH
+
 # Plugin housekeeping
 plugin:
   update_check: true   # /specclaw:status checks the plugin repo for a newer published
