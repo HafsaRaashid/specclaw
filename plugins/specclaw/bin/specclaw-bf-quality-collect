@@ -47,6 +47,28 @@
 # classification logic as jq arguments, so no threshold number appears inline in
 # any comparison.
 #
+# SO IS SCAN SCOPE. The scan measures production code: generated migrations,
+# designer files, minified bundles, vendored dependencies and test suites are
+# excluded, because a hotspot in a file nobody maintains is not a finding about
+# this project's code — and left in, it distorts every module rollup,
+# duplication percentage and legacy-vs-target compare it touches.
+#
+# Not one exclusion pattern appears in this script. The defaults are data in
+# lib/quality-exclusions.yaml; the project layer overlays them from
+# config.yaml's `quality.exclusions:` block. Exclusion is applied ONCE, at
+# enumeration, producing a single measured-file list that scc, lizard and jscpd
+# all receive. Their own ignore flags are generated from the same config and are
+# a walking-speed optimisation, never the mechanism: three tools with three
+# ignore syntaxes drift, and a duplication percentage computed over a different
+# denominator than the complexity scan corrupts every rollup that combines them.
+#
+# EXCLUDED IS REPORTED, NEVER SILENT. Every excluded file is counted, per
+# category, into the artifact's `exclusions.census`. The effective config is
+# hashed into `exclusions.config_hash`, and `compare` refuses outright — a
+# named QUALITY-SCOPE-MISMATCH stop — to compute a delta or a gate verdict
+# across two snapshots whose hashes differ. A file the scan did not measure must
+# read as a scoping decision, not as an absence; the same rule NOT-MEASURED has.
+#
 # ADVISORY BY DEFAULT. collect always exits 0 on findings — only an
 # infrastructure error is non-zero. The single enforcing path is
 # `compare --gate`, which prints QUALITY-GATE: PASS|FAIL and exits 0|1.
@@ -72,9 +94,11 @@
 #          QI, because QI ids name legacy hotspots and nothing else.
 #
 # compare  requires both quality.json and quality-target.json; fails fast and
-#          says which is missing. Computes per-module per-metric deltas into
-#          quality-delta.json. --gate additionally prints the verdict line and
-#          sets the exit code.
+#          says which is missing. Also requires both to have been measured over
+#          the SAME scan scope, and stops with QUALITY-SCOPE-MISMATCH when they
+#          were not — writing no delta and reaching no gate verdict. Computes
+#          per-module per-metric deltas into quality-delta.json. --gate
+#          additionally prints the verdict line and sets the exit code.
 
 set -euo pipefail
 
@@ -283,23 +307,319 @@ load_thresholds() {
   printf ',"register_severity":"%s"}' "$register_severity"
 }
 
+# ─── scan exclusions ─────────────────────────────────────────────────────────
+#
+# EXCLUSIONS ARE CONFIG, EXACTLY LIKE THRESHOLDS. Not one pattern appears in
+# this script. The defaults ship as data in lib/quality-exclusions.yaml and the
+# project layer overlays them from .specclaw/config.yaml's
+# `quality.exclusions:` block; both files use the identical
+# `quality:` -> `exclusions:` nesting so one parser reads both. Everything below
+# consumes that data — it never decides what a build directory is called.
+#
+# WHY THE DEFAULTS ARE NOT IN THIS FILE. A default set living here would be a
+# policy hardcoded in the thing the policy governs, and the whole point of
+# threshold config was to stop exactly that. Nor can they live only in
+# templates/config.yaml, which is copied once at init: every project initialised
+# before this existed would silently start measuring its dependencies.
+#
+# WHY THE DEFAULTS ARE NOT OPTIONAL. A missing defaults file is an installation
+# fault, not a configuration choice, and the failure it produces is silent
+# (every dependency measured, every number quietly wrong). So it warns loudly
+# and measures everything, rather than pretending a scope nobody chose.
+#
+# The category order below is the CENSUS ATTRIBUTION ORDER: a file matching two
+# categories is counted under the first one listed, deterministically, so two
+# runs over the same tree produce the same census. It is not a precedence rule
+# about whether the file is excluded — one match anywhere excludes it.
+EXCLUSION_CATEGORIES="generated third_party_and_build tests pipeline_owned data_and_lockfiles"
+
+# read_exclusion_block <yaml_file> — the one parser for both layers.
+#
+# yaml_val cannot do this job: it reads a flat `section.field` SCALAR and this
+# block is three levels deep and mostly lists. Rather than teach that function
+# nesting it does not need anywhere else, this reads the one shape it must and
+# emits normalised rows:
+#
+#   L <TAB> <key> <TAB> <item>    a list item under <key>
+#   S <TAB> <key> <TAB> <value>   a scalar value for <key>
+#   E <TAB> <key> <TAB>           <key> present as an explicitly empty list
+#
+# The E row matters: `extra_excludes: []` in a project's config is a statement
+# ("I have none"), and it must be distinguishable from the key being absent so
+# an overlay can tell "unset, inherit" from "set to nothing".
+read_exclusion_block() {
+  local file="$1"
+  [ -f "$file" ] || return 0
+  awk '
+    function ind(s,   i) { i = match(s, /[^ ]/); return (i == 0 ? -1 : i - 1) }
+    # Values may be quoted (patterns carry * and #, which YAML would otherwise
+    # read as a comment) or bare with a trailing inline comment. Take the quoted
+    # span when there is one, strip an inline comment when there is not.
+    function val(v) {
+      sub(/^[ \t]+/, "", v); sub(/[ \t]+$/, "", v)
+      if (substr(v, 1, 1) == "\"") { sub(/^"/, "", v); sub(/".*$/, "", v); return v }
+      if (substr(v, 1, 1) == "'\''") { sub(/^'\''/, "", v); sub(/'\''.*$/, "", v); return v }
+      sub(/[ \t]+#.*$/, "", v); sub(/[ \t]+$/, "", v)
+      return v
+    }
+    { line = $0; sub(/\r$/, "", line) }
+    line ~ /^[[:space:]]*#/ { next }
+    line ~ /^[[:space:]]*$/ { next }
+    {
+      i = ind(line); body = line; sub(/^ */, "", body)
+      if (i == 0) { inq = (body ~ /^quality:/); inx = 0; key = ""; next }
+      if (!inq) next
+      if (i == 2) { inx = (body ~ /^exclusions:[[:space:]]*$/); key = ""; next }
+      if (!inx) next
+      if (i == 4 && body ~ /^[A-Za-z_][A-Za-z0-9_]*:/) {
+        key = body; sub(/:.*$/, "", key)
+        rest = body; sub(/^[A-Za-z_][A-Za-z0-9_]*:/, "", rest); rest = val(rest)
+        if (rest == "[]") { printf "E\t%s\t\n", key }
+        else if (rest != "") { printf "S\t%s\t%s\n", key, rest }
+        next
+      }
+      if (i >= 6 && body ~ /^- / && key != "") {
+        item = body; sub(/^-[ \t]*/, "", item); item = val(item)
+        if (item != "") printf "L\t%s\t%s\n", key, item
+      }
+    }
+  ' "$file"
+}
+
+# is_true <value> — YAML truthiness, restricted deliberately. Anything that is
+# not recognisably true or false is a typo, and a typo that silently reads as
+# "off" turns the whole scan scope into something nobody chose.
+excl_flag() {
+  local raw="$1" default="$2" label="$3"
+  case "$(printf '%s' "$raw" | tr '[:upper:]' '[:lower:]')" in
+    "")             printf '%s' "$default" ;;
+    true|yes|on|1)  printf 'true' ;;
+    false|no|off|0) printf 'false' ;;
+    *) warn "config.yaml quality.exclusions.${label} must be true or false ('${raw}') — using the default ${default}."
+       printf '%s' "$default" ;;
+  esac
+}
+
+# build_exclusion_set <defaults_yaml> <config_yaml> <out_patterns_tsv> <out_effective>
+#
+# Overlays the project layer on the defaults and writes two artifacts:
+#
+#   out_patterns_tsv   category <TAB> pattern, in census-attribution order,
+#                      with include_overrides carried as the reserved category
+#                      __include__. This is the filter's whole input.
+#   out_effective      the same content in a canonical, order-stable form. It is
+#                      what gets hashed into exclusions.config_hash, so two runs
+#                      agree iff they measured the same scope.
+#
+# Echoes a JSON object describing the effective config, for the artifact.
+build_exclusion_set() {
+  local defaults="$1" config="$2" out_tsv="$3" out_eff="$4"
+  : > "$out_tsv"; : > "$out_eff"
+
+  local dflt proj
+  dflt="$(mktemp)"; proj="$(mktemp)"
+  read_exclusion_block "$defaults" > "$dflt"
+  read_exclusion_block "$config"   > "$proj"
+
+  # Toggles: the project layer's scalar for a category, defaulting to on. A
+  # category switched off keeps its patterns in the defaults file — flipping it
+  # back on restores them, so turning one off is never a deletion.
+  local cat enabled raw praw json_cats="" n_pat sep=""
+  local bucket_raw bucket
+  bucket_raw="$(awk -F'\t' '$1 == "S" && $2 == "tests_as_separate_bucket" {print $3; exit}' "$proj")"
+  bucket="$(excl_flag "$bucket_raw" "false" "tests_as_separate_bucket")"
+
+  for cat in $EXCLUSION_CATEGORIES; do
+    # Default first, then the project layer over it. Read as two separate
+    # lookups rather than one awk over both files: the overlay must be visible
+    # as an overlay, and "whichever file awk hit first" is not the same rule.
+    raw="$(awk -F'\t' -v k="$cat" '$1 == "S" && $2 == k {print $3; exit}' "$dflt")"
+    praw="$(awk -F'\t' -v k="$cat" '$1 == "S" && $2 == k {print $3; exit}' "$proj")"
+    [ -z "$praw" ] || raw="$praw"
+    enabled="$(excl_flag "$raw" "true" "$cat")"
+    n_pat=0
+    if [ "$enabled" = "true" ]; then
+      while IFS= read -r raw; do
+        [ -n "$raw" ] || continue
+        printf '%s\t%s\n' "$cat" "$raw" >> "$out_tsv"
+        n_pat=$((n_pat + 1))
+      done < <(awk -F'\t' -v k="$cat" '$1 == "L" && $2 == k {print $3}' "$dflt")
+    fi
+    json_cats="${json_cats}${sep}$(printf '"%s":{"enabled":%s,"patterns":%s}' \
+      "$(json_escape "$cat")" "$enabled" "$n_pat")"
+    sep=","
+  done
+
+  # extra_excludes and include_overrides come from the PROJECT layer only. A
+  # default that named one project's directories would not be stack-blind, which
+  # is why lib/quality-exclusions.yaml ships them empty.
+  local extras_json="" overrides_json="" esep=""
+  while IFS= read -r raw; do
+    [ -n "$raw" ] || continue
+    printf 'extra_excludes\t%s\n' "$raw" >> "$out_tsv"
+    extras_json="${extras_json}${esep}\"$(json_escape "$raw")\""; esep=","
+  done < <(awk -F'\t' '$1 == "L" && $2 == "extra_excludes" {print $3}' "$proj")
+  esep=""
+  while IFS= read -r raw; do
+    [ -n "$raw" ] || continue
+    printf '__include__\t%s\n' "$raw" >> "$out_tsv"
+    overrides_json="${overrides_json}${esep}\"$(json_escape "$raw")\""; esep=","
+  done < <(awk -F'\t' '$1 == "L" && $2 == "include_overrides" {print $3}' "$proj")
+
+  # The hashed form. Sorted, so the hash depends on WHAT is excluded and not on
+  # the order two equivalent config files happened to list it in — otherwise
+  # reordering a list would stop a legitimate comparison for no reason.
+  {
+    printf 'tests_as_separate_bucket\t%s\n' "$bucket"
+    LC_ALL=C sort "$out_tsv"
+  } > "$out_eff"
+
+  rm -f "$dflt" "$proj"
+  printf '{"categories":{%s},"extra_excludes":[%s],"include_overrides":[%s],"tests_as_separate_bucket":%s}' \
+    "$json_cats" "$extras_json" "$overrides_json" "$bucket"
+}
+
+# scope_hash <effective_file> — identity of the measured scope (PD-04).
+#
+# Follows the sha256: convention specclaw-bf-baseline and specclaw-bf-ui already
+# use, with their fallback ladder. When nothing can hash, the value is the
+# literal "unhashable" — which compare treats as a mismatch against everything
+# INCLUDING another "unhashable", because two scopes nobody could identify are
+# not two scopes anyone showed to be the same.
+scope_hash() {
+  local f="$1" h=""
+  if command -v sha256sum >/dev/null 2>&1; then
+    h="$(sha256sum "$f" 2>/dev/null | awk '{print $1}' || true)"
+  elif command -v shasum >/dev/null 2>&1; then
+    h="$(shasum -a 256 "$f" 2>/dev/null | awk '{print $1}' || true)"
+  elif command -v openssl >/dev/null 2>&1; then
+    h="$(openssl dgst -sha256 "$f" 2>/dev/null | awk '{print $NF}' || true)"
+  fi
+  if [ -n "$h" ]; then printf 'sha256:%s' "$h"; else printf 'unhashable'; fi
+}
+
+# apply_exclusions <patterns_tsv> <all_paths> <out_kept> <out_census_tsv>
+#
+# ONE PASS, ONE MEASURED LIST (PD-02). Every downstream consumer — scc, lizard,
+# jscpd, the module join, the aggregation — reads the list this produces. The
+# tools' own ignore flags are generated from the same data further down, but
+# they are a walking-speed optimisation and never the mechanism: three tools
+# with three ignore syntaxes drift, and a duplication percentage computed over a
+# different denominator than the complexity scan silently corrupts every module
+# rollup that combines them.
+#
+# Matching semantics are defined once, in lib/quality-exclusions.yaml's header,
+# and implemented once, here. Globs compile to EREs: `**/` -> `(.*/)?` so a
+# pattern anchored at any depth also matches at the root, `**` -> `.*` crossing
+# separators, `*` -> `[^/]*` which does not, `?` -> `[^/]`. Both the pattern and
+# the path are lower-cased, because a repo that has been through a Windows
+# checkout carries both Migrations/ and migrations/ and excluding only one
+# produces a number that is wrong and still looks plausible.
+#
+# An include_overrides match always wins, and it is tested only after an
+# exclusion matched — an override cannot exclude anything, only rescue.
+#
+# Whitespace-safe by construction: awk reads whole lines and the kept list is
+# written line-per-path, never through word-splitting or argv.
+apply_exclusions() {
+  local patterns="$1" all="$2" kept="$3" census="$4"
+  : > "$kept"; : > "$census"
+  if [ ! -s "$patterns" ]; then
+    cp "$all" "$kept"
+    return 0
+  fi
+  awk -F'\t' -v CENSUS="$census" '
+    function g2e(g,   s, o, i, ch) {
+      s = tolower(g); o = "^"; i = 1
+      while (i <= length(s)) {
+        ch = substr(s, i, 1)
+        if (ch == "*") {
+          if (substr(s, i, 3) == "**/") { o = o "(.*/)?"; i += 3; continue }
+          if (substr(s, i, 2) == "**")  { o = o ".*";     i += 2; continue }
+          o = o "[^/]*"; i += 1; continue
+        }
+        if (ch == "?") { o = o "[^/]"; i += 1; continue }
+        if (index(".+()[]{}^$|\\", ch) > 0) { o = o "\\" ch; i += 1; continue }
+        o = o ch; i += 1
+      }
+      return o "$"
+    }
+    NR == FNR {
+      if ($1 == "__include__") { inc[++ni] = g2e($2) }
+      else { cat[++np] = $1; pat[np] = g2e($2) }
+      next
+    }
+    {
+      if ($0 == "") next
+      p = tolower($0); hit = ""
+      for (i = 1; i <= np; i++) if (p ~ pat[i]) { hit = cat[i]; break }
+      if (hit != "") for (i = 1; i <= ni; i++) if (p ~ inc[i]) { hit = ""; break }
+      if (hit == "") print $0
+      else printf "%s\t%s\n", hit, $0 >> CENSUS
+    }
+  ' "$patterns" "$all" > "$kept"
+}
+
+# excl_dir_names <patterns_tsv> — the bare directory names among the effective
+# patterns, for the metric tools that take names rather than globs.
+#
+# Only `**/NAME/**` yields a name; a pattern of any other shape is left to the
+# intersection. This feeds TOOL FLAGS ONLY and never file enumeration: a tool
+# that skips a directory saves a parse, whereas an enumerator that skips one
+# loses a census row. .git is added unconditionally and is the one path named
+# here rather than configured — it is the repository's own metadata, not a
+# scoping policy, and nothing in it was ever going to be reported.
+excl_dir_names() {
+  local patterns="$1"
+  { printf '.git\n'
+    awk -F'\t' '$1 != "__include__" && $2 ~ /^\*\*\/[^*\/]+\/\*\*$/ {
+      n = $2; sub(/^\*\*\//, "", n); sub(/\/\*\*$/, "", n); print n
+    }' "$patterns"
+  } | awk '!seen[$0]++' | paste -sd, - | tr -d '\n'
+}
+
+# excl_globs <patterns_tsv> — every effective exclude pattern, comma-joined, for
+# a tool whose ignore flag speaks ** globs natively. A pattern containing a
+# comma cannot survive a comma-joined flag and is dropped here rather than
+# corrupting the ones around it; the intersection still excludes its files.
+excl_globs() {
+  local patterns="$1"
+  awk -F'\t' '$1 != "__include__" && index($2, ",") == 0 {print $2}' "$patterns" \
+    | awk '!seen[$0]++' | paste -sd, - | tr -d '\n'
+}
+
 # ─── tool probe (PD-09) ──────────────────────────────────────────────────────
 
 have_tool() { command -v "$1" >/dev/null 2>&1; }
 
 # ─── file enumeration ────────────────────────────────────────────────────────
 #
-# Mirrors specclaw-bf-analyze-codebase's convention exactly: git ls-files when
-# inside a work tree, the pruning find otherwise, then the SAME post-filter
-# applied uniformly to both — because `git ls-files` happily lists a committed
-# vendor/ or node_modules/ tree and third-party code in a quality number is a
-# lie about the project's own code.
+# Mirrors specclaw-bf-analyze-codebase's convention: git ls-files when inside a
+# work tree, a pruning find otherwise. `git ls-files` happily lists a committed
+# vendor/ or node_modules/ tree, so neither source is trusted to have scoped
+# itself — this produces the RAW list and apply_exclusions scopes it.
 #
-# This list stays authoritative. Each metric tool is run over the scope
-# directory and its output is then INTERSECTED with this list, rather than
-# trusting each tool's own ignore semantics to agree with ours. Three tools with
-# three different ignore files would otherwise give three different denominators
-# for the same repo.
+# THE FIND FALLBACK PRUNES ONLY .git, AND THAT IS DELIBERATE. An earlier version
+# pruned every excluded directory here as a walking-speed optimisation, and it
+# was wrong for a reason worth recording: a pruned tree never reaches the filter,
+# so its files are never COUNTED, and the census silently under-reports exactly
+# the directories exclusion exists for. `node_modules: 0 files` when there are
+# forty thousand is a worse artifact than a slower run. Excluding a file and
+# hiding that you excluded it are different things, and only the first one is
+# this feature.
+#
+# .git is the one exception and is not a scoping decision: it is the
+# repository's own metadata, `git ls-files` never lists it on the other branch,
+# and there is nothing there to report a count of. The cost this leaves on the
+# table is a stat-only walk, not a parse — the metric tools still receive
+# generated ignore flags, and that is where walking a dependency tree is
+# actually expensive.
+#
+# The list this produces, once filtered, stays authoritative. Each metric tool
+# is run over the scope directory and its output is then INTERSECTED with it,
+# rather than trusting each tool's own ignore semantics to agree with ours.
+# Three tools with three different ignore syntaxes would otherwise give three
+# different denominators for the same repo.
 enumerate_files() {
   local project_root="$1" rel_scope="$2" out="$3"
   local tmp_all f
@@ -310,21 +630,13 @@ enumerate_files() {
   else
     (
       cd "$project_root" || exit 0
-      find . \( -name .git -o -name node_modules -o -name .specclaw -o -name vendor -o -name dist -o -name build \) -prune \
-        -o -type f -print 2>/dev/null | sed 's|^\./||'
+      find . -name .git -prune -o -type f -print 2>/dev/null | sed 's|^\./||'
     ) > "$tmp_all"
   fi
 
   : > "$out"
   while IFS= read -r f; do
     [ -z "$f" ] && continue
-    case "$f" in
-      .specclaw|.specclaw/*) continue ;;
-      node_modules/*|*/node_modules/*) continue ;;
-      vendor/*|*/vendor/*) continue ;;
-      dist/*|*/dist/*) continue ;;
-      build/*|*/build/*) continue ;;
-    esac
     if [ -z "$rel_scope" ]; then
       printf '%s\n' "$f" >> "$out"
     else
@@ -473,11 +785,11 @@ norm_paths() {
 
 # loc.tsv: relpath <TAB> lines <TAB> code
 run_scc() {
-  local project_root="$1" scope_arg="$2" files="$3" out="$4"
+  local project_root="$1" scope_arg="$2" files="$3" out="$4" dir_names="$5"
   : > "$out"
   local raw; raw="$(mktemp)"
   if ! ( cd "$project_root" && scc --by-file --format json \
-            --exclude-dir '.git,node_modules,.specclaw,vendor,dist,build' \
+            --exclude-dir "$dir_names" \
             "$scope_arg" ) > "$raw" 2>/dev/null; then
     rm -f "$raw"
     return 1
@@ -496,16 +808,25 @@ run_scc() {
 
 # funcs.tsv: relpath <TAB> function <TAB> ccn <TAB> length <TAB> params
 run_lizard() {
-  local project_root="$1" scope_arg="$2" files="$3" out="$4"
+  local project_root="$1" scope_arg="$2" files="$3" out="$4" dir_names="$5"
   : > "$out"
   local raw; raw="$(mktemp)"
+  # -x flags are built from the SAME generated directory-name list scc gets, as
+  # an array rather than an interpolated string so a name with a space survives.
+  # Only directory names: lizard's -x is fnmatch, not ** globs, and a
+  # mistranslated glob that silently matches nothing is worse than no flag —
+  # these are a walking-speed optimisation and the intersection is the mechanism.
+  local -a xargs=() name
+  while IFS= read -r name; do
+    [ -n "$name" ] || continue
+    xargs+=("-x" "./${name}/*" "-x" "*/${name}/*")
+  done < <(printf '%s' "$dir_names" | tr ',' '\n')
   # lizard exits non-zero when its own warning thresholds trip, which is not an
   # error here — we classify against our own config, not its defaults. Judge it
   # on whether it produced parseable rows instead.
-  ( cd "$project_root" && lizard --csv \
-      -x './.git/*' -x './node_modules/*' -x './.specclaw/*' \
-      -x './vendor/*' -x './dist/*' -x './build/*' \
-      "$scope_arg" ) > "$raw" 2>/dev/null || true
+  # ${xargs[@]+…}: an empty array under `set -u` is an unbound-variable error on
+  # bash before 4.4, and this list is empty whenever every category is off.
+  ( cd "$project_root" && lizard --csv ${xargs[@]+"${xargs[@]}"} "$scope_arg" ) > "$raw" 2>/dev/null || true
   [ -s "$raw" ] || { rm -f "$raw"; return 1; }
   # lizard --csv columns: nloc,ccn,tokens,params,length,location,file,function,...
   # Fields 1-5 are numeric by contract. A row where they are not is a
@@ -528,13 +849,18 @@ run_lizard() {
 
 # dup.tsv: relpath <TAB> lines <TAB> duplicated_lines
 run_jscpd() {
-  local project_root="$1" scope_arg="$2" files="$3" out="$4"
+  local project_root="$1" scope_arg="$2" files="$3" out="$4" globs="$5"
   : > "$out"
   local rdir raw; rdir="$(mktemp -d)"
+  # jscpd's --ignore speaks ** globs natively, so it receives the effective
+  # pattern list verbatim rather than a translation. Still an optimisation, not
+  # the mechanism — the intersection below is what decides the denominator.
+  local -a iargs=()
+  [ -n "$globs" ] && iargs=(--ignore "$globs")
   # jscpd exits non-zero once its own --threshold trips. Same reasoning as
   # lizard: its exit code is about its policy, not ours.
   ( cd "$project_root" && jscpd --silent --reporters json --output "$rdir" \
-      --ignore '**/.git/**,**/node_modules/**,**/.specclaw/**,**/vendor/**,**/dist/**,**/build/**' \
+      ${iargs[@]+"${iargs[@]}"} \
       "$scope_arg" ) >/dev/null 2>&1 || true
   raw="$rdir/jscpd-report.json"
   [ -f "$raw" ] || { rm -rf "$rdir"; return 1; }
@@ -624,6 +950,18 @@ def reason($cap; $ran; $onPath):
 | ($dup[0]     | map({key: .[0], value: {lines: (.[1] | tonumber), dup: (.[2] | tonumber)}}) | from_entries) as $D
 | ($filemod[0] | map({key: .[0], value: .[1]}) | from_entries) as $M
 | ($prior[0]   | map({key: .[0], value: {id: .[1], first_seen: .[2], status: .[3]}}) | from_entries) as $P
+# The excluded census, as rows of [category, path]. $X is the SET of paths that
+# were genuinely NOT MEASURED, used below to tell a hotspot that was fixed from
+# one the scan simply stopped looking at.
+#
+# A bucketed test file is filtered out of this set deliberately. It appears in
+# the census — with disposition measured_separately — but it WAS measured, so a
+# prior hotspot on it that is no longer live really did stop exceeding its
+# threshold. Calling that excluded-by-scope would blame the scope for a result
+# the scan actually produced.
+| ( $excluded[0]
+    | map(select(.[0] != "tests" or ($exclCfg.tests_as_separate_bucket | not)))
+    | map({key: .[1], value: .[0]}) | from_entries ) as $X
 | ($funcs[0] | map({
       file: .[0], function: .[1],
       ccn: (.[2] | tonumber), length: (.[3] | tonumber), params: (.[4] | tonumber),
@@ -726,7 +1064,13 @@ def reason($cap; $ran; $onPath):
 # value (it moves) and never the position (it moves more). A renamed file is a
 # new hotspot plus a resolved old one — guessing a rename would silently carry a
 # QI onto code nobody checked.
-| ( $candidates | map(. + {key: ([.metric, (.file // ""), (.function // ""), .module_id] | join("|"))}) ) as $cand
+#
+# MOD-TESTS is filtered out here rather than upstream: the bucket's files are
+# measured and rolled up like any others, but QI-### ids name PRODUCTION
+# hotspots, and a registry holding both would make "open hotspots in this
+# module" mean two different things depending on a config flag.
+| ( $candidates | map(select(.module_id != "MOD-TESTS"))
+    | map(. + {key: ([.metric, (.file // ""), (.function // ""), .module_id] | join("|"))}) ) as $cand
 # A SET, not a list, and tested by key lookup. `inside`/`contains` compare
 # strings by SUBSTRING in jq, so a membership test written that way reports a key
 # as still live whenever any longer live key happens to contain it — and
@@ -736,9 +1080,9 @@ def reason($cap; $ran; $onPath):
 | ( reduce ($cand | to_entries)[] as $e
       ( {n: $nextQi, out: []};
         ($P[$e.value.key]) as $known
-        | if $known then .out += [$e.value + {id: $known.id, first_seen: $known.first_seen, status: "open"}]
+        | if $known then .out += [$e.value + {id: $known.id, first_seen: $known.first_seen, status: "open", excluded_by: null}]
           else .out += [$e.value + {id: ("QI-" + (.n | tostring | if length < 3 then ("00" + .)[-3:] else . end)),
-                                    first_seen: $at, status: "open"}] | .n += 1
+                                    first_seen: $at, status: "open", excluded_by: null}] | .n += 1
           end )
     | .out ) as $openIssues
 # A hotspot that no longer exceeds its threshold is RESOLVED, never removed. Both
@@ -752,13 +1096,30 @@ def reason($cap; $ran; $onPath):
 # hotspot — their key carries an empty function field — so a resolved
 # file_length or duplication entry disappeared from the registry instead of
 # being marked resolved, which is exactly the deletion ID permanence forbids.
+#
+# EXCLUDED-BY-SCOPE IS NOT RESOLVED (PD-05). A prior hotspot whose file the scan
+# no longer looks at did not get fixed, and writing it back as `resolved` would
+# claim work nobody did — the single most flattering lie the registry could
+# tell. It keeps its id and its First seen date, records the exclusion config
+# hash that produced the decision, and leaves the open-hotspot rollups because
+# it is no longer open.
+#
+# Only a FILE-level attribution is honest here. A duplication hotspot's key
+# names a module and no file, so nothing in it can be matched against the
+# excluded set; those stay `resolved`, which is correct — a module whose files
+# were all excluded has no duplication measurement left to exceed a threshold,
+# and claiming a scope decision for it would be inferring one.
 | ( def blank_to_null: if . == "" then null else . end;
     [ $P | to_entries[]
         | select($liveSet[.key] | not)
         | (.key | split("|")) as $k
-        | {id: .value.id, key: .key, first_seen: .value.first_seen, status: "resolved",
+        | ($k[1] // "") as $f
+        | (($f != "") and ($X[$f] != null)) as $scoped
+        | {id: .value.id, key: .key, first_seen: .value.first_seen,
+           status: (if $scoped then "excluded-by-scope" else "resolved" end),
+           excluded_by: (if $scoped then {category: $X[$f], config_hash: $exclHash} else null end),
            module_id: ($k[3] // "MOD-UNASSIGNED"),
-           file: ($k[1] | blank_to_null), function: ($k[2] | blank_to_null),
+           file: ($f | blank_to_null), function: ($k[2] | blank_to_null),
            metric: $k[0], value: null, severity: null} ] ) as $resolved
 
 | { schema_version: 1,
@@ -769,7 +1130,43 @@ def reason($cap; $ran; $onPath):
     tools_on_path: $toolsOnPath,
     thresholds: $th,
     module_map_status: $mapStatus,
-    files: { enumerated: $enumerated, classified: ($F | length),
+    # ── scan scope (PD-03) ───────────────────────────────────────────────────
+    #
+    # A file the scan did not measure must be visible as a DECISION, not as an
+    # absence. So the effective config, its hash and a per-category census of
+    # everything left out all travel with the measurement they scoped.
+    #
+    # census counts FILES, not lines. The only cheap source of a line count for
+    # excluded files is a second full tool pass over precisely the trees
+    # exclusion exists to avoid walking (node_modules, packages, obj), which
+    # roughly doubles the run's cost on exactly the repos where it hurts most.
+    # PD-03's count-only fallback applies, and the limit is stated rather than
+    # papered over: this says how many files were left out, never how much code.
+    #
+    # A category whose disposition is measured_separately was NOT left out — its
+    # files were measured into their own bucket. Reporting those two states with
+    # one number would make the census itself dishonest.
+    exclusions: ( $exclCfg + {
+        config_hash: $exclHash,
+        census: {
+          files_total: (if $exclCfg.tests_as_separate_bucket
+                        then ([ $excluded[0][] | select(.[0] != "tests") ] | length)
+                        else $exclTotal end),
+          files_bucketed: (if $exclCfg.tests_as_separate_bucket
+                           then ([ $excluded[0][] | select(.[0] == "tests") ] | length)
+                           else 0 end),
+          by_category: ( $excluded[0] | group_by(.[0]) | map({
+              category: .[0][0],
+              files: length,
+              disposition: (if (.[0][0] == "tests" and $exclCfg.tests_as_separate_bucket)
+                            then "measured_separately" else "excluded" end)
+            }) | sort_by(.category) ) } } ),
+    # enumerated counts what the tree offered; measured counts what survived the
+    # scope. Their difference is `excluded` and is computed rather than stated,
+    # so the three can never disagree — including when a bucketed test file is
+    # excluded from production and measured all the same.
+    files: { enumerated: $enumerated, measured: $measured, excluded: ($enumerated - $measured),
+             classified: ($F | length),
              sized: ($L | length), function_measured: ([$FN[] | .file] | unique | length),
              duplication_measured: ($D | length),
              module_ambiguous: $ambiguous },
@@ -839,7 +1236,41 @@ cmd_collect() {
   have_tool lizard && lizard_ok=true
   have_tool jscpd  && jscpd_ok=true
 
-  enumerate_files "$project_root" "$rel_scope" "$W/files.txt"
+  # ── scan scope: build the effective exclusion set BEFORE anything is read ──
+  local excl_defaults="$SCRIPT_DIR/../lib/quality-exclusions.yaml"
+  if [ ! -f "$excl_defaults" ]; then
+    warn "the default exclusion set is missing (${excl_defaults}). NOTHING IS EXCLUDED: generated code, vendored dependencies and test suites will all be measured as production code, and every module rollup below is computed over that scope."
+    excl_defaults="/dev/null"
+  fi
+  local excl_effective_json excl_hash excl_dirs excl_glob_list
+  excl_effective_json="$(build_exclusion_set "$excl_defaults" \
+    "$project_root/.specclaw/config.yaml" "$W/excl.tsv" "$W/excl-effective.txt")"
+  excl_hash="$(scope_hash "$W/excl-effective.txt")"
+  excl_dirs="$(excl_dir_names "$W/excl.tsv")"
+  excl_glob_list="$(excl_globs "$W/excl.tsv")"
+
+  enumerate_files "$project_root" "$rel_scope" "$W/all-files.txt"
+  apply_exclusions "$W/excl.tsv" "$W/all-files.txt" "$W/files.txt" "$W/excluded.tsv"
+
+  # ── the tests bucket (PD-06) ───────────────────────────────────────────────
+  #
+  # `tests_as_separate_bucket` measures test code instead of leaving it out —
+  # but into MOD-TESTS, never into a production module. Its files are put BACK
+  # into the measured list here and are pinned to that module id below, which is
+  # the whole mechanism: a module rollup is computed per module id, so a test
+  # file that carries MOD-TESTS cannot reach a MOD-### rollup by any path.
+  #
+  # They also register no QI-###. Those ids name production hotspots, and a
+  # registry that mixed the two would make "open hotspots in this module" mean
+  # two different things depending on a config flag.
+  : > "$W/testbucket.txt"
+  if [ "$(printf '%s' "$excl_effective_json" | jq -r '.tests_as_separate_bucket')" = "true" ]; then
+    awk -F'\t' '$1 == "tests" {print $2}' "$W/excluded.tsv" > "$W/testbucket.txt"
+    if [ -s "$W/testbucket.txt" ]; then
+      cat "$W/testbucket.txt" >> "$W/files.txt"
+      LC_ALL=C sort -u "$W/files.txt" -o "$W/files.txt"
+    fi
+  fi
 
   # files.tsv: relpath <TAB> language <TAB> scc_cap <TAB> lizard_cap <TAB> jscpd_cap
   capability_table > "$W/cap.tsv"
@@ -863,24 +1294,29 @@ cmd_collect() {
     }
   ' "$W/cap.tsv" "$W/files.txt" > "$W/files.tsv"
 
-  local n_enumerated n_classified
-  n_enumerated="$(wc -l < "$W/files.txt" | tr -d ' ')"
+  # enumerated = what the tree offered, BEFORE the scope was applied;
+  # measured   = what survived it, which is the list every tool receives.
+  local n_enumerated n_measured n_classified
+  n_enumerated="$(wc -l < "$W/all-files.txt" | tr -d ' ')"
+  n_measured="$(wc -l < "$W/files.txt" | tr -d ' ')"
   n_classified="$(wc -l < "$W/files.tsv" | tr -d ' ')"
   cut -f1 "$W/files.tsv" > "$W/measurable.txt"
 
   # ── run the tools ──────────────────────────────────────────────────────────
   local scc_ran=false lizard_ran=false jscpd_ran=false
   : > "$W/loc.tsv"; : > "$W/funcs.tsv"; : > "$W/dup.tsv"
+  # All three receive the SAME measurable.txt — the single post-exclusion list.
+  # That identity is the point of PD-02 and is asserted directly by the suite.
   if $scc_ok; then
-    if run_scc "$project_root" "$scope_arg" "$W/measurable.txt" "$W/loc.tsv"; then scc_ran=true
+    if run_scc "$project_root" "$scope_arg" "$W/measurable.txt" "$W/loc.tsv" "$excl_dirs"; then scc_ran=true
     else warn "scc is on PATH but produced no parseable output — size metrics fall back to NOT-MEASURED (parse_error)."; fi
   fi
   if $lizard_ok; then
-    if run_lizard "$project_root" "$scope_arg" "$W/measurable.txt" "$W/funcs.tsv"; then lizard_ran=true
+    if run_lizard "$project_root" "$scope_arg" "$W/measurable.txt" "$W/funcs.tsv" "$excl_dirs"; then lizard_ran=true
     else warn "lizard is on PATH but produced no parseable rows — complexity falls back to NOT-MEASURED (parse_error)."; fi
   fi
   if $jscpd_ok; then
-    if run_jscpd "$project_root" "$scope_arg" "$W/measurable.txt" "$W/dup.tsv"; then jscpd_ran=true
+    if run_jscpd "$project_root" "$scope_arg" "$W/measurable.txt" "$W/dup.tsv" "$excl_glob_list"; then jscpd_ran=true
     else warn "jscpd is on PATH but produced no parseable report — duplication falls back to NOT-MEASURED (parse_error)."; fi
   fi
 
@@ -890,6 +1326,18 @@ cmd_collect() {
   parse_module_citations "$map_file" "$W/citations.tsv"
   join_files_to_modules "$W/measurable.txt" "$W/citations.tsv" "$W/filemod.tsv" "$W/ambiguous.txt"
   local n_ambiguous; n_ambiguous="$(wc -l < "$W/ambiguous.txt" | tr -d ' ')"
+
+  # A bucketed test file's module assignment is OVERWRITTEN, not merged: it may
+  # well be cited by a module's Evidence bullets, and honouring that citation
+  # would put test code back into the production rollup by the side door.
+  if [ -s "$W/testbucket.txt" ]; then
+    LC_ALL=C sort -u "$W/testbucket.txt" > "$W/testbucket.sorted"
+    awk -F'\t' -v OFS='\t' '
+      NR == FNR { tb[$0] = 1; next }
+      { print $1, ($1 in tb ? "MOD-TESTS" : $2) }
+    ' "$W/testbucket.sorted" "$W/filemod.tsv" > "$W/filemod.bucketed"
+    mv "$W/filemod.bucketed" "$W/filemod.tsv"
+  fi
 
   # ── prior QI registry, read BEFORE anything is written ─────────────────────
   local reg; reg="$(qi_registry_path "$specclaw_abs")"
@@ -908,6 +1356,9 @@ cmd_collect() {
   tsv_json "$W/dup.tsv"     > "$W/dup.json"
   tsv_json "$W/filemod.tsv" > "$W/filemod.json"
   tsv_json "$W/prior_qi.tsv" > "$W/prior_qi.json"
+  tsv_json "$W/excluded.tsv" > "$W/excluded.json"
+
+  local n_excluded; n_excluded="$(wc -l < "$W/excluded.tsv" | tr -d ' ')"
 
   # The aggregation program goes to a file rather than through `jq -f /dev/stdin`:
   # /dev/stdin resolves to /proc/self/fd/0 on some platforms and simply is not
@@ -931,6 +1382,10 @@ cmd_collect() {
     --slurpfile dup      "$W/dup.json" \
     --slurpfile filemod  "$W/filemod.json" \
     --slurpfile prior    "$W/prior_qi.json" \
+    --slurpfile excluded "$W/excluded.json" \
+    --argjson exclCfg "$excl_effective_json" \
+    --arg exclHash "$excl_hash" \
+    --argjson exclTotal "$n_excluded" \
     --argjson tools "$(printf '{"scc":%s,"lizard":%s,"jscpd":%s}' "$scc_ran" "$lizard_ran" "$jscpd_ran")" \
     --argjson toolsOnPath "$(printf '{"scc":%s,"lizard":%s,"jscpd":%s}' "$scc_ok" "$lizard_ok" "$jscpd_ok")" \
     --arg scope "$scope_label" \
@@ -939,6 +1394,7 @@ cmd_collect() {
     --arg mapStatus "$map_status" \
     --argjson nextQi "$next_qi" \
     --argjson enumerated "$n_enumerated" \
+    --argjson measured "$n_measured" \
     --argjson ambiguous "$n_ambiguous" \
     -f "$W/agg.jq" > "$W/quality.json"
 
@@ -968,7 +1424,7 @@ cmd_collect() {
   # registers nothing: minting an id there would put a rebuild hotspot into the
   # legacy registry's permanent numbering, and no later run could tell the two
   # apart.
-  local new_count=0 open_count=0 resolved_count=0
+  local new_count=0 open_count=0 resolved_count=0 scoped_count=0
   if $is_target; then
     echo "Target scope: no QI registered (QI ids name legacy hotspots only)." >&2
   else
@@ -976,10 +1432,12 @@ cmd_collect() {
     new_count="$(jq -r --arg at "$generated_at" '[.quality_issues[] | select(.status == "open" and .first_seen == $at)] | length' "$W/quality.json")"
     open_count="$(jq -r '[.quality_issues[] | select(.status == "open")] | length' "$W/quality.json")"
     resolved_count="$(jq -r '[.quality_issues[] | select(.status == "resolved")] | length' "$W/quality.json")"
+    scoped_count="$(jq -r '[.quality_issues[] | select(.status == "excluded-by-scope")] | length' "$W/quality.json")"
   fi
 
   print_collect_summary "$W/quality.json" "$scope_label" "$display_path" \
-    "$new_count" "$open_count" "$resolved_count" "$n_enumerated" "$n_classified" "$n_ambiguous" "$map_status"
+    "$new_count" "$open_count" "$resolved_count" "$n_enumerated" "$n_classified" "$n_ambiguous" \
+    "$map_status" "$n_measured" "$scoped_count"
 
   cat "$out_json"
 }
@@ -1012,6 +1470,13 @@ write_qi_registry() {
       + "- **Value:** " + (if .value == null then "—" else (.value | tostring) end) + "\n"
       + "- **Severity:** " + (.severity // "—") + "\n"
       + "- **Status:** " + .status + "\n"
+      # Present ONLY on an excluded-by-scope entry, and it carries the hash of
+      # the exclusion config that made the decision — so a reader who wonders
+      # why a registered hotspot stopped being measured can identify the exact
+      # scope that stopped measuring it, rather than being told it went away.
+      + (if .excluded_by == null then ""
+         else "- **Excluded by scope:** " + .excluded_by.category
+              + " (" + .excluded_by.config_hash + ")\n" end)
       + "- **First seen:** " + .first_seen + "\n"
       + "- **Last checked:** " + $at
   ' --arg at "$at" "$qjson")"
@@ -1035,6 +1500,7 @@ write_qi_registry() {
 print_collect_summary() {
   local qjson="$1" scope="$2" path="$3" newc="$4" openc="$5" resc="$6"
   local enumerated="$7" classified="$8" ambiguous="$9" map_status="${10}"
+  local measured="${11}" scopedc="${12}"
 
   {
     echo "specclaw-bf-quality-collect: scope=${scope} path=${path}"
@@ -1043,7 +1509,19 @@ print_collect_summary() {
         + " lizard=" + (if .tool_availability.lizard then "ran" elif .tools_on_path.lizard then "present-but-unparseable" else "MISSING" end)
         + " jscpd=" + (if .tool_availability.jscpd then "ran" elif .tools_on_path.jscpd then "present-but-unparseable" else "MISSING" end)
     ' "$qjson"
-    echo "  files:        ${enumerated} enumerated, ${classified} of a known language"
+    # The scan scope is printed BEFORE the file counts, not after them, for the
+    # reason the report puts coverage before findings: a reader who takes
+    # "412 files measured" at face value without knowing 1,900 were scoped out
+    # has been misled, and putting that underneath reads as a footnote.
+    echo "  scan scope:   ${enumerated} enumerated, ${measured} measured, $((enumerated - measured)) excluded by scope"
+    jq -r '
+      [ .exclusions.census.by_category[]
+        | "                " + .category + ": " + (.files | tostring) + " file(s)"
+          + (if .disposition == "measured_separately" then " — measured into their own bucket, not a production rollup" else "" end) ]
+      | if length == 0 then "                nothing excluded — every enumerated file was measured" else .[] end
+    ' "$qjson"
+    jq -r '"                exclusion config " + .exclusions.config_hash' "$qjson"
+    echo "  files:        ${measured} measured, ${classified} of a known language"
     jq -r '
       "                " + (.files.sized | tostring) + " sized, "
         + (.files.function_measured | tostring) + " function-measured, "
@@ -1069,7 +1547,10 @@ print_collect_summary() {
     ' "$qjson"
     echo "                module-map.md: ${map_status}; ${ambiguous} file(s) cited by more than one module (left unassigned, never guessed)"
     if [ "$scope" = "legacy" ]; then
-      echo "  quality issues: ${newc} new, ${openc} open, ${resc} resolved"
+      echo "  quality issues: ${newc} new, ${openc} open, ${resc} resolved, ${scopedc} excluded-by-scope"
+      # Never folded into the resolved count. Nothing was fixed — the scan
+      # stopped looking, and those are different findings.
+      [ "${scopedc:-0}" = "0" ] || echo "                  excluded-by-scope means the hotspot's file is outside the configured scan scope. Not fixed, not deleted; the id is permanent."
     fi
     echo "  advisory: this run blocks nothing and exits 0. The only enforcing path is 'compare --gate'."
   } >&2
@@ -1107,6 +1588,69 @@ cmd_compare() {
   [ -z "$missing" ] || die "compare needs both quality snapshots and is missing:
 ${missing}Nothing was compared. A one-sided comparison would report every unmeasured dimension as a change."
 
+  # ── QUALITY-SCOPE-MISMATCH (PD-04) ─────────────────────────────────────────
+  #
+  # THE SCOPES MUST MATCH OR THERE IS NO COMPARISON. Every module rollup and
+  # every duplication percentage below is computed over the set of files its own
+  # snapshot measured. Comparing a legacy figure that included generated
+  # migrations against a target figure that excluded them is not a delta, it is
+  # two different questions subtracted from each other — and the answer looks
+  # like a real result, which is what makes it dangerous.
+  #
+  # So this is a LOUD NAMED STOP, not a warning like thresholds_match. A warning
+  # is appropriate when the numbers are comparable and the policy differed;
+  # here the denominators differ and no arithmetic on them means anything. No
+  # delta is written and no gate verdict is reached.
+  #
+  # Two snapshots that BOTH predate scan scoping carry no hash at all. That is a
+  # matching pair — both measured everything — and compares normally. One of
+  # each is a mismatch: the older side was measured before the scope existed and
+  # nobody can say what it covered.
+  #
+  # "unhashable" never matches, including itself. Two scopes nobody could
+  # identify are not two scopes anyone showed to be the same.
+  local l_hash t_hash
+  l_hash="$(jq -r '.exclusions.config_hash // "none"' "$legacy" 2>/dev/null | tr -d '\r' || printf 'none')"
+  t_hash="$(jq -r '.exclusions.config_hash // "none"' "$target" 2>/dev/null | tr -d '\r' || printf 'none')"
+  if [ "$l_hash" != "$t_hash" ] || [ "$l_hash" = "unhashable" ]; then
+    # WHICH SIDE IS STALE IS COMPUTED, NOT GUESSED. The config on disk right now
+    # is the scope this project uses, so the stale side is whichever snapshot
+    # does not match it — and when neither does, both are stale and saying so is
+    # the only honest answer. Naming a side by convention would send someone to
+    # re-measure the one that was already current.
+    local cur_root cur_hash="" ctmp
+    cur_root="$(cd "$specclaw_abs/.." && pwd)"
+    ctmp="$(mktemp -d)"
+    local cur_defaults="$SCRIPT_DIR/../lib/quality-exclusions.yaml"
+    [ -f "$cur_defaults" ] || cur_defaults="/dev/null"
+    build_exclusion_set "$cur_defaults" "$cur_root/.specclaw/config.yaml" \
+      "$ctmp/excl.tsv" "$ctmp/eff.txt" >/dev/null 2>&1 || true
+    [ -s "$ctmp/eff.txt" ] && cur_hash="$(scope_hash "$ctmp/eff.txt")"
+    rm -rf "$ctmp"
+
+    local stale
+    if [ -n "$cur_hash" ] && [ "$l_hash" = "$cur_hash" ]; then
+      stale="quality-target.json — re-measure it with /specclaw:bf-quality --target <path to the rebuilt tree>. quality.json already matches the current config."
+    elif [ -n "$cur_hash" ] && [ "$t_hash" = "$cur_hash" ]; then
+      stale="quality.json — re-measure it with /specclaw:bf-quality. quality-target.json already matches the current config."
+    else
+      stale="BOTH — neither snapshot was measured over the scope config.yaml defines now. Run /specclaw:bf-quality, then /specclaw:bf-quality --target <path to the rebuilt tree>."
+    fi
+    die "QUALITY-SCOPE-MISMATCH — the two snapshots were measured over DIFFERENT scan scopes and cannot be compared.
+
+  legacy   quality.json         exclusion config ${l_hash}
+  target   quality-target.json  exclusion config ${t_hash}
+  current  config.yaml          exclusion config ${cur_hash:-could not be computed}
+
+Every module rollup and duplication percentage in a snapshot is computed over
+the files that snapshot measured. Subtracting one scope's numbers from
+another's produces a delta that looks real and means nothing, so no
+quality-delta.json was written and no QUALITY-GATE verdict was computed.
+
+Re-measure and compare again:
+  ${stale}"
+  fi
+
   local out="$analysis_dir/quality-delta.json"
   local generated_at; generated_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
@@ -1138,6 +1682,13 @@ ${missing}Nothing was compared. A one-sided comparison would report every unmeas
     | { schema_version: 1, generated_at: $at,
         legacy: {generated_at: $l.generated_at, path: $l.path, tool_availability: $l.tool_availability},
         target: {generated_at: $t.generated_at, path: $t.path, tool_availability: $t.tool_availability},
+        # Recorded, not checked: the check already happened in bash and this
+        # command does not get here unless the two matched. Carrying it means a
+        # delta can be traced back to the scope that produced it long after the
+        # snapshots have been rotated into archive/.
+        scan_scope: { config_hash: ($l.exclusions.config_hash // "none"),
+                      matched: true,
+                      exclusions: ($l.exclusions // null) },
         thresholds: $l.thresholds,
         thresholds_match: ($l.thresholds == $t.thresholds),
         modules_legacy_only: [ $mids[] | select($lm[.] != null and $tm[.] == null) ],
@@ -1162,6 +1713,7 @@ ${missing}Nothing was compared. A one-sided comparison would report every unmeas
         + (.summary.regressed | tostring) + " regressed, "
         + (.summary.not_comparable | tostring) + " NOT-COMPARABLE"
     ' "$out"
+    jq -r '"  scan scope: identical on both sides — exclusion config " + .scan_scope.config_hash' "$out"
     jq -r 'if .thresholds_match then empty else "  WARN: the two snapshots were classified against DIFFERENT thresholds — every status comparison below is between two different questions." end' "$out"
     jq -r 'if (.modules_legacy_only | length) > 0 then "  legacy-only modules (nothing to compare): " + (.modules_legacy_only | join(", ")) else empty end' "$out"
     jq -r 'if (.modules_target_only | length) > 0 then "  target-only modules (nothing to compare): " + (.modules_target_only | join(", ")) else empty end' "$out"
