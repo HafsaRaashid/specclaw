@@ -119,6 +119,11 @@
 #  42  two hotspots, real rows    → two unnamed functions in one file, measured by
 #                                   rows of the real shape, register two ids with
 #                                   distinct keys and keep them on a re-run
+#  43  scope normalisation        → the function name reaches the key unquoted, and a
+#                                   registry written while it did not is migrated in
+#                                   place: same id, same first seen, no renumbering,
+#                                   idempotent, and a quoted scope in the artifact
+#                                   stops the run
 #
 # Plain bash + coreutils, plus jq for assertions (same as run-parser-tests.sh
 # and run-cs-body-parser-tests.sh). Run from anywhere:
@@ -3119,6 +3124,99 @@ c42_first="$(jq -r '[.quality_issues[] | .id + "=" + .key] | sort | join(" ")' "
 ( cd "$C42" && PATH="$(clean_path "$S42")" bash "$QUALITY_BIN" collect .specclaw >/dev/null 2>&1 )
 c42_second="$(jq -r '[.quality_issues[] | .id + "=" + .key] | sort | join(" ")' "$C42_JSON" 2>/dev/null)"
 assert_eq_nonempty "42c and a re-run gives every one of them the same id" "$c42_first" "$c42_second"
+
+# ── Case 43 — the scope loses its quotes, and the registry comes with it ──────
+#
+# lizard --csv quotes the function name. run_lizard passed the quotes through,
+# so `"Login"` went into the key and every registry written in that period holds
+# a quoted scope. Normalising at the parser makes the live key `Login` and the
+# stored one unreachable — which resolves the entry and re-registers the hotspot
+# under a fresh number, the one thing a permanent id exists to prevent. So the
+# stored key is migrated instead, and this asks whether it is.
+
+echo
+echo "--- Case 43: the scope is normalised, and old ids follow it ---"
+C43="$WORK/c43"; new_project "$C43"; module_map_one "$C43"
+S43="$WORK/c43-stub"
+stub_scc "$S43" '[{"Name":"C#","Files":[{"Location":"src/Calc.cs","Lines":80,"Code":70}]}]'
+stub_lizard "$S43" "$(liz_row_real 'src/Calc.cs' 'Login' 34 200 42 242)"
+
+# A registry from that period: five-field keys, correct in every slot but one.
+cat > "$C43/.specclaw/analysis/quality-issues.md" <<'C43REG'
+# Quality Issues: Fixture
+
+**Path measured:** .
+**Last updated:** 2026-08-01T00:00:00Z
+
+### QI-007
+
+- **Key:** complexity|src/Calc.cs|"Login"|MOD-001|42
+- **Value:** 34
+- **Status:** open
+- **First seen:** 2026-08-01T00:00:00Z
+
+### QI-008
+
+- **Key:** function_length|src/Calc.cs|"Login"|MOD-001|42
+- **Value:** 200
+- **Status:** open
+- **First seen:** 2026-08-01T00:00:00Z
+C43REG
+
+( cd "$C43" && PATH="$(clean_path "$S43")" bash "$QUALITY_BIN" collect .specclaw >/dev/null 2>&1 )
+C43_JSON="$C43/.specclaw/analysis/quality.json"
+C43_REG="$C43/.specclaw/analysis/quality-issues.md"
+
+c43_map="$(jq -r '[.quality_issues[] | "\(.id)=\(.key)"] | sort | join(" ")' "$C43_JSON" 2>/dev/null)"
+assert_eq_nonempty "43a the id stays on its hotspot and the key loses its quotes" \
+  'QI-007=complexity|src/Calc.cs|Login|MOD-001|42 QI-008=function_length|src/Calc.cs|Login|MOD-001|42' \
+  "$c43_map"
+
+assert_eq "43b nothing was renumbered — no third id exists" "2" \
+  "$(grep -c '^### QI-' "$C43_REG")"
+
+c43_first="$(jq -r '[.quality_issues[] | .first_seen] | unique | join(",")' "$C43_JSON" 2>/dev/null)"
+assert_eq_nonempty "43c and both keep the date they were first seen" "2026-08-01T00:00:00Z" "$c43_first"
+
+assert_contains "43d the registry records what it did, in both directions" \
+  'scope normalised: `complexity|src/Calc.cs|"Login"|MOD-001|42` → `complexity|src/Calc.cs|Login|MOD-001|42`' \
+  "$(cat "$C43_REG")"
+
+# Document order, not the order awk happens to walk a map: two machines
+# migrating one registry should write the same paragraph.
+c43_order="$(grep -c 'scope normalised' "$C43_REG")"
+assert_eq "43e one line per migrated entry" "2" "$c43_order"
+c43_seq="$(grep 'scope normalised' "$C43_REG" | sed 's/^- \(QI-[0-9]*\).*/\1/' | tr '\n' ' ')"
+assert_eq_nonempty "43f written in the order the registry holds them" "QI-007 QI-008 " "$c43_seq"
+
+# Idempotence, byte for byte but for the timestamps.
+cp "$C43_REG" "$WORK/c43-reg-after1.md"
+( cd "$C43" && PATH="$(clean_path "$S43")" bash "$QUALITY_BIN" collect .specclaw >/dev/null 2>&1 )
+c43_before="$(sed -e 's/^- \*\*Last checked:.*/T/' -e 's/^\*\*Last updated:.*/T/' "$WORK/c43-reg-after1.md")"
+c43_after="$(sed -e 's/^- \*\*Last checked:.*/T/' -e 's/^\*\*Last updated:.*/T/' "$C43_REG")"
+assert_eq_nonempty "43g a second run migrates nothing and appends no second record" "$c43_before" "$c43_after"
+
+# The tripwire. A quoted scope reaching the artifact means the parser stopped
+# normalising, and nothing else in the pipeline would notice: a quoted scope
+# keys and compares like any other string, which is how it survived a release.
+C43B="$WORK/c43b"; new_project "$C43B"; module_map_one "$C43B"
+S43B="$WORK/c43b-stub"
+stub_scc "$S43B" '[{"Name":"C#","Files":[{"Location":"src/Calc.cs","Lines":80,"Code":70}]}]'
+# Doubly quoted at the source, so one unquoting still leaves a wrapped name —
+# which is what a parser that had stopped normalising would hand over.
+stub_lizard "$S43B" '200,34,100,2,200,"Login@42-242@src/Calc.cs","src/Calc.cs","""Login""","""Login""( int a , int b )",42,242'
+
+c43b_err="$( cd "$C43B" && PATH="$(clean_path "$S43B")" bash "$QUALITY_BIN" collect .specclaw 2>&1 >/dev/null )"
+c43b_exit=$?
+assert_eq "43h a scope that still wears its quotes stops the run" "1" "$c43b_exit"
+assert_contains "43i and says which id and key" "QI-001" "$c43b_err"
+assert_contains "43j naming the fault, not a symptom of it" "quoted scope" "$c43b_err"
+
+if [[ -f "$C43B/.specclaw/analysis/quality.json" ]]; then
+  fail "43k nothing is written when the scope cannot be trusted"
+else
+  pass "43k nothing is written when the scope cannot be trusted"
+fi
 
 # ── Result ───────────────────────────────────────────────────────────────────
 

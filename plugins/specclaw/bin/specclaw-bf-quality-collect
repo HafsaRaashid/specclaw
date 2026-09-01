@@ -1565,7 +1565,28 @@ read_qi_migrations() {
 # both. A clone key deliberately carries no line number — editing code above a
 # clone moves it without changing it — so clones are outside this entirely.
 #
-# THREE CASES, and only the third involves any judgement:
+# A FOURTH SHAPE, and the reason this function was extended rather than retired:
+# a five-field key whose scope slot still carries the quotes lizard --csv put
+# around the function name, as in
+#
+#   complexity|src/Calc.cs|"Login"|MOD-001|42
+#
+# run_lizard read that field with a comma split and passed the quotes straight
+# through, so every registry written while that was true holds quoted scopes.
+# Normalising at the parser makes the live key `...|Login|...` and the stored one
+# unreachable, which would resolve the entry and re-register the hotspot under a
+# fresh number — the mass renumbering this whole function exists to prevent.
+#
+# So it is migrated, and it is the one case with nothing to decide. Unquoting a
+# scope is a RENAME, not a re-identification: same metric, same file, same start
+# line, same physical hotspot, spelled without the quotes. No live hotspot has
+# to be found for it, which is why it runs unconditionally — an entry whose
+# hotspot is currently gone is renamed anyway and resolves under the new
+# spelling exactly as it would have under the old, so a resolve-then-return
+# cycle still reopens on the original id. The only refusal is two stored keys
+# normalising onto one, which no collector ever wrote and a hand-edit could.
+#
+# THREE CASES for the four-field shape, and only the third involves judgement:
 #
 #   one old key, one live hotspot     unambiguous. The id keeps its number and
 #                                     records the new key. The recorded value is
@@ -1616,6 +1637,28 @@ migrate_qi_registry() {
       n = split(k, a, /[|]/)
       return (n == 4 && a[1] != "duplication-clone")
     }
+    # The same normalisation the CSV parser applies to the field on the way in,
+    # applied here to the value a registry recorded before it did. Both sides of
+    # every comparison are normalised or neither is; a key that differs only by
+    # quoting is the same key, and treating it as a different one loses an id.
+    #
+    # "" is honoured as an escaped quote for the sake of being a CSV reader,
+    # though the producer sanitises a quote to an apostrophe and cannot emit one.
+    function unq(s,   t) {
+      t = s
+      if (t ~ /^".*"$/) { t = substr(t, 2, length(t) - 2); gsub(/""/, "\"", t) }
+      return t
+    }
+    # The normalised form of a five-field key whose scope is quoted, or "" when
+    # there is nothing to normalise. Slot 5 is untouched: the start line is what
+    # already tells the hotspots apart and this changes only how one is spelled.
+    function unquoted_of(k,   n, a, s) {
+      n = split(k, a, /[|]/)
+      if (n != 5 || a[1] == "duplication-clone") return ""
+      s = unq(a[3])
+      if (s == a[3]) return ""
+      return a[1] "|" a[2] "|" s "|" a[4] "|" a[5]
+    }
     function numlike(v) { return (v ~ /^-?[0-9]+([.][0-9]+)?$/) }
     function same_value(a, b) {
       if (numlike(a) && numlike(b)) return ((a + 0) == (b + 0))
@@ -1635,10 +1678,41 @@ migrate_qi_registry() {
       pn = ++prows
       pkey[pn] = $1; pid[pn] = $2; pfirst[pn] = $3; pstat[pn] = $4; pval[pn] = $5; psup[pn] = $6
       if (is_old($1)) { gn = ++gc[$1]; gi[$1, gn] = pn }
+      else {
+        uk = unquoted_of($1)
+        if (uk != "") { qn = ++qc[uk]; qx[uk, qn] = pn }
+      }
     }
     END {
       changed = 0
       for (pn = 1; pn <= prows; pn++) newkey[pn] = pkey[pn]
+
+      # The rename. No live set is consulted and no value is matched, because
+      # neither is evidence of anything here — the key already names one hotspot
+      # and keeps naming it.
+      #
+      # Refuse first, rename second, so a registry holding one bad group does not
+      # get half-migrated before the run stops.
+      for (k in qc) {
+        if (qc[k] <= 1) continue
+        printf "  %d entries normalise onto the one key %s\n", qc[k], k > "/dev/stderr"
+        for (g = 1; g <= qc[k]; g++) {
+          pn = qx[k, g]
+          printf "    %s key %s (recorded value %s)\n", pid[pn], pkey[pn], pval[pn] > "/dev/stderr"
+        }
+        fatal = 1
+      }
+      # Walked in DOCUMENT order, not by iterating the group map: `for (k in arr)`
+      # visits in whatever order awk feels like, and this loop writes lines into a
+      # file somebody keeps. Two machines migrating one registry should produce
+      # the same paragraph, so the order comes from the registry itself.
+      for (pn = 1; pn <= prows; pn++) {
+        uk = unquoted_of(pkey[pn])
+        if (uk == "" || qc[uk] > 1) continue
+        newkey[pn] = uk
+        printf "- %s — scope normalised: `%s` → `%s`\n", pid[pn], pkey[pn], uk >> REC
+        changed = 1
+      }
 
       for (k in gc) {
         ng = gc[k]; nl = (k in lc) ? lc[k] : 0
@@ -2607,10 +2681,19 @@ cmd_collect() {
   # ── PD-03: migrate the registry onto the new key shape ───────────────────
   #
   # Legacy scope only, for the same reason the registry itself is legacy-only: a
-  # target run has no registry to migrate. Guarded on there being an old-format
+  # target run has no registry to migrate. Guarded on there being a migratable
   # key at all, so the steady state costs nothing — no dry pass, no second jq.
+  #
+  # BOTH shapes are counted, or the guard hides the migration it gates: a
+  # registry whose keys are all five-field but quoted has no four-field key left
+  # to trip the old count, and would have sailed past into a renumbering.
   local n_old_keys
-  n_old_keys="$(awk -F'\t' '{n = split($1, a, /[|]/); if (n == 4 && a[1] != "duplication-clone") c++} END {print c + 0}' "$W/prior_qi.tsv")"
+  n_old_keys="$(awk -F'\t' '
+    { n = split($1, a, /[|]/)
+      if (a[1] == "duplication-clone") next
+      if (n == 4) { c++; next }
+      if (n == 5 && a[3] ~ /^".*"$/) c++ }
+    END {print c + 0}' "$W/prior_qi.tsv")"
   if ! $is_target && [ "$n_old_keys" -gt 0 ]; then
     printf '[]' > "$W/empty.json"
     # The dry pass. Its ids are discarded — only the live keys and their measured
@@ -2645,7 +2728,7 @@ Nothing was written. Resolve it by hand in the registry — give each colliding 
       local mig_new
       mig_new="### ${generated_at}
 
-Identity keys gained a start line so that two hotspots in one file can no longer share one id. Exclusion config \`${excl_hash}\`.
+Identity keys gained a start line so that two hotspots in one file can no longer share one id, and a scope is now spelled without the quotes the measuring tool put around it. Every id below kept its number and its first-seen date. Exclusion config \`${excl_hash}\`.
 
 $(cat "$W/migration.txt")"
       if [ -n "$qi_migrations" ]; then
