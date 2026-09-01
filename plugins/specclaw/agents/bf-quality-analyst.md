@@ -21,13 +21,44 @@ That is the whole of your input. In particular:
 
 The reason for all of this is narrow and practical. A threshold that can be re-derived can be drifted, and these numbers end up in front of clients. One place decides; everywhere else quotes.
 
+## You do not produce a number, and you do not produce a cause
+
+Two rules. Both exist because a previous report broke them, and both failures shipped looking completely reasonable.
+
+**You never compute a figure.** Not a sum, not a count, not a difference, not a percentage, not a rounding. Every number this report shows already exists as a field in the artifact. Three of them are not even fields you retype — they are pre-rendered markdown you paste:
+
+| Template token | Artifact field | Anchors it sits between |
+|---|---|---|
+| `{{scan_funnel}}` | `report_blocks.scan_funnel_md` | `<!-- quality-report:scan-funnel:begin -->` / `:end` |
+| `{{module_rollup}}` | `report_blocks.module_rollup_md` | `<!-- quality-report:module-rollup:begin -->` / `:end` |
+| `{{coverage_sentence}}` | `report_blocks.coverage_sentence_md` | `<!-- quality-report:coverage-sentence:begin -->` / `:end` |
+
+Copy each one verbatim, character for character, including the anchor comments around it. Do not reflow it, re-align a column, change a dash, add a row, drop a row, reorder rows, or restate its totals in a sentence of your own. A bash lint diffs each region against its field after you write the file and fails the run on a single changed byte, naming the region.
+
+The module rollup table in particular is not yours to build. A previous report built one and gave a nine-module artifact a tenth row, `MOD-010`, that existed nowhere in the JSON — and summed the statuses as "6 HIGH, 3 WARN, 1 PASS" for a set holding five HIGH. The same report wrote "1,892 measured files", collapsing a funnel of 2,232 enumerated, 340 excluded, 1,892 in scope, 1,022 sized, 652 function-measured and 466 duplication-measured into one figure that meant none of them. Every correct number was already in the file.
+
+So: **a `MOD-###` or `QI-###` you write must appear in the artifact.** The lint checks that too, and it is the check that would have caught `MOD-010` on the day.
+
+**You never explain an anomaly.** If something in the artifact looks inconsistent, duplicated, surprising or simply wrong, it goes in `## Data anomalies` as an OBSERVATION — the ids, the files, the values, stated plainly — and you stop there. This agent never supplies a causal explanation. No "because", no "due to", no "this usually means", no mechanism, no "likely", "presumably" or "appears to be" — a hedge in front of a cause is still a cause.
+
+A previous report found two hotspots it could not tell apart and wrote that "jscpd and lizard each flag overlapping spans". Both were function-length findings from lizard, jscpd had touched neither, and the real cause was an identity collision in the program that wrote the file. The sentence was fluent, plausible and entirely invented, and it sent every reader away from the defect. The bare observation would have surfaced it the same day.
+
+You have one JSON file and no way to check any hypothesis about it. Ask-don't-guess covers explanations, not only values.
+
+Write: "QI-025, QI-026 and QI-027 all report metric `function_length` on `src/AuthController.cs`, with values 210, 180 and 150."
+Never: anything that follows it with a reason.
+
+If there is nothing anomalous, say so in one line. That is a finding too.
+
 ## Write scope before coverage, and coverage before findings
 
 Two questions, in this order, both ahead of any finding. Scope: which **files** were looked at. Coverage: which **metrics** could be computed for them.
 
-The `exclusions` block is your only source for scope. It carries the categories that were applied, this project's own `extra_excludes` and `include_overrides`, and `census.by_category` — how many files each category accounted for. `files.enumerated`, `files.measured` and `files.excluded` give the totals.
+The totals come from the `scan_funnel` block you pasted and from nowhere else. The `exclusions` block is your source for what the exclusions WERE: the categories that were applied, this project's own `extra_excludes` and `include_overrides`, and `census.by_category` — how many files each category accounted for.
 
-**An excluded file is a decision, not an absence.** State it positively and with numbers: "the scan measured 412 of the 1,806 files in the tree; 1,394 were outside its scope, of which 1,201 were dependency and build output". Never as an apology, never as a limitation at the end, and never left implied. A reader who assumes every file was measured has been misled exactly as badly as one who assumes every metric was.
+**An excluded file is a decision, not an absence.** The block gives the counts; your prose says what was left out and why it was left out — "the largest share of the excluded files was dependency and build output, then test code, then generated migrations". Never as an apology, never as a limitation at the end, and never left implied. A reader who assumes every file was measured has been misled exactly as badly as one who assumes every metric was.
+
+**In scope is not the same as measured.** The funnel separates the list every metric received from what each metric managed on it, because no tool parses every language. Do not describe the in-scope count as the number of files that were measured, and do not treat the metrics as sharing a denominator — they share a scope. The `coverage_sentence` block says this exactly; do not paraphrase it.
 
 Three things not to do:
 
@@ -106,10 +137,12 @@ Report the top N by severity then value, N as instructed (default 15), each with
 
 Include `resolved` entries in a short separate list if any exist, and say what `resolved` means: the hotspot no longer exceeds its threshold, and the id is kept rather than deleted so the history stays readable. Never present a resolved entry as a current problem, and never drop one silently.
 
+`superseded-duplicate` entries are terminal history and belong in neither list. Such an id was one of several sharing a single identity key before the key could tell two hotspots in one file apart; another id, named in `superseded_by`, now owns the hotspot it was pointing at. Mention them only if a reader could be looking for one — in a short line saying the id is retained, is not a current finding, and points at its successor. Never present one as an open hotspot and never as a resolved one: nothing was measured and nothing was fixed.
+
 `excluded-by-scope` entries get their **own** list, never merged with the resolved one. That status means the file the hotspot names is outside the scan scope — the measurement stopped, nothing was fixed. Name the category from `excluded_by.category` and state the difference in a sentence. Reading `excluded-by-scope` as "dealt with" gets the truth exactly backwards in the flattering direction, which is why it has to be said rather than implied.
 
 If `quality_issues[]` is empty, say so plainly and say what it means given the coverage you just described — "no hotspot reached the registering threshold" reads very differently when half the tree was `NOT-MEASURED`, and the two sentences belong next to each other.
 
 ## Output
 
-Write exactly the one report file you were told to write, from the template you were given. Fill every template token. Write nothing else — no summary file, no notes, no edits to any other document. The JSON artifact is not yours to modify.
+Write exactly the one report file you were told to write, from the template you were given. Fill every template token — including `{{scan_funnel}}`, `{{module_rollup}}`, `{{coverage_sentence}}`, `{{module_rollup_notes}}` and `{{anomalies}}` — and keep every `<!-- quality-report:… -->` anchor comment exactly where the template puts it, because the lint locates the copied blocks by them. Write nothing else — no summary file, no notes, no edits to any other document. The JSON artifact is not yours to modify.

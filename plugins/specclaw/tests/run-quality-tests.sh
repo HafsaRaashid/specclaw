@@ -88,6 +88,29 @@
 #                                   that forbids printing source and requires the
 #                                   truncation footer
 #  31  zero duplication           → an honest empty result, and no crash with jscpd absent
+#  32  unnamed functions          → two lambdas in one file are two hotspots with two
+#                                   keys, and an unchanged re-run keeps both ids
+#  33  scope sentinels            → *global* and <anonymous> coexist on one file
+#                                   without colliding; nothing shares a key
+#  34  identity assertion         → two hotspots on one key, or one with no start
+#                                   line, fail the run and nothing is written
+#  35  registry migration         → old ids map onto the new key by recorded value,
+#                                   the unmatched one is tombstoned naming its
+#                                   successor, the unclaimed hotspot registers
+#                                   fresh, a second run is a no-op, and an
+#                                   undecidable collision stops instead of guessing
+#  36  scan funnel                → the funnel is a projection of the counts, each
+#                                   metric's coverage is its own, and the rendered
+#                                   block states them
+#  37  module rollup summary      → the summary matches the modules array and the
+#                                   rendered table holds one row per module, no more
+#  38  report lint                → a faithful report passes; an invented row, a
+#                                   retyped tally, a retyped figure, an unknown id
+#                                   and a missing anchor each fail, by name
+#  39  coverage sentence          → rendered from the funnel; the shared-denominator
+#                                   claim is gone from the template
+#  40  anomaly rule               → the agent is told to observe and stop, and the
+#                                   template carries the section to put it in
 #
 # Plain bash + coreutils, plus jq for assertions (same as run-parser-tests.sh
 # and run-cs-body-parser-tests.sh). Run from anywhere:
@@ -150,6 +173,39 @@ JQ_DIR="$(dirname "$(command -v jq)")"
 GIT_DIR_BIN=""
 if command -v git >/dev/null 2>&1; then GIT_DIR_BIN=":$(dirname "$(command -v git)")"; fi
 clean_path() { printf '%s:%s%s:/usr/bin:/bin' "$1" "$JQ_DIR" "$GIT_DIR_BIN"; }
+
+# q_norm_identity — reads an artifact on stdin and removes what the QI-identity
+# change ADDED or RESHAPED, so the two neutrality diffs (21b, 23i) keep asking
+# the question they were written to ask.
+#
+# Both of those cases byte-compare this collector's output against an older one
+# fetched from origin/main. That comparison is about MEASUREMENTS: every status,
+# rollup, LOC, coverage row and QI id must be identical. It was never about the
+# artifact's field list, and a field that did not exist on the other side is not
+# a changed measurement — which is why both cases already strip `exclusions`,
+# `duplication_clones` and the clone threshold keys.
+#
+# Three blocks are new and are pure projections of fields still under
+# comparison. `scope`, `start` and `superseded_by` are likewise new per entry.
+# And `key` is deliberately reshaped: it gained a start line so that two
+# hotspots in one file stop sharing an id. So the key is normalised BACK to the
+# four-field form rather than deleted — a hotspot that moved to a different
+# file, metric or module still shows up as a difference, which is the failure
+# these cases exist to catch.
+q_norm_identity() {
+  jq -S '
+    def old_key:
+      (split("|")) as $k
+      | if $k[0] == "duplication-clone" then .
+        elif ($k | length) == 5 then
+          [ $k[0], $k[1],
+            (if $k[2] == "<anonymous>" or $k[2] == "*global*" then "" else $k[2] end),
+            $k[3] ] | join("|")
+        else . end;
+    del(.scan_funnel, .module_rollup_summary, .report_blocks)
+    | (.quality_issues // []) |= map(del(.scope, .start, .superseded_by) | .key |= old_key)
+  '
+}
 
 # ── Fixture + stub writers ──────────────────────────────────────────────────
 #
@@ -1856,7 +1912,8 @@ q_strip() {
          | del(.generated_at, .exclusions)
          | .files |= del(.enumerated, .measured, .excluded)
          | (.quality_issues // []) |= map(del(.excluded_by)
-             | if .first_seen == $ga then .first_seen = "<registered by this run>" else . end)' "$1"
+             | if .first_seen == $ga then .first_seen = "<registered by this run>" else . end)' "$1" \
+    | q_norm_identity
 }
 PRE21="$WORK/pre-quality-collect"
 C21B_JSON=""
@@ -2078,7 +2135,8 @@ q_strip_clones() {
          | del(.generated_at, .duplication_clones)
          | .thresholds |= del(.clone_qi_min_lines, .clone_function_min_overlap)
          | (.quality_issues // []) |= map(del(.peer_file, .fragment_sha256)
-             | if .first_seen == $ga then .first_seen = "<this run>" else . end)' "$1"
+             | if .first_seen == $ga then .first_seen = "<this run>" else . end)' "$1" \
+    | q_norm_identity
 }
 # The pre-change binary is written into the REAL bin/ directory, not $WORK, and
 # that placement is the whole point. The collector resolves its exclusion
@@ -2401,6 +2459,512 @@ c31b_out="$( cd "$C31B" && PATH="$(clean_path "$S31B")" bash "$QUALITY_BIN" coll
 assert_eq "31e with no jscpd at all: exit 0" "0" "$?"
 assert_eq_nonempty "31f and the clone census is zeroed rather than missing" "0" \
   "$(printf '%s' "$c31b_out" | jq -r '.duplication_clones.census.clones_found')"
+
+# ── Case 32 — two unnamed functions in one file are two hotspots ─────────────
+#
+# The collision that started all of this. lizard names every unnamed function
+# "(anonymous)" and some parsers emit the name field empty, so before the key
+# carried a start line two over-length lambdas in one file produced ONE key —
+# and on the second run the prior-registry map collapsed both onto one id and
+# dropped the other. Ids are permanent; this is what "permanent" was failing to
+# mean.
+
+echo
+echo "--- Case 32: two unnamed functions in one file get two distinct keys and keep them ---"
+C32="$WORK/c32"; new_project "$C32"; module_map_one "$C32"
+S32="$WORK/c32-stub"
+stub_scc "$S32" '[{"Name":"C#","Files":[{"Location":"src/Calc.cs","Lines":80,"Code":70}]}]'
+# Two rows, one file, no function name, different spans, both over the
+# function-length HIGH band. ccn stays low so nothing registers on complexity.
+stub_lizard "$S32" "$(liz_row_range 'src/Calc.cs' '' 3 200 10 220)
+$(liz_row_range 'src/Calc.cs' '' 3 150 300 460)"
+
+( cd "$C32" && PATH="$(clean_path "$S32")" bash "$QUALITY_BIN" collect .specclaw >/dev/null 2>&1 )
+C32_JSON="$C32/.specclaw/analysis/quality.json"
+
+c32_n="$(jq -r '[.quality_issues[] | select(.metric == "function_length")] | length' "$C32_JSON")"
+assert_eq "32a both over-length functions register, not one" "2" "$c32_n"
+
+c32_keys="$(jq -r '[.quality_issues[] | select(.metric == "function_length") | .key] | unique | length' "$C32_JSON")"
+assert_eq "32b their keys are distinct" "2" "$c32_keys"
+
+c32_shape="$(jq -r '[.quality_issues[] | select(.metric == "function_length")
+  | "\(.scope)@\(.start)"] | sort | join(",")' "$C32_JSON")"
+assert_eq_nonempty "32c each is keyed <anonymous> plus its own start line" \
+  "<anonymous>@10,<anonymous>@300" "$c32_shape"
+
+# The Function field must stay empty. <anonymous> is a KEY sentinel, and
+# publishing it as a function name would be inventing one.
+c32_fn="$(jq -r '[.quality_issues[] | select(.metric == "function_length" and .function != null)] | length' "$C32_JSON")"
+assert_eq "32d the sentinel never leaks into the Function field" "0" "$c32_fn"
+
+c32_r1="$(jq -S -c '[.quality_issues[] | {id, key, first_seen}]' "$C32_JSON")"
+( cd "$C32" && PATH="$(clean_path "$S32")" bash "$QUALITY_BIN" collect .specclaw >/dev/null 2>&1 )
+c32_r2="$(jq -S -c '[.quality_issues[] | {id, key, first_seen}]' "$C32_JSON")"
+assert_eq_nonempty "32e an unchanged re-run assigns byte-identical ids" "$c32_r1" "$c32_r2"
+
+# ── Case 33 — the *global* sentinel, and that it collides with nothing ───────
+#
+# There cannot literally be two file-level findings of the SAME metric in one
+# file — a file has one length. What there can be, and what has to stay
+# distinct, is every scope sentinel appearing at once in one measurement:
+# *global* on a file-level metric, *global* on a module-level one, and
+# <anonymous> twice over on functions inside the same file. That is the case
+# where a blank slot used to make several of them one key.
+
+echo
+echo "--- Case 33: *global* and <anonymous> coexist in one file without colliding ---"
+C33="$WORK/c33"; clone_project "$C33"
+S33="$WORK/c33-stub"
+stub_scc "$S33" '[{"Name":"C#","Files":[
+  {"Location":"src/A.cs","Lines":1500,"Code":1400},
+  {"Location":"src/B.cs","Lines":1200,"Code":1100}]}]'
+stub_lizard "$S33" "$(liz_row_range 'src/A.cs' '' 3 200 10 220)
+$(liz_row_range 'src/A.cs' '' 3 150 300 460)"
+stub_jscpd "$S33" "$(jscpd_report '{"src/A.cs":{"lines":1500,"duplicatedLines":900},"src/B.cs":{"lines":1200,"duplicatedLines":700}}')"
+
+( cd "$C33" && PATH="$(clean_path "$S33")" bash "$QUALITY_BIN" collect .specclaw >/dev/null 2>&1 )
+C33_JSON="$C33/.specclaw/analysis/quality.json"
+
+c33_dupes="$(jq -r '[.quality_issues[] | select(.status != "superseded-duplicate")]
+  | group_by(.key) | map(select(length > 1)) | length' "$C33_JSON")"
+assert_eq "33a no two hotspots share a key" "0" "$c33_dupes"
+
+c33_global="$(jq -r '[.quality_issues[] | select(.metric == "file_length" or .metric == "duplication") | .scope]
+  | unique | join(",")' "$C33_JSON")"
+assert_eq_nonempty "33b every file- and module-level hotspot is scoped *global*" "*global*" "$c33_global"
+
+c33_starts="$(jq -r '[.quality_issues[] | select(.metric == "file_length") | .start] | unique | join(",")' "$C33_JSON")"
+assert_eq_nonempty "33c a file-level hotspot starts at line 1, its span being the file" "1" "$c33_starts"
+
+c33_dupstart="$(jq -r '[.quality_issues[] | select(.metric == "duplication") | .start] | unique | join(",")' "$C33_JSON")"
+assert_eq_nonempty "33d a module-level hotspot carries 0, which is not a line" "0" "$c33_dupstart"
+
+# The point of the sentinels: a *global* key and an <anonymous> key on the same
+# file, same module, never read as the same hotspot.
+c33_akeys="$(jq -r '[.quality_issues[] | select(.file == "src/A.cs") | .key] | unique | length' "$C33_JSON")"
+c33_acount="$(jq -r '[.quality_issues[] | select(.file == "src/A.cs")] | length' "$C33_JSON")"
+assert_eq_nonempty "33e every hotspot on one file has its own key" "$c33_acount" "$c33_akeys"
+
+# ── Case 34 — the identity assertion refuses to write a broken set (PD-02) ───
+
+echo
+echo "--- Case 34: two hotspots on one key, or one with no start line, stop the run ---"
+C34="$WORK/c34"; new_project "$C34"; module_map_one "$C34"
+S34="$WORK/c34-stub"
+stub_scc "$S34" '[{"Name":"C#","Files":[{"Location":"src/Calc.cs","Lines":80,"Code":70}]}]'
+# Two rows the measuring tool should never emit: same file, same name, same
+# start line, different lengths. Nothing downstream can tell them apart, so the
+# collector must not pretend it can.
+stub_lizard "$S34" "$(liz_row_range 'src/Calc.cs' 'Run' 3 200 10 220)
+$(liz_row_range 'src/Calc.cs' 'Run' 3 300 10 320)"
+
+c34_err="$( cd "$C34" && PATH="$(clean_path "$S34")" bash "$QUALITY_BIN" collect .specclaw 2>&1 >/dev/null )"
+c34_exit=$?
+assert_eq "34a a colliding set fails the run" "1" "$c34_exit"
+assert_contains "34b and says what collided" "QI identity collision" "$c34_err"
+assert_contains "34c naming the first entry and its value" "value=200" "$c34_err"
+assert_contains "34d and the second" "value=300" "$c34_err"
+
+if [[ -f "$C34/.specclaw/analysis/quality.json" ]]; then
+  fail "34e nothing is written when identity cannot be established"
+else
+  pass "34e nothing is written when identity cannot be established"
+fi
+
+# The other half of the assertion: lizard's start-line columns are OPTIONAL, so
+# a build that stops emitting them still measures complexity fine — but a
+# hotspot with no start line has no identity, and registering it would quietly
+# restore the collapse the start line was added to fix.
+C34B="$WORK/c34b"; new_project "$C34B"; module_map_one "$C34B"
+S34B="$WORK/c34b-stub"
+stub_scc "$S34B" '[{"Name":"C#","Files":[{"Location":"src/Calc.cs","Lines":80,"Code":70}]}]'
+# Eight fields exactly: parseable, measurable, and carrying no line numbers.
+stub_lizard "$S34B" '200,3,900,2,200,Run@1-1@src/Calc.cs,src/Calc.cs,Run'
+
+c34b_err="$( cd "$C34B" && PATH="$(clean_path "$S34B")" bash "$QUALITY_BIN" collect .specclaw 2>&1 >/dev/null )"
+c34b_exit=$?
+assert_eq "34f a registering hotspot with no start line fails the run" "1" "$c34b_exit"
+assert_contains "34g and says the start line is what is missing" "no start line" "$c34b_err"
+
+# ── Case 35 — the registry migration (PD-03) ─────────────────────────────────
+#
+# The state a real registry is in: three ids minted under one four-field key,
+# each recording the value of the hotspot it was actually measuring. The
+# migration has to keep every id, put each on the right hotspot, tombstone the
+# one that matches nothing, register the hotspot nobody claimed, and do nothing
+# at all the second time.
+
+echo
+echo "--- Case 35: old ids are mapped onto the new key, never renumbered ---"
+C35="$WORK/c35"; new_project "$C35"; module_map_one "$C35"
+S35="$WORK/c35-stub"
+stub_scc "$S35" '[{"Name":"C#","Files":[{"Location":"src/Calc.cs","Lines":80,"Code":70}]}]'
+stub_lizard "$S35" "$(liz_row_range 'src/Calc.cs' '' 3 210 10 220)
+$(liz_row_range 'src/Calc.cs' '' 3 180 300 480)
+$(liz_row_range 'src/Calc.cs' '' 3 150 600 750)"
+
+# QI-001 and QI-002 match a live hotspot by value. QI-003's 999 matches none —
+# whatever it was measuring is gone, and it is emphatically not the 150.
+cat > "$C35/.specclaw/analysis/quality-issues.md" <<'C35REG'
+# Quality Issues: Fixture
+
+**Path measured:** .
+**Last updated:** 2026-08-01T00:00:00Z
+
+### QI-001
+
+- **Key:** function_length|src/Calc.cs||MOD-001
+- **Value:** 210
+- **Status:** open
+- **First seen:** 2026-08-01T00:00:00Z
+
+### QI-002
+
+- **Key:** function_length|src/Calc.cs||MOD-001
+- **Value:** 180
+- **Status:** open
+- **First seen:** 2026-08-01T00:00:00Z
+
+### QI-003
+
+- **Key:** function_length|src/Calc.cs||MOD-001
+- **Value:** 999
+- **Status:** open
+- **First seen:** 2026-08-01T00:00:00Z
+C35REG
+
+( cd "$C35" && PATH="$(clean_path "$S35")" bash "$QUALITY_BIN" collect .specclaw >/dev/null 2>&1 )
+C35_JSON="$C35/.specclaw/analysis/quality.json"
+C35_REG="$C35/.specclaw/analysis/quality-issues.md"
+
+c35_map="$(jq -r '[.quality_issues[] | "\(.id)=\(.status)/\(.value)"] | sort | join(" ")' "$C35_JSON")"
+assert_eq_nonempty "35a each id lands on the hotspot its recorded value names, the unmatched one is tombstoned, the unclaimed hotspot registers fresh" \
+  "QI-001=open/210 QI-002=open/180 QI-003=superseded-duplicate/999 QI-004=open/150" "$c35_map"
+
+c35_sup="$(jq -r '.quality_issues[] | select(.status == "superseded-duplicate") | .superseded_by' "$C35_JSON")"
+assert_eq_nonempty "35b the tombstone names the lowest surviving id" "QI-001" "$c35_sup"
+
+c35_firsts="$(jq -r '[.quality_issues[] | select(.id != "QI-004") | .first_seen] | unique | join(",")' "$C35_JSON")"
+assert_eq_nonempty "35c a migrated id keeps its original First seen" "2026-08-01T00:00:00Z" "$c35_firsts"
+
+c35_keys="$(jq -r '[.quality_issues[] | select(.status == "open") | .key] | sort | join(" ")' "$C35_JSON")"
+assert_eq_nonempty "35d every surviving id records the new five-field key" \
+  "function_length|src/Calc.cs|<anonymous>|MOD-001|10 function_length|src/Calc.cs|<anonymous>|MOD-001|300 function_length|src/Calc.cs|<anonymous>|MOD-001|600" \
+  "$c35_keys"
+
+c35_tomb_key="$(jq -r '.quality_issues[] | select(.status == "superseded-duplicate") | .key' "$C35_JSON")"
+assert_eq_nonempty "35e the tombstone keeps the historical key it was a duplicate under" \
+  "function_length|src/Calc.cs||MOD-001" "$c35_tomb_key"
+
+assert_eq "35f nothing is deleted — every id is still in the registry" "4" \
+  "$(grep -c '^### QI-' "$C35_REG")"
+assert_contains "35g the registry records the migration, dated" "key migrated" "$(cat "$C35_REG")"
+assert_contains "35h and names the tombstone's successor" "**Superseded by:** QI-001" "$(cat "$C35_REG")"
+
+# Idempotence. Nothing left to migrate, so nothing moves and no second record is
+# appended — the registry is byte-identical but for the timestamps.
+cp "$C35_REG" "$WORK/c35-reg-after1.md"
+( cd "$C35" && PATH="$(clean_path "$S35")" bash "$QUALITY_BIN" collect .specclaw >/dev/null 2>&1 )
+c35_before="$(sed -e 's/^- \*\*Last checked:.*/T/' -e 's/^\*\*Last updated:.*/T/' "$WORK/c35-reg-after1.md")"
+c35_after="$(sed -e 's/^- \*\*Last checked:.*/T/' -e 's/^\*\*Last updated:.*/T/' "$C35_REG")"
+assert_eq_nonempty "35i a second run migrates nothing and writes no second record" "$c35_before" "$c35_after"
+
+# T3. Two ids recording the same value, two hotspots carrying it: the document
+# does not say which id was measuring which, and neither does the collector.
+C35B="$WORK/c35b"; new_project "$C35B"; module_map_one "$C35B"
+S35B="$WORK/c35b-stub"
+stub_scc "$S35B" '[{"Name":"C#","Files":[{"Location":"src/Calc.cs","Lines":80,"Code":70}]}]'
+stub_lizard "$S35B" "$(liz_row_range 'src/Calc.cs' '' 3 210 10 220)
+$(liz_row_range 'src/Calc.cs' '' 3 210 300 510)"
+cat > "$C35B/.specclaw/analysis/quality-issues.md" <<'C35BREG'
+# Quality Issues: Fixture
+
+**Path measured:** .
+**Last updated:** 2026-08-01T00:00:00Z
+
+### QI-001
+
+- **Key:** function_length|src/Calc.cs||MOD-001
+- **Value:** 210
+- **Status:** open
+- **First seen:** 2026-08-01T00:00:00Z
+
+### QI-002
+
+- **Key:** function_length|src/Calc.cs||MOD-001
+- **Value:** 210
+- **Status:** open
+- **First seen:** 2026-08-01T00:00:00Z
+C35BREG
+c35b_err="$( cd "$C35B" && PATH="$(clean_path "$S35B")" bash "$QUALITY_BIN" collect .specclaw 2>&1 >/dev/null )"
+c35b_exit=$?
+assert_eq "35j an undecidable migration stops rather than guessing" "1" "$c35b_exit"
+assert_contains "35k naming the ambiguity" "QUALITY-MIGRATION-AMBIGUOUS" "$c35b_err"
+assert_contains "35l and the ids involved" "QI-001 (recorded value 210)" "$c35b_err"
+assert_eq "35m and the registry is left exactly as it was" "2" \
+  "$(grep -c '^### QI-' "$C35B/.specclaw/analysis/quality-issues.md")"
+
+# PD-03 gives the surviving number to the LOWEST id. A collector-written
+# registry is already in id order, so an implementation that trusted document
+# order would pass every test above and still hand the number to whichever entry
+# happened to be typed first in a hand-edited one.
+C35C="$WORK/c35c"; new_project "$C35C"; module_map_one "$C35C"
+S35C="$WORK/c35c-stub"
+stub_scc "$S35C" '[{"Name":"C#","Files":[{"Location":"src/Calc.cs","Lines":80,"Code":70}]}]'
+stub_lizard "$S35C" "$(liz_row_range 'src/Calc.cs' '' 3 210 10 220)
+$(liz_row_range 'src/Calc.cs' '' 3 180 300 480)"
+cat > "$C35C/.specclaw/analysis/quality-issues.md" <<'C35CREG'
+# Quality Issues: Fixture
+
+**Path measured:** .
+**Last updated:** 2026-08-01T00:00:00Z
+
+### QI-007
+
+- **Key:** function_length|src/Calc.cs||MOD-001
+- **Value:** 999
+- **Status:** open
+- **First seen:** 2026-08-01T00:00:00Z
+
+### QI-002
+
+- **Key:** function_length|src/Calc.cs||MOD-001
+- **Value:** 210
+- **Status:** open
+- **First seen:** 2026-08-01T00:00:00Z
+C35CREG
+( cd "$C35C" && PATH="$(clean_path "$S35C")" bash "$QUALITY_BIN" collect .specclaw >/dev/null 2>&1 )
+c35c_map="$(jq -r '[.quality_issues[] | "\(.id)=\(.status)"] | sort | join(" ")' "$C35C/.specclaw/analysis/quality.json")"
+assert_eq_nonempty "35n the lowest id survives even when the registry lists it second" \
+  "QI-002=open QI-007=superseded-duplicate QI-008=open" "$c35c_map"
+c35c_sup="$(jq -r '.quality_issues[] | select(.status == "superseded-duplicate") | .superseded_by' "$C35C/.specclaw/analysis/quality.json")"
+assert_eq_nonempty "35o and the tombstone points at it, not at whichever came first" "QI-002" "$c35c_sup"
+
+# ── Case 36 — the scan funnel is computed, and the report shows it ───────────
+
+echo
+echo "--- Case 36: scan_funnel carries the true counts and the report copies them ---"
+C36="$WORK/c36"; new_project "$C36"; module_map_one "$C36"
+S36="$WORK/c36-stub"
+stub_scc "$S36" '[{"Name":"C#","Files":[{"Location":"src/Calc.cs","Lines":90,"Code":80}]}]'
+stub_lizard "$S36" "$(liz_row_range 'src/Calc.cs' 'Run' 4 12 3 15)"
+( cd "$C36" && PATH="$(clean_path "$S36")" bash "$QUALITY_BIN" collect .specclaw >/dev/null 2>&1 )
+C36_JSON="$C36/.specclaw/analysis/quality.json"
+
+# ONE computation, projected — never a second count that could disagree.
+c36_pairs="$(jq -r '
+  [ (.scan_funnel.enumerated == .files.enumerated),
+    (.scan_funnel.in_scope  == .files.measured),
+    (.scan_funnel.excluded  == .files.excluded),
+    (.scan_funnel.coverage.classified == .files.classified),
+    (.scan_funnel.coverage.sized == .files.sized),
+    (.scan_funnel.coverage.function_measured == .files.function_measured),
+    (.scan_funnel.coverage.duplication_measured == .files.duplication_measured) ]
+  | unique | join(",")' "$C36_JSON")"
+assert_eq_nonempty "36a the funnel is a projection of the counts, not a second count" "true" "$c36_pairs"
+
+# The fixture decides these exactly: three files in the tree (two sources and
+# the module map), the map excluded by scope, two in scope. Both are of a known
+# language; scc's stub sizes one of them and lizard's measures one function in
+# it; nothing is duplication-measured, because jscpd is not on the stub PATH.
+# Four different numbers over one scan, which is the whole point of a funnel.
+c36_true="$(jq -r '"\(.scan_funnel.enumerated)/\(.scan_funnel.excluded)/\(.scan_funnel.in_scope)"' "$C36_JSON")"
+assert_eq_nonempty "36b enumerated, excluded and in-scope are the fixture's real counts" "3/1/2" "$c36_true"
+c36_cov="$(jq -r '.scan_funnel.coverage | "\(.classified)/\(.sized)/\(.function_measured)/\(.duplication_measured)"' "$C36_JSON")"
+assert_eq_nonempty "36c and each metric's coverage is its own count, not the scope" "2/1/1/0" "$c36_cov"
+
+# The rendered block. A test cannot run the narration agent, so what is checked
+# is the block the agent is required to paste — which is the whole mechanism:
+# if the figures are only in this block, and this block is copied, there is no
+# step at which a figure is retyped. Case 38 proves the copy is enforced.
+c36_block="$(jq -r '.report_blocks.scan_funnel_md' "$C36_JSON" | tr -d '\r')"
+assert_contains "36d the block states the in-scope count" "**In scope — the list every metric received** | **2**" "$c36_block"
+assert_contains "36e and the function-measured count separately" "function-measured | 1" "$c36_block"
+assert_contains "36f and the duplication-measured count separately" "duplication-measured | 0" "$c36_block"
+
+# ── Case 37 — the module rollup summary, and the table built from it ─────────
+
+echo
+echo "--- Case 37: module_rollup_summary matches the modules array exactly ---"
+C37="$WORK/c37"; clone_project "$C37"
+S37="$WORK/c37-stub"
+stub_scc "$S37" '[{"Name":"C#","Files":[
+  {"Location":"src/A.cs","Lines":1500,"Code":1400},
+  {"Location":"src/B.cs","Lines":90,"Code":80}]}]'
+stub_lizard "$S37" "$(liz_row_range 'src/A.cs' 'Big' 34 200 10 220)
+$(liz_row_range 'src/B.cs' 'Small' 4 12 3 15)"
+( cd "$C37" && PATH="$(clean_path "$S37")" bash "$QUALITY_BIN" collect .specclaw >/dev/null 2>&1 )
+C37_JSON="$C37/.specclaw/analysis/quality.json"
+
+c37_count="$(jq -r '.module_rollup_summary.module_count == (.modules | length)' "$C37_JSON")"
+assert_eq_nonempty "37a the module count matches the modules array" "true" "$c37_count"
+
+c37_ids="$(jq -r '.module_rollup_summary.module_ids == [.modules[].module_id]' "$C37_JSON")"
+assert_eq_nonempty "37b the id list matches the modules array, in order" "true" "$c37_ids"
+
+c37_sums="$(jq -r '
+  .modules as $m
+  | [ .module_rollup_summary.status_counts | to_entries[]
+      | .key as $s | .value == ([$m[] | select(.rollup_status == $s)] | length) ]
+  | unique | join(",")' "$C37_JSON")"
+assert_eq_nonempty "37c every status count matches the modules that carry it" "true" "$c37_sums"
+
+c37_total="$(jq -r '([.module_rollup_summary.status_counts[]] | add) == (.modules | length)' "$C37_JSON")"
+assert_eq_nonempty "37d the counts sum to the module count, so no module is missed or double-counted" "true" "$c37_total"
+
+# The table is rendered here, not by the narrator, so it can hold no row the
+# artifact does not. That is the MOD-010 defect, closed at the source.
+c37_rows="$(jq -r '.report_blocks.module_rollup_md' "$C37_JSON" | tr -d '\r' | grep -cE '^\| MOD-')"
+assert_eq_nonempty "37e the rendered table has exactly one row per module" \
+  "$(jq -r '.modules | length' "$C37_JSON")" "$c37_rows"
+
+c37_blockids="$(jq -r '.report_blocks.module_rollup_md' "$C37_JSON" | grep -oE 'MOD-[0-9]+' | sort -u | tr '\n' ' ' | sed 's/ *$//')"
+c37_jsonids="$(jq -r '.module_rollup_summary.module_ids[]' "$C37_JSON" | grep -oE 'MOD-[0-9]+' | sort -u | tr '\n' ' ' | sed 's/ *$//')"
+assert_eq_nonempty "37f and names no module the measurement does not contain" "$c37_jsonids" "$c37_blockids"
+
+c37_footer="$(jq -r '.report_blocks.module_rollup_md' "$C37_JSON" | tr -d '\r' | tail -1)"
+assert_contains "37g the footer states the count at each status" "modules: " "$c37_footer"
+assert_contains "37h with the HIGH count the summary carries" \
+  "$(jq -r '.module_rollup_summary.status_counts.HIGH | tostring' "$C37_JSON") HIGH" "$c37_footer"
+
+# ── Case 38 — the report lint (PD-07) ────────────────────────────────────────
+#
+# A report assembled the way the agent is told to assemble it must pass; the
+# same report with one figure retyped, one row invented or one unknown id must
+# fail, naming what disagreed.
+
+echo
+echo "--- Case 38: the lint passes a faithful report and fails a corrupted one ---"
+C38_JSON="$C37_JSON"
+C38_REPORT="$WORK/c38-report.md"
+{
+  echo "# Code Quality Report: Fixture"
+  echo
+  echo "## Scan scope"
+  echo
+  echo "<!-- quality-report:scan-funnel:begin -->"
+  jq -r '.report_blocks.scan_funnel_md' "$C38_JSON" | tr -d '\r'
+  echo "<!-- quality-report:scan-funnel:end -->"
+  echo
+  echo "## Module Rollup"
+  echo
+  echo "<!-- quality-report:module-rollup:begin -->"
+  jq -r '.report_blocks.module_rollup_md' "$C38_JSON" | tr -d '\r'
+  echo "<!-- quality-report:module-rollup:end -->"
+  echo
+  echo "## Methodology"
+  echo
+  echo "<!-- quality-report:coverage-sentence:begin -->"
+  jq -r '.report_blocks.coverage_sentence_md' "$C38_JSON" | tr -d '\r'
+  echo "<!-- quality-report:coverage-sentence:end -->"
+} > "$C38_REPORT"
+
+c38_ok="$( cd "$C37" && bash "$QUALITY_BIN" lint-report .specclaw "$C38_REPORT" "$C38_JSON" 2>&1 )"
+c38_ok_exit=$?
+assert_eq "38a a faithful report passes" "0" "$c38_ok_exit"
+assert_contains "38b and says so" "REPORT-LINT: PASS" "$c38_ok"
+
+# An invented module row — the exact defect.
+awk '{print} /^\| MOD-/ && !done {print "| MOD-010 | 4 | 900 | HIGH | HIGH | PASS | PASS | HIGH |"; done=1}' \
+  "$C38_REPORT" > "$WORK/c38-mod010.md"
+c38_mod="$( cd "$C37" && bash "$QUALITY_BIN" lint-report .specclaw "$WORK/c38-mod010.md" "$C38_JSON" 2>&1 )"
+c38_mod_exit=$?
+assert_eq "38c an invented module row fails the lint" "1" "$c38_mod_exit"
+assert_contains "38d naming the module the measurement does not contain" \
+  "the report names MOD-010" "$c38_mod"
+
+# A retyped status tally.
+sed 's/^\([0-9]*\) modules: .*/\1 modules: 6 HIGH, 3 WARN, 1 PASS, 0 NOT-MEASURED./' \
+  "$C38_REPORT" > "$WORK/c38-tally.md"
+c38_tally="$( cd "$C37" && bash "$QUALITY_BIN" lint-report .specclaw "$WORK/c38-tally.md" "$C38_JSON" 2>&1 )"
+c38_tally_exit=$?
+assert_eq "38e a retyped status tally fails the lint" "1" "$c38_tally_exit"
+assert_contains "38f naming the block that disagrees" \
+  "the module-rollup block in the report differs" "$c38_tally"
+
+# A retyped funnel figure.
+sed 's/\*\*In scope — the list every metric received\*\* | \*\*2\*\*/**In scope — the list every metric received** | **1892**/' \
+  "$C38_REPORT" > "$WORK/c38-funnel.md"
+c38_fun="$( cd "$C37" && bash "$QUALITY_BIN" lint-report .specclaw "$WORK/c38-funnel.md" "$C38_JSON" 2>&1 )"
+c38_fun_exit=$?
+assert_eq "38g a retyped funnel figure fails the lint" "1" "$c38_fun_exit"
+assert_contains "38h naming the scan-funnel block" "the scan-funnel block in the report differs" "$c38_fun"
+
+# An unregistered hotspot id.
+{ cat "$C38_REPORT"; echo; echo "- QI-099 — a hotspot nobody measured."; } > "$WORK/c38-qi.md"
+c38_qi="$( cd "$C37" && bash "$QUALITY_BIN" lint-report .specclaw "$WORK/c38-qi.md" "$C38_JSON" 2>&1 )"
+c38_qi_exit=$?
+assert_eq "38i an unregistered QI id fails the lint" "1" "$c38_qi_exit"
+assert_contains "38j naming it" "the report names QI-099" "$c38_qi"
+
+# A missing anchor is a failure too: without it the section's figures are simply
+# unchecked, which is the state this whole mechanism exists to end.
+grep -v 'quality-report:scan-funnel:begin' "$C38_REPORT" > "$WORK/c38-noanchor.md"
+c38_na="$( cd "$C37" && bash "$QUALITY_BIN" lint-report .specclaw "$WORK/c38-noanchor.md" "$C38_JSON" 2>&1 )"
+c38_na_exit=$?
+assert_eq "38k a missing anchor fails the lint" "1" "$c38_na_exit"
+assert_contains "38l saying the anchors are gone" "anchors are missing" "$c38_na"
+
+# ── Case 39 — the coverage sentence is rendered, not written (PD-05) ─────────
+
+echo
+echo "--- Case 39: the methodology's coverage sentence comes from the funnel ---"
+C39_JSON="$C36_JSON"
+c39_sentence="$(jq -r '.report_blocks.coverage_sentence_md' "$C39_JSON" | tr -d '\r')"
+assert_eq_nonempty "39a the sentence is rendered from the fixture's own counts, verbatim" \
+  "The exclusion set was applied once, at file selection, and every metric received the same in-scope list of 2 files. Coverage differs per metric: 2 files were classified and sized, 1 were function-measured (only the languages the complexity tool parses), and 0 were duplication-measured. A metric's rollup covers the files it could measure, never the whole scope." \
+  "$c39_sentence"
+
+# The claim it replaces. "Shares a denominator" is false in the flattering
+# direction: the metrics share a SCOPE, and coverage differs by hundreds of
+# files on a real tree.
+T39="$PLUGIN_ROOT/templates/quality-report.md"
+if grep -q 'share a denominator' "$T39"; then
+  fail "39b the shared-denominator claim is gone from the template"
+else
+  pass "39b the shared-denominator claim is gone from the template"
+fi
+assert_contains "39c and the template sources the sentence from the artifact instead" \
+  "report_blocks.coverage_sentence_md" "$(cat "$T39")"
+
+# ── Case 40 — an observed anomaly is never given a cause (PD-06) ─────────────
+#
+# WHAT IS CHECKABLE HERE. A bash suite cannot run the narration agent, so it
+# cannot assert on prose the agent has not written. What it can pin is the
+# instruction the agent is handed and the section the template gives it — which
+# is the same thing Case 10 pins for client-safety, and for the same reason: if
+# the rule is not in the prompt, the agent has to invent one to break it.
+
+echo
+echo "--- Case 40: the agent is told to observe an anomaly and stop there ---"
+A40="$PLUGIN_ROOT/agents/bf-quality-analyst.md"
+T40="$PLUGIN_ROOT/templates/quality-report.md"
+a40="$(cat "$A40")"
+t40="$(cat "$T40")"
+
+assert_contains "40a the report has a section for anomalies" "## Data anomalies" "$t40"
+assert_contains "40b the agent is forbidden a causal explanation, in those words" \
+  "never supplies a causal explanation" "$a40"
+assert_contains "40c the template says the same to whoever fills it" "NEVER A CAUSE" "$t40"
+
+# The specific fabrication this closes: two lizard function-length findings
+# explained as an overlap between two different tools. Naming it in the prompt
+# is what makes the rule concrete rather than a piety.
+assert_contains "40d and the prompt names the invented explanation it exists to prevent" \
+  "jscpd and lizard each flag overlapping spans" "$a40"
+
+# The hedged forms are the ones that get through, so they are listed explicitly.
+for phrase in "because" "due to" "presumably"; do
+  if printf '%s' "$a40" | grep -qF "\"$phrase\""; then
+    pass "40e the prompt forbids the hedge \"$phrase\" by name"
+  else
+    fail "40e the prompt forbids the hedge \"$phrase\" by name"
+  fi
+done
+
+# And the agent must actually be pointed at the section, not merely told a rule.
+assert_contains "40f the agent is told which token carries the observations" "{{anomalies}}" "$a40"
 
 # ── Result ───────────────────────────────────────────────────────────────────
 
