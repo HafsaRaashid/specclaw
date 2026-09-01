@@ -32,6 +32,35 @@
       cyclomatic complexity of 34 against a threshold of 20" is client-safe.
       "Quality concerns were identified" is just useless.
 
+  ── THREE BLOCKS ARE COPIED, NOT WRITTEN ────────────────────────────────
+
+  Three regions of this document are bounded by anchors that look like
+
+    <!-- specclaw:scan-funnel:begin -->  …  <!-- specclaw:scan-funnel:end -->
+
+  Between each pair goes ONE field from the artifact's `report_blocks`, pasted
+  verbatim, character for character, with nothing added and nothing reflowed:
+
+    scan-funnel        report_blocks.scan_funnel_md
+    module-rollup      report_blocks.module_rollup_md
+    coverage-sentence  report_blocks.coverage_sentence_md
+
+  A bash lint runs after this document is written and diffs each region against
+  the field it came from. A single changed byte fails the run and names the
+  region, so there is no version of this that "mostly" works.
+
+  This exists because the previous report invented a MOD-010 row for a
+  nine-module artifact, summed the rollup as "6 HIGH, 3 WARN, 1 PASS" for a set
+  holding five HIGH, and reported "1,892 measured files" for a funnel of 2,232
+  enumerated, 340 excluded, 1,892 in scope, of which 1,022 sized, 652
+  function-measured and 466 duplication-measured. Every one of those numbers
+  already existed, correctly, in the artifact. What did not exist was any reason
+  the document had to agree with it.
+
+  So: no figure in this report is arrived at by adding, subtracting, counting or
+  reading off a table. Prose may REFER to a number that appears in a block. It
+  may never produce one.
+
   ── SCOPE AND COVERAGE COME FIRST, AND NEITHER IS A CAVEAT ──────────────────
 
   The Scan Scope and Measurement Coverage sections sit ABOVE the findings,
@@ -83,6 +112,10 @@
 
 ## Scan scope
 
+<!-- specclaw:scan-funnel:begin -->
+{{scan_funnel}}
+<!-- specclaw:scan-funnel:end -->
+
 {{scan_scope}}
 
 <!--
@@ -97,14 +130,22 @@
     exclusions.extra_excludes   this project's own additions
     exclusions.include_overrides  files deliberately measured despite matching
     exclusions.census.by_category  how many files each category accounted for
-    files.enumerated / files.measured / files.excluded
 
-  AN EXCLUDED FILE IS A DECISION, NOT AN ABSENCE. State the counts plainly and
-  positively: "the scan measured 412 of the 1,806 files in the tree; 1,394 were
-  outside its scope, of which 1,201 were dependency and build output, 158 were
-  test code and 35 were generated". Never write it as a caveat, an apology, or a
-  limitation, and never leave it implied — a reader who assumes every file was
-  measured has been misled just as badly as one who assumes every metric was.
+  THE FUNNEL IS THE BLOCK, AND THE BLOCK IS NOT YOURS TO WRITE. `{{scan_funnel}}`
+  is `report_blocks.scan_funnel_md`, pasted verbatim between its anchors. Every
+  file count in this section is in it. Do not restate one of its figures in a
+  form the block does not use, do not total two of its rows, and do not describe
+  the in-scope count as the number of files that were "measured" — the block
+  distinguishes the list every metric received from what each metric managed on
+  it, and that distinction is the reason it exists.
+
+  AN EXCLUDED FILE IS A DECISION, NOT AN ABSENCE. The block above already gives
+  the totals; your prose says what the exclusions WERE, from `census.by_category`
+  — "of the files outside the scan's scope, dependency and build output
+  accounted for the largest share, then test code, then generated migrations".
+  Positively, never as a caveat, an apology or a limitation, and never left
+  implied: a reader who assumes every file was measured has been misled just as
+  badly as one who assumes every metric was.
 
   Say in one sentence why production code is what gets measured: a hotspot in a
   generated migration or a vendored dependency is a finding about a code
@@ -142,17 +183,30 @@
 
 ## Module Rollup
 
+<!-- specclaw:module-rollup:begin -->
 {{module_rollup}}
+<!-- specclaw:module-rollup:end -->
+
+{{module_rollup_notes}}
 
 <!--
-  One row per module: files, LOC, and the status of each measured dimension
-  (complexity, function length, duplication, file length) plus the overall
-  rollup. A dimension nobody could measure reads NOT-MEASURED — never PASS.
-  Those are different claims, and collapsing them turns "we did not look" into
-  "we looked and it was fine".
+  THE TABLE IS NOT YOURS TO BUILD. `{{module_rollup}}` is
+  `report_blocks.module_rollup_md`, pasted verbatim between its anchors: one row
+  per module with files, LOC, the status of each dimension and the overall
+  rollup, then a closing line giving the module count and the count at each
+  status. A dimension nobody could measure already reads NOT-MEASURED rather
+  than PASS, because those are different claims and collapsing them turns "we
+  did not look" into "we looked and it was fine".
 
-  Where a module's rollup rests on fewer dimensions than another's, say so on
-  that row.
+  Do not add a row, remove a row, reorder rows, reformat a cell, or restate the
+  status counts. This is the section that grew a tenth module out of nothing and
+  mis-summed its own statuses, and both were arithmetic performed by prose.
+
+  `{{module_rollup_notes}}` is where your prose goes, BELOW the table. Read the
+  rows and say what they mean: which module most deserves attention and why,
+  which dimension is driving a rollup, and — where a module's rollup rests on
+  fewer measured dimensions than another's — that its status is the narrower
+  claim. Name modules by the ids in the table. Never name one that is not in it.
 -->
 
 ## Top Duplication Hotspots
@@ -243,6 +297,39 @@
   NOT-MEASURED.
 -->
 
+## Data anomalies
+
+{{anomalies}}
+
+<!--
+  OBSERVATIONS ONLY. NEVER A CAUSE.
+
+  If something in the artifact looks inconsistent, duplicated, surprising or
+  simply wrong, it goes here — stated as what you observed, with the ids, files
+  and values that show it, and then you stop. You do not say why. You do not
+  offer a likely explanation, a probable cause, a "this usually means", or a
+  mechanism. You have one file and no way to check any of it.
+
+  The rule exists because of one paragraph. A previous report found two hotspots
+  it could not tell apart and explained them: "jscpd and lizard each flag
+  overlapping spans". Both findings were function-length findings from lizard,
+  jscpd had nothing to do with either, and the real cause was an identity
+  collision in the program that produced the file. The explanation was fluent,
+  plausible, entirely invented, and it sent every reader away from the actual
+  defect. An unexplained observation would have surfaced it the same day.
+
+  Write:      "QI-025, QI-026 and QI-027 all report metric function_length on
+              src/AuthController.cs, with values 210, 180 and 150."
+  Never:      "...because the two tools overlap on the same span."
+  Also never: "...which is likely a duplicate", "...presumably", "...this
+              appears to be", or any other hedge that is a cause with a hedge in
+              front of it.
+
+  If there is nothing to report, say so in one line. An empty section is a
+  finding: it says the artifact was internally consistent as far as you could
+  see, and that is worth stating.
+-->
+
 ## Methodology
 
 {{methodology}}
@@ -251,12 +338,25 @@
   Which tool produced which metric, how files were selected, and how a status
   band is assigned. Enough that a sceptical reader can reproduce the numbers.
 
-  On selection, state the two facts that make the numbers reproducible: the
-  exclusion set was applied ONCE, at file selection, and every tool measured the
-  identical resulting file list — so the complexity scan and the duplication
-  percentage share a denominator rather than each having their own. The full
-  scope is in the Scan Scope section above; do not restate the category tables
-  here, just say the mechanism.
+  On selection, the mechanism is stated by a block, not by you:
+
+    <!-- specclaw:coverage-sentence:begin -->
+    {{coverage_sentence}}
+    <!-- specclaw:coverage-sentence:end -->
+
+  `{{coverage_sentence}}` is `report_blocks.coverage_sentence_md`, verbatim.
+
+  It replaces a claim this template used to make and that was false in the
+  flattering direction: that every metric "shares a denominator". They share a
+  SCOPE — one exclusion pass, one in-scope list, handed to all three tools — and
+  what each metric then managed on that list differs by hundreds of files,
+  because no tool parses every language. A reader told the denominators match
+  will read a duplication percentage computed over 466 files as covering the
+  same 1,892 the scan scoped. Scope and coverage are two facts, and the sentence
+  states both, each from its own count.
+
+  The full scope is in the Scan Scope section above; do not restate the category
+  tables here.
 
   Also state plainly what this report does NOT claim: it measures structural
   properties of source code. It says nothing about whether the software is

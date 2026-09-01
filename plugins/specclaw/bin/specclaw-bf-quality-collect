@@ -1756,6 +1756,14 @@ def scope_to_function: if . == "" or . == "<anonymous>" or . == "*global*" then 
 # Used by both the candidate builders and the resolved branch, so it is defined
 # once here rather than inside the one expression that used to need it.
 def blank_to_null: if . == null or . == "" then null else . end;
+# Thousands separators, because the blocks below are rendered into a document a
+# client reads and "2232 files" is not how anyone writes that. Done here, once,
+# rather than left to whoever quotes the number — which is the whole principle
+# those blocks exist to enforce.
+def comma:
+  tostring | explode | reverse | to_entries
+  | map(if (.key > 0 and (.key % 3) == 0) then [44, .value] else [.value] end)
+  | flatten | reverse | implode;
 
 def reason($cap; $ran; $onPath):
   if $cap != "1" then "language_unsupported"
@@ -1893,6 +1901,74 @@ def reason($cap; $ran; $onPath):
         rollup_status: ( [$cx.status, $fl.status, $dp.status, $fls.status]
                          | reduce .[] as $s (NM; worst(.; $s)) ) }
     ) | sort_by(.module_id) ) as $modules
+
+# ── every figure the report shows, computed here and nowhere else (PD-04) ─────
+#
+# The report used to state its own totals, and it got them wrong in both
+# directions: it invented a tenth module row for a nine-module artifact, and it
+# summed the statuses as \"6 HIGH, 3 WARN, 1 PASS\" for a set holding five HIGH.
+# It also collapsed the funnel into one number — \"1,892 measured files\" — which
+# conflates the list every metric received with what each metric could actually
+# do with it.
+#
+# Neither is a wording problem, so neither has a wording fix. The counts are
+# computed here, rendered here, and pasted into the report between stable
+# anchors that a bash lint diffs byte-for-byte. There is no step at which a
+# figure can be derived by anything that also writes prose.
+#
+# scan_funnel is a PROJECTION of the same values `files` carries, deliberately
+# renamed for the reader: enumerated → excluded → in_scope is the sequence a
+# reader follows, and `coverage` says what each metric managed on that one list.
+# `files` is untouched; it is what every existing consumer reads.
+| ( { enumerated: $enumerated,
+      excluded: ($enumerated - $measured),
+      in_scope: $measured,
+      coverage: { classified: ($F | length),
+                  sized: ($L | length),
+                  function_measured: ([$FN[] | .file] | unique | length),
+                  duplication_measured: ($D | length) } } ) as $funnel
+| ( { module_count: ($modules | length),
+      module_ids: [ $modules[] | .module_id ],
+      status_counts: ( ( ["HIGH", "WARN", "PASS", NM] | map({key: ., value: 0}) | from_entries )
+                       + ( $modules | group_by(.rollup_status)
+                           | map({key: .[0].rollup_status, value: length}) | from_entries ) ) } ) as $rollupSummary
+| ( [ "| Stage | Files |",
+      "|---|---:|",
+      "| Enumerated in the tree | " + ($funnel.enumerated | comma) + " |",
+      "| Excluded by scan scope | " + ($funnel.excluded | comma) + " |",
+      "| **In scope — the list every metric received** | **" + ($funnel.in_scope | comma) + "** |",
+      "| … of a known language | " + ($funnel.coverage.classified | comma) + " |",
+      "| … sized | " + ($funnel.coverage.sized | comma) + " |",
+      "| … function-measured | " + ($funnel.coverage.function_measured | comma) + " |",
+      "| … duplication-measured | " + ($funnel.coverage.duplication_measured | comma) + " |" ]
+    | join("\n") ) as $funnelMd
+| ( ( [ "| Module | Files | LOC | Complexity | Function length | Duplication | File length | Rollup |",
+        "|---|---:|---:|---|---|---|---|---|" ]
+      + ( $modules | map(
+            "| " + .module_id
+            + " | " + (.files | comma)
+            + " | " + (if .loc == null then "—" else (.loc | comma) end)
+            + " | " + .complexity.status
+            + " | " + .function_length.status
+            + " | " + (if .duplication.pct == null then .duplication.status
+                       else .duplication.status + " (" + (.duplication.pct | tostring) + "%)" end)
+            + " | " + .file_length.status
+            + " | " + .rollup_status + " |") )
+      + [ "",
+          ($rollupSummary.module_count | comma) + " modules: "
+          + ( ["HIGH", "WARN", "PASS", NM]
+              | map(($rollupSummary.status_counts[.] | comma) + " " + .) | join(", ") ) + "." ] )
+    | join("\n") ) as $rollupMd
+# PD-05. The old methodology claimed every metric shares a denominator, which is
+# false in the direction that flatters: they share a SCOPE, and what each one
+# managed on that scope differs by hundreds of files. The sentence is rendered
+# from the funnel rather than written, so it cannot drift from it.
+| ( "The exclusion set was applied once, at file selection, and every metric received the same in-scope list of "
+    + ($funnel.in_scope | comma) + " files. Coverage differs per metric: "
+    + ($funnel.coverage.classified | comma) + " files were classified and sized, "
+    + ($funnel.coverage.function_measured | comma) + " were function-measured (only the languages the complexity tool parses), and "
+    + ($funnel.coverage.duplication_measured | comma) + " were duplication-measured. A metric's rollup covers the files it could measure, never the whole scope."
+  ) as $coverageMd
 
 # ── candidate hotspots at the registering severity ──────────────────────────
 | ( [ $FN[] | select(band(.ccn; $th.complexity_warn; $th.complexity_high) | rank >= ($th.register_severity | rank))
@@ -2111,6 +2187,15 @@ def reason($cap; $ran; $onPath):
              sized: ($L | length), function_measured: ([$FN[] | .file] | unique | length),
              duplication_measured: ($D | length),
              module_ambiguous: $ambiguous },
+    scan_funnel: $funnel,
+    module_rollup_summary: $rollupSummary,
+    # Rendered markdown, not data: these are pasted into the report VERBATIM,
+    # between anchors, and the report-lint fails the run if what lands there
+    # differs by a byte. A block is the unit because a figure quoted out of one
+    # is a figure something retyped.
+    report_blocks: { scan_funnel_md: $funnelMd,
+                     module_rollup_md: $rollupMd,
+                     coverage_sentence_md: $coverageMd },
     coverage: $coverage,
     modules: $modules,
     # ── clone pairs (PD-03/PD-04) ────────────────────────────────────────────
