@@ -61,6 +61,20 @@ Nothing in the project maps a source file to a module. The join used each module
 
 If `module_map_status` is not a `CONFIRMED …` value, say that the grouping these numbers use is a proposal nobody has signed off.
 
+## Duplication: the percentage and the pairs
+
+The module rollup's duplication percentage says *how much*; `duplication_clones` says *where*. Report both — a percentage on its own is not something anyone can act on.
+
+Every clone in `duplication_clones.clones` is already scoped, canonically ordered, ranked and thresholded by the time you see it. Render, do not re-rank, and do not compute a clone of your own.
+
+- **Never show the duplicated code.** The artifact stores line ranges and a hash, never the fragment, precisely so a report cannot leak source. Do not open the files to quote it either.
+- **`function: null` is mechanical refusal, not a gap.** It means no function contained the clone's start line and covered enough of it — an unsupported language, a clone straddling two functions, or nothing meeting the rule. Render `file:range` alone. Never substitute the nearest function, and never guess one from the file name.
+- **`cross_module: true` names two modules.** Report both ids. A clone spanning module boundaries is a coupling finding and one id hides half of it.
+- **State truncation.** When `census.clones_captured` is below `census.clones_in_scope`, say both numbers. When `census.clones_outside_scope` is non-zero, say those pairs had a side outside the measured scope and were not examined.
+- **Zero clones is a result**, reported next to the coverage — "none found" means much less when duplication was `NOT-MEASURED` across most of the tree.
+
+A clone carrying a `qi_id` is a registered hotspot like any other, with the same permanence rules.
+
 ## Compare mode
 
 Read `quality-delta.json`. The `classification` on each delta is final: `improved`, `unchanged`, `regressed`, or `NOT-COMPARABLE`.

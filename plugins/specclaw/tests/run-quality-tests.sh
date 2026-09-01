@@ -69,6 +69,25 @@
 #                                   pre-change collector measured
 #  22  tests as a bucket          → test code measured into MOD-TESTS, absent from
 #                                   every production module rollup, registering no QI
+#  23  clone capture              → a known duplicated block is preserved with both
+#                                   locations, its line count and each module; the
+#                                   rollup percentage is byte-identical to before
+#  24  clone determinism          → two runs give byte-identical clones and QI ids;
+#                                   pairs are canonically ordered, largest first
+#  25  clone QI threshold         → 29 lines captured but unregistered, 30 registered;
+#                                   re-run keeps the id; a vanished clone resolves
+#  26  cross-module clone         → both module ids recorded, flagged, counted once
+#  27  function mapping           → attached only on containment + overlap; null for a
+#                                   clone spanning two functions and for a language
+#                                   with no function measurement, never a guess
+#  28  capture truncation         → the cap keeps the largest and the census still
+#                                   reports true totals; QI registration is uncapped
+#  29  clone scope                → a pair reaching outside the measured list is
+#                                   dropped and counted, and never leaks a path
+#  30  report section             → the template carries a client-safe hotspot section
+#                                   that forbids printing source and requires the
+#                                   truncation footer
+#  31  zero duplication           → an honest empty result, and no crash with jscpd absent
 #
 # Plain bash + coreutils, plus jq for assertions (same as run-parser-tests.sh
 # and run-cs-body-parser-tests.sh). Run from anywhere:
@@ -1931,6 +1950,457 @@ rm -f "$C22/.specclaw/config.yaml"; rm -rf "$C22/.specclaw/analysis/archive"
 c22b_out="$( cd "$C22" && PATH="$(clean_path "$S14")" bash "$QUALITY_BIN" collect .specclaw 2>/dev/null )"
 c22b_bucket="$(printf '%s' "$c22b_out" | jq -r '[.modules[] | select(.module_id == "MOD-TESTS")] | length')"
 assert_eq "22g with the toggle off there is no bucket at all" "0" "$c22b_bucket"
+
+# ── Clone-pair fixtures (Cases 23–31) ────────────────────────────────────────
+#
+# The module rollup answers "how much duplication"; a clone pair answers
+# "where". These pin the second, and every failure mode in it is quiet: a clone
+# dropped by a path mismatch looks exactly like a clone that does not exist, and
+# an identity that moves between runs looks exactly like a hotspot somebody
+# fixed.
+#
+# jscpd is stubbed like the other tools. The stub emits the v5 report shape this
+# collector actually parses — `duplicates[]` with firstFile/secondFile,
+# startLoc/endLoc and a `lines` count — verified against jscpd 5.0.16 output.
+
+# liz_row_range <file> <func> <ccn> <length> <start> <end>
+#
+# liz_row pins every function at lines 1-1, which is fine for complexity but
+# useless for the clone-to-function join. This one places a function on real
+# lines. Column order is lizard's own, all eleven, with start/end last.
+liz_row_range() {
+  local file="$1" func="$2" ccn="$3" length="$4" start="$5" end="$6"
+  printf '%s,%s,100,2,%s,%s@%s-%s@%s,%s,%s,%s(),%s,%s\n' \
+    "$length" "$ccn" "$length" "$func" "$start" "$end" "$file" "$file" "$func" "$func" "$start" "$end"
+}
+
+# jscpd_dup <fileA> <startA> <endA> <fileB> <startB> <endB> <lines> <fragment>
+# One entry of the duplicates[] array, in jscpd v5 shape.
+jscpd_dup() {
+  printf '{"format":"csharp","lines":%s,"tokens":100,"fragment":"%s",' "$7" "$8"
+  printf '"firstFile":{"name":"%s","start":%s,"end":%s,"startLoc":{"line":%s,"column":1},"endLoc":{"line":%s,"column":1}},' "$1" "$2" "$3" "$2" "$3"
+  printf '"secondFile":{"name":"%s","start":%s,"end":%s,"startLoc":{"line":%s,"column":1},"endLoc":{"line":%s,"column":1}}}' "$4" "$5" "$6" "$5" "$6"
+}
+
+# jscpd_report <paths-json> <dup...> — assembles a full report.
+jscpd_report() {
+  local paths="$1"; shift
+  local body='{"statistics":{"paths":'"$paths"'},"duplicates":['
+  local first=true d
+  for d in "$@"; do
+    if $first; then first=false; else body="${body},"; fi
+    body="${body}${d}"
+  done
+  printf '%s]}' "$body"
+}
+
+clone_paths2='{"src/A.cs":{"lines":80,"duplicatedLines":16},"src/B.cs":{"lines":80,"duplicatedLines":16}}'
+
+# clone_project <dir> — two C# files and a two-module map citing one each.
+clone_project() {
+  local d="$1"
+  rm -rf "$d"; mkdir -p "$d/.specclaw/analysis" "$d/src"
+  printf 'public class A { }\n' > "$d/src/A.cs"
+  printf 'public class B { }\n' > "$d/src/B.cs"
+  cat > "$d/.specclaw/analysis/module-map.md" <<'MM'
+# Module Map: Clones
+
+**Status:** CONFIRMED by fixture, 2026-09-01
+
+## Modules
+
+### MOD-001 — Alpha
+
+- **Evidence:**
+  - `src/A.cs:1` — the alpha service
+
+### MOD-002 — Beta
+
+- **Evidence:**
+  - `src/B.cs:1` — the beta service
+MM
+}
+
+clone_scc2='[{"Name":"C#","Files":[{"Location":"src/A.cs","Lines":80,"Code":70},{"Location":"src/B.cs","Lines":80,"Code":70}]}]'
+
+# ── Case 23 — a known clone is captured with its locations intact ────────────
+
+echo
+echo "--- Case 23: a known duplicated block is captured with files, ranges and module ---"
+C23="$WORK/c23"; clone_project "$C23"
+S23="$WORK/c23-stub"
+stub_scc "$S23" "$clone_scc2"
+stub_lizard "$S23" "$(liz_row_range 'src/A.cs' 'Compute' 4 20 40 60)"
+stub_jscpd "$S23" "$(jscpd_report "$clone_paths2" "$(jscpd_dup 'src/A.cs' 44 59 'src/B.cs' 58 73 16 'some normalised text')")"
+
+c23_out="$( cd "$C23" && PATH="$(clean_path "$S23")" bash "$QUALITY_BIN" collect .specclaw 2>/dev/null )"
+assert_eq "23a collect exits 0 with clones present" "0" "$?"
+C23_JSON="$C23/.specclaw/analysis/quality.json"
+
+c23_n="$(printf '%s' "$c23_out" | jq -r '.duplication_clones.clones | length')"
+assert_eq_nonempty "23b exactly one clone captured" "1" "$c23_n"
+
+c23_loc="$(printf '%s' "$c23_out" | jq -r '.duplication_clones.clones[0]
+  | "\(.a.file):\(.a.start)-\(.a.end)|\(.b.file):\(.b.start)-\(.b.end)|\(.lines)"')"
+assert_eq_nonempty "23c both locations and the duplicated line count survive intact" \
+  "src/A.cs:44-59|src/B.cs:58-73|16" "$c23_loc"
+
+c23_mods="$(printf '%s' "$c23_out" | jq -r '.duplication_clones.clones[0] | "\(.a.module_id)/\(.b.module_id)"')"
+assert_eq_nonempty "23d each side carries the module of its own file" "MOD-001/MOD-002" "$c23_mods"
+
+c23_census="$(printf '%s' "$c23_out" | jq -r '.duplication_clones.census
+  | "\(.clones_found)/\(.clones_in_scope)/\(.clones_captured)/\(.duplicated_lines_found)"')"
+assert_eq_nonempty "23e the census reports found, in-scope, captured and total duplicated lines" \
+  "1/1/1/16" "$c23_census"
+
+# PD-03: locations, never source. The artifact must carry no fragment field at
+# all — only the hash — and no field anywhere may contain the fixture text.
+c23_frag="$(jq -r '[.. | objects | select(has("fragment"))] | length' "$C23_JSON")"
+assert_eq "23f no clone carries a verbatim fragment field" "0" "$c23_frag"
+if grep -qF 'some normalised text' "$C23_JSON"; then
+  fail "23g the duplicated source does not appear anywhere in the artifact"
+else
+  pass "23g the duplicated source does not appear anywhere in the artifact"
+fi
+c23_sha="$(printf '%s' "$c23_out" | jq -r '.duplication_clones.clones[0].fragment_sha256 // ""')"
+case "$c23_sha" in
+  sha256:*) pass "23h the clone carries a fragment hash as its identity" ;;
+  *) fail "23h the clone carries a fragment hash as its identity (got '$c23_sha')" ;;
+esac
+
+# ── 23i — PD-01: the rollup metric did not move ──────────────────────────────
+#
+# Byte-compared against the collector as it was before clone capture existed.
+# Everything the previous version emitted must be identical; only the new
+# duplication_clones block, the two new threshold keys and the timestamp differ.
+q_strip_clones() {
+  jq -S '.generated_at as $ga
+         | del(.generated_at, .duplication_clones)
+         | .thresholds |= del(.clone_qi_min_lines, .clone_function_min_overlap)
+         | (.quality_issues // []) |= map(del(.peer_file, .fragment_sha256)
+             | if .first_seen == $ga then .first_seen = "<this run>" else . end)' "$1"
+}
+# The pre-change binary is written into the REAL bin/ directory, not $WORK, and
+# that placement is the whole point. The collector resolves its exclusion
+# defaults and its templates through $SCRIPT_DIR/../, so a copy run from a
+# scratch directory finds neither — it would measure a different file set and
+# report zero exclusion patterns, and the diff would then be about where the
+# binary was parked rather than about what the code does. Removed immediately
+# after, and again by the suite trap if a case between here and there dies.
+PRE23="$BIN_DIR/.pre-clone-collect"
+trap 'rm -rf "$WORK"; rm -f "$BIN_DIR/.pre-clone-collect"' EXIT
+if git -C "$SCRIPT_DIR" show "origin/main:plugins/specclaw/bin/specclaw-bf-quality-collect" > "$PRE23" 2>/dev/null && [[ -s "$PRE23" ]]; then
+  C23B="$WORK/c23-pre"; rm -rf "$C23B"; cp -R "$C23" "$C23B"
+  rm -rf "$C23B/.specclaw/analysis"; mkdir -p "$C23B/.specclaw/analysis"
+  cp "$C23/.specclaw/analysis/module-map.md" "$C23B/.specclaw/analysis/" 2>/dev/null || true
+  ( cd "$C23B" && PATH="$(clean_path "$S23")" bash "$PRE23" collect .specclaw ) >/dev/null 2>&1
+  C23B_JSON="$C23B/.specclaw/analysis/quality.json"
+  if [[ -s "$C23B_JSON" ]]; then
+    if diff <(q_strip_clones "$C23B_JSON") <(q_strip_clones "$C23_JSON") >/dev/null 2>&1; then
+      pass "23i the duplication rollup and every pre-existing field are unchanged"
+    else
+      fail "23i the duplication rollup and every pre-existing field are unchanged"
+      diff <(q_strip_clones "$C23B_JSON") <(q_strip_clones "$C23_JSON") | head -20
+    fi
+  else
+    echo "NOTE: 23i the pre-change collector produced no artifact here — skipping."
+    PASS=$((PASS + 1))
+  fi
+else
+  echo "NOTE: 23i pre-change binary not retrievable (shallow clone) — skipping the byte comparison."
+  PASS=$((PASS + 1))
+fi
+rm -f "$PRE23"
+
+# Standing alone: the module duplication percentage is still computed and is
+# still the number the thresholds classify.
+c23_pct="$(printf '%s' "$c23_out" | jq -r '.modules[] | select(.module_id=="MOD-001") | "\(.duplication.pct)/\(.duplication.status)"')"
+assert_eq_nonempty "23j the per-module duplication percentage is still produced" "20/HIGH" "$c23_pct"
+
+# ── Case 24 — determinism ────────────────────────────────────────────────────
+#
+# Identical input must give byte-identical output. Two things make this fail in
+# practice and both are covered: the detector reports first/second in scan
+# order, and its duplicates[] order is not guaranteed stable.
+
+echo "--- Case 24: two runs produce byte-identical clones and QI assignments ---"
+C24="$WORK/c24"; clone_project "$C24"
+printf 'version: 1\nquality:\n  clone_qi_min_lines: 10\n' > "$C24/.specclaw/config.yaml"
+S24="$WORK/c24-stub"
+stub_scc "$S24" "$clone_scc2"
+stub_lizard "$S24" "$(liz_row_range 'src/A.cs' 'Compute' 4 20 40 60)"
+# Two clones whose sides are given in OPPOSITE order between the pairs, so a
+# collector that trusted jscpd's ordering would emit them inconsistently.
+stub_jscpd "$S24" "$(jscpd_report "$clone_paths2" \
+  "$(jscpd_dup 'src/B.cs' 58 73 'src/A.cs' 44 59 16 'first block')" \
+  "$(jscpd_dup 'src/A.cs' 10 21 'src/B.cs' 30 41 12 'second block')")"
+
+( cd "$C24" && PATH="$(clean_path "$S24")" bash "$QUALITY_BIN" collect .specclaw ) >/dev/null 2>&1
+jq -S '{c: .duplication_clones.clones, q: [.quality_issues[] | {id, key, status}]}' \
+  "$C24/.specclaw/analysis/quality.json" > "$WORK/c24-run1.json"
+rm -rf "$C24/.specclaw/analysis/archive"
+( cd "$C24" && PATH="$(clean_path "$S24")" bash "$QUALITY_BIN" collect .specclaw ) >/dev/null 2>&1
+jq -S '{c: .duplication_clones.clones, q: [.quality_issues[] | {id, key, status}]}' \
+  "$C24/.specclaw/analysis/quality.json" > "$WORK/c24-run2.json"
+
+if diff "$WORK/c24-run1.json" "$WORK/c24-run2.json" >/dev/null 2>&1; then
+  pass "24a two consecutive runs give byte-identical clones and QI ids"
+else
+  fail "24a two consecutive runs give byte-identical clones and QI ids"
+  diff "$WORK/c24-run1.json" "$WORK/c24-run2.json" | head -10
+fi
+
+# Canonical side order: the smaller path is always side A, whichever way the
+# detector happened to report the pair.
+c24_a="$(jq -r '.duplication_clones.clones[0].a.file' "$C24/.specclaw/analysis/quality.json")"
+assert_eq_nonempty "24b the pair is put in canonical order, not the detector's order" "src/A.cs" "$c24_a"
+
+# Largest clone first, deterministically.
+c24_order="$(jq -r '[.duplication_clones.clones[].lines] | join(",")' "$C24/.specclaw/analysis/quality.json")"
+assert_eq_nonempty "24c clones are ordered by duplicated lines, descending" "16,12" "$c24_order"
+
+# ── Case 25 — the registration threshold, and permanence across it ───────────
+
+echo "--- Case 25: a clone at the threshold registers a QI; below it does not ---"
+C25="$WORK/c25"; clone_project "$C25"
+S25="$WORK/c25-stub"
+stub_scc "$S25" "$clone_scc2"
+stub_lizard "$S25" "$(liz_row_range 'src/A.cs' 'Compute' 4 20 40 60)"
+
+# 29 lines: captured, no QI. The default threshold is 30.
+stub_jscpd "$S25" "$(jscpd_report "$clone_paths2" "$(jscpd_dup 'src/A.cs' 10 38 'src/B.cs' 20 48 29 'just under')")"
+( cd "$C25" && PATH="$(clean_path "$S25")" bash "$QUALITY_BIN" collect .specclaw ) >/dev/null 2>&1
+C25_JSON="$C25/.specclaw/analysis/quality.json"
+assert_eq_nonempty "25a a 29-line clone is captured" "1" "$(jq -r '.duplication_clones.clones | length' "$C25_JSON")"
+assert_eq "25b and registers no QI" "0" "$(jq -r '[.quality_issues[] | select(.metric=="duplication-clone")] | length' "$C25_JSON")"
+
+# 30 lines: registers.
+stub_jscpd "$S25" "$(jscpd_report "$clone_paths2" "$(jscpd_dup 'src/A.cs' 10 39 'src/B.cs' 20 49 30 'at the line')")"
+rm -rf "$C25/.specclaw/analysis/archive"
+( cd "$C25" && PATH="$(clean_path "$S25")" bash "$QUALITY_BIN" collect .specclaw ) >/dev/null 2>&1
+c25_id="$(jq -r '[.quality_issues[] | select(.metric=="duplication-clone" and .status=="open")] | .[0].id // ""' "$C25_JSON")"
+if [[ -n "$c25_id" ]]; then
+  pass "25c a 30-line clone registers a QI (${c25_id})"
+else
+  fail "25c a 30-line clone registers a QI"
+fi
+assert_eq_nonempty "25d registered under the duplication-clone metric" "duplication-clone" \
+  "$(jq -r '[.quality_issues[] | select(.status=="open" and .metric=="duplication-clone")] | .[0].metric // ""' "$C25_JSON")"
+assert_eq_nonempty "25e with the duplicated line count as its measured value" "30" \
+  "$(jq -r '[.quality_issues[] | select(.metric=="duplication-clone" and .status=="open")] | .[0].value | tostring' "$C25_JSON")"
+
+# Unchanged re-run: the SAME id. Identity is the fragment hash plus both paths,
+# so nothing about a repeat measurement may move it.
+rm -rf "$C25/.specclaw/analysis/archive"
+( cd "$C25" && PATH="$(clean_path "$S25")" bash "$QUALITY_BIN" collect .specclaw ) >/dev/null 2>&1
+assert_eq_nonempty "25f an unchanged re-run keeps the same QI id" "$c25_id" \
+  "$(jq -r '[.quality_issues[] | select(.metric=="duplication-clone" and .status=="open")] | .[0].id // ""' "$C25_JSON")"
+
+# Clone gone: resolved, never deleted.
+stub_jscpd "$S25" "$(jscpd_report "$clone_paths2")"
+rm -rf "$C25/.specclaw/analysis/archive"
+( cd "$C25" && PATH="$(clean_path "$S25")" bash "$QUALITY_BIN" collect .specclaw ) >/dev/null 2>&1
+assert_eq_nonempty "25g a clone that disappears is marked resolved" "resolved" \
+  "$(jq -r --arg id "$c25_id" '[.quality_issues[] | select(.id==$id)] | .[0].status // ""' "$C25_JSON")"
+assert_eq_nonempty "25h and is never deleted — the id is still in the registry" "1" \
+  "$(jq -r --arg id "$c25_id" '[.quality_issues[] | select(.id==$id)] | length' "$C25_JSON")"
+
+# ── Case 26 — a cross-module clone ───────────────────────────────────────────
+
+echo "--- Case 26: a clone spanning two modules records both and is counted once ---"
+C26="$WORK/c26"; clone_project "$C26"
+S26="$WORK/c26-stub"
+stub_scc "$S26" "$clone_scc2"
+stub_lizard "$S26" "$(liz_row_range 'src/A.cs' 'Compute' 4 20 40 60)"
+stub_jscpd "$S26" "$(jscpd_report "$clone_paths2" "$(jscpd_dup 'src/A.cs' 44 59 'src/B.cs' 58 73 16 'crossing text')")"
+c26_out="$( cd "$C26" && PATH="$(clean_path "$S26")" bash "$QUALITY_BIN" collect .specclaw 2>/dev/null )"
+
+assert_eq_nonempty "26a the clone is flagged cross-module" "true" \
+  "$(printf '%s' "$c26_out" | jq -r '.duplication_clones.clones[0].cross_module')"
+assert_eq_nonempty "26b both module ids are recorded, not just one" "MOD-001/MOD-002" \
+  "$(printf '%s' "$c26_out" | jq -r '.duplication_clones.clones[0] | "\(.a.module_id)/\(.b.module_id)"')"
+# Counted once: a pair is one finding, not one per side.
+assert_eq_nonempty "26c it is counted once in the census, not once per side" "1/1" \
+  "$(printf '%s' "$c26_out" | jq -r '.duplication_clones.census | "\(.clones_in_scope)/\(.clones_captured)"')"
+
+# A same-module clone is not flagged — proving the flag reflects the join and
+# is not simply always on.
+stub_jscpd "$S26" "$(jscpd_report "$clone_paths2" "$(jscpd_dup 'src/A.cs' 10 25 'src/A.cs' 44 59 16 'same module text')")"
+rm -rf "$C26/.specclaw/analysis/archive"
+c26b_out="$( cd "$C26" && PATH="$(clean_path "$S26")" bash "$QUALITY_BIN" collect .specclaw 2>/dev/null )"
+assert_eq_nonempty "26d a clone within one module is not flagged cross-module" "false" \
+  "$(printf '%s' "$c26b_out" | jq -r '.duplication_clones.clones[0].cross_module')"
+
+# ── Case 27 — mechanical function mapping, and its refusals ──────────────────
+
+echo "--- Case 27: a function name is attached only when the containment rule is met ---"
+C27="$WORK/c27"
+rm -rf "$C27"; mkdir -p "$C27/.specclaw/analysis" "$C27/src"
+printf 'public class A { }\n' > "$C27/src/A.cs"
+printf 'public class B { }\n' > "$C27/src/B.cs"
+printf 'unit Legacy;\nbegin\nend.\n' > "$C27/src/Legacy.pas"
+printf 'unit Other;\nbegin\nend.\n'  > "$C27/src/Other.pas"
+S27="$WORK/c27-stub"
+stub_scc "$S27" '[{"Name":"C#","Files":[{"Location":"src/A.cs","Lines":200,"Code":180},{"Location":"src/B.cs","Lines":200,"Code":180}]},
+ {"Name":"Pascal","Files":[{"Location":"src/Legacy.pas","Lines":200,"Code":180},{"Location":"src/Other.pas","Lines":200,"Code":180}]}]'
+# A.cs: one big method covering 40-80, so a clone at 44-59 sits inside it.
+# B.cs: two small adjacent methods, so a clone spanning both meets no rule.
+stub_lizard "$S27" "$(liz_row_range 'src/A.cs' 'BigMethod' 4 41 40 80)
+$(liz_row_range 'src/B.cs' 'FirstHalf' 3 10 50 59)
+$(liz_row_range 'src/B.cs' 'SecondHalf' 3 10 60 69)"
+stub_jscpd "$S27" "$(jscpd_report \
+  '{"src/A.cs":{"lines":200,"duplicatedLines":16},"src/B.cs":{"lines":200,"duplicatedLines":16},"src/Legacy.pas":{"lines":200,"duplicatedLines":20},"src/Other.pas":{"lines":200,"duplicatedLines":20}}' \
+  "$(jscpd_dup 'src/A.cs' 44 59 'src/B.cs' 55 70 16 'mapped one side only')" \
+  "$(jscpd_dup 'src/Legacy.pas' 10 29 'src/Other.pas' 40 59 20 'pascal block')")"
+c27_out="$( cd "$C27" && PATH="$(clean_path "$S27")" bash "$QUALITY_BIN" collect .specclaw 2>/dev/null )"
+
+c27_cs="$(printf '%s' "$c27_out" | jq -r '.duplication_clones.clones[] | select(.a.file=="src/A.cs") | "\(.a.function)|\(.b.function)"')"
+assert_eq_nonempty "27a a clone inside one method gets that method; the side spanning two gets null" \
+  "BigMethod|null" "$c27_cs"
+
+c27_pas="$(printf '%s' "$c27_out" | jq -r '.duplication_clones.clones[] | select(.a.file=="src/Legacy.pas") | "\(.a.function)|\(.b.function)"')"
+assert_eq_nonempty "27b a clone in a language with no function measurement gets null on both sides" \
+  "null|null" "$c27_pas"
+
+# The Pascal clone is still fully reported — refusing a name is not refusing the
+# finding.
+c27_pasloc="$(printf '%s' "$c27_out" | jq -r '.duplication_clones.clones[] | select(.a.file=="src/Legacy.pas") | "\(.a.file):\(.a.start)-\(.a.end)|\(.lines)"')"
+assert_eq_nonempty "27c and its file:range is still reported in full" "src/Legacy.pas:10-29|20" "$c27_pasloc"
+
+# ── Case 28 — capture truncation, with the true totals still stated ──────────
+
+echo "--- Case 28: more clones than the cap keeps the largest and reports the real totals ---"
+C28="$WORK/c28"; clone_project "$C28"
+printf 'version: 1\nquality:\n  clone_capture_top_n: 3\n' > "$C28/.specclaw/config.yaml"
+S28="$WORK/c28-stub"
+stub_scc "$S28" "$clone_scc2"
+stub_lizard "$S28" "$(liz_row_range 'src/A.cs' 'Compute' 4 20 40 60)"
+stub_jscpd "$S28" "$(jscpd_report "$clone_paths2" \
+  "$(jscpd_dup 'src/A.cs' 1 8   'src/B.cs' 1 8   8  'eight')" \
+  "$(jscpd_dup 'src/A.cs' 10 34 'src/B.cs' 10 34 25 'twentyfive')" \
+  "$(jscpd_dup 'src/A.cs' 40 51 'src/B.cs' 40 51 12 'twelve')" \
+  "$(jscpd_dup 'src/A.cs' 60 79 'src/B.cs' 60 79 20 'twenty')" \
+  "$(jscpd_dup 'src/A.cs' 90 94 'src/B.cs' 90 94 5  'five')")"
+c28_out="$( cd "$C28" && PATH="$(clean_path "$S28")" bash "$QUALITY_BIN" collect .specclaw 2>/dev/null )"
+
+assert_eq_nonempty "28a only the cap is stored" "3" \
+  "$(printf '%s' "$c28_out" | jq -r '.duplication_clones.clones | length')"
+assert_eq_nonempty "28b and they are the three largest, in order" "25,20,12" \
+  "$(printf '%s' "$c28_out" | jq -r '[.duplication_clones.clones[].lines] | join(",")')"
+assert_eq_nonempty "28c the census reports the TRUE totals, not the truncated ones" "5/5/3/70" \
+  "$(printf '%s' "$c28_out" | jq -r '.duplication_clones.census | "\(.clones_found)/\(.clones_in_scope)/\(.clones_captured)/\(.duplicated_lines_found)"')"
+assert_eq_nonempty "28d and says so explicitly rather than leaving it to arithmetic" "true" \
+  "$(printf '%s' "$c28_out" | jq -r '.duplication_clones.census.truncated')"
+
+# QI registration is NOT bounded by the display cap: a permanent id must not be
+# lost because another clone took its slot.
+printf 'version: 1\nquality:\n  clone_capture_top_n: 1\n  clone_qi_min_lines: 10\n' > "$C28/.specclaw/config.yaml"
+rm -rf "$C28/.specclaw/analysis/archive"
+c28b_out="$( cd "$C28" && PATH="$(clean_path "$S28")" bash "$QUALITY_BIN" collect .specclaw 2>/dev/null )"
+assert_eq_nonempty "28e one clone stored, but every qualifying clone still registered" "1/3" \
+  "$(printf '%s' "$c28b_out" | jq -r '"\(.duplication_clones.clones | length)/\([.quality_issues[] | select(.metric=="duplication-clone" and .status=="open")] | length)"')"
+
+# ── Case 29 — scope: a clone with a side outside the measured list ───────────
+
+echo "--- Case 29: a clone reaching outside the measured scope is dropped and counted ---"
+C29="$WORK/c29"; clone_project "$C29"
+mkdir -p "$C29/tests"
+printf 'public class ATests { }\n' > "$C29/tests/ATests.cs"
+S29="$WORK/c29-stub"
+stub_scc "$S29" "$clone_scc2"
+stub_lizard "$S29" "$(liz_row_range 'src/A.cs' 'Compute' 4 20 40 60)"
+# jscpd walks the tree itself, so it happily reports a clone in tests/ — which
+# the exclusion pass removed from the measured list.
+stub_jscpd "$S29" "$(jscpd_report "$clone_paths2" \
+  "$(jscpd_dup 'src/A.cs' 44 59 'src/B.cs' 58 73 16 'in scope')" \
+  "$(jscpd_dup 'src/A.cs' 10 29 'tests/ATests.cs' 10 29 20 'half out of scope')")"
+c29_out="$( cd "$C29" && PATH="$(clean_path "$S29")" bash "$QUALITY_BIN" collect .specclaw 2>/dev/null )"
+
+assert_eq_nonempty "29a only the in-scope clone is captured" "1" \
+  "$(printf '%s' "$c29_out" | jq -r '.duplication_clones.clones | length')"
+assert_eq_nonempty "29b the dropped pair is counted, not silently gone" "2/1/1" \
+  "$(printf '%s' "$c29_out" | jq -r '.duplication_clones.census | "\(.clones_found)/\(.clones_outside_scope)/\(.clones_in_scope)"')"
+if printf '%s' "$c29_out" | grep -qF 'tests/ATests.cs'; then
+  fail "29c the out-of-scope path does not leak into the artifact"
+else
+  pass "29c the out-of-scope path does not leak into the artifact"
+fi
+# The larger clone was the dropped one — so its duplicated lines must not be in
+# the total either.
+assert_eq_nonempty "29d and its lines are excluded from the duplicated-line total" "16" \
+  "$(printf '%s' "$c29_out" | jq -r '.duplication_clones.census.duplicated_lines_found')"
+
+# ── Case 30 — the report template carries the section, client-safe ───────────
+#
+# Same reasoning as Case 10: the report is written by an agent no bash suite can
+# run, so what is checkable is the template the agent is handed.
+
+echo "--- Case 30: the report template carries a client-safe hotspot section ---"
+T30="$PLUGIN_ROOT/templates/quality-report.md"
+if grep -q '^## Top Duplication Hotspots' "$T30"; then
+  pass "30a the report template has a Top Duplication Hotspots section"
+else
+  fail "30a the report template has a Top Duplication Hotspots section"
+fi
+if grep -q '{{duplication_hotspots}}' "$T30"; then
+  pass "30b with a token for the agent to fill"
+else
+  fail "30b with a token for the agent to fill"
+fi
+# It must sit after the rollups: how much, then where.
+t30_roll="$(grep -n '^## Module Rollup' "$T30" | cut -d: -f1)"
+t30_dup="$(grep -n '^## Top Duplication Hotspots' "$T30" | cut -d: -f1)"
+if [[ -n "$t30_roll" && -n "$t30_dup" && "$t30_dup" -gt "$t30_roll" ]]; then
+  pass "30c placed after the module rollups"
+else
+  fail "30c placed after the module rollups (rollup line $t30_roll, section line $t30_dup)"
+fi
+t30_body="$(awk '/^## Internal provenance/{exit} {print}' "$T30" | awk '/<!--/{c=1} !c{print} /-->/{c=0}')"
+t30_leak=""
+for name in "specclaw" "SpecClaw" "bf-quality"; do
+  case "$t30_body" in *"$name"*) t30_leak="${t30_leak}${name} " ;; esac
+done
+if [[ -z "$t30_leak" ]]; then
+  pass "30d the new section keeps the body free of internal names"
+else
+  fail "30d the new section keeps the body free of internal names (leaked: $t30_leak)"
+fi
+# The instructions must forbid printing the code and require the truncation
+# footer — those are the two things a narrator would otherwise get wrong.
+assert_contains "30e the guidance forbids showing duplicated source" \
+  "NEVER SHOW THE DUPLICATED CODE" "$(cat "$T30")"
+assert_contains "30f and requires truncation to be stated" \
+  "TRUNCATION IS STATED" "$(cat "$T30")"
+AGENT30="$PLUGIN_ROOT/agents/bf-quality-analyst.md"
+assert_contains "30g the agent is told the artifact holds no fragment" \
+  "never the fragment" "$(cat "$AGENT30")"
+
+# ── Case 31 — a repo with no duplication ─────────────────────────────────────
+
+echo "--- Case 31: zero clones is an honest empty result, not a crash ---"
+C31="$WORK/c31"; clone_project "$C31"
+S31="$WORK/c31-stub"
+stub_scc "$S31" "$clone_scc2"
+stub_lizard "$S31" "$(liz_row_range 'src/A.cs' 'Compute' 4 20 40 60)"
+stub_jscpd "$S31" "$(jscpd_report '{"src/A.cs":{"lines":80,"duplicatedLines":0},"src/B.cs":{"lines":80,"duplicatedLines":0}}')"
+c31_out="$( cd "$C31" && PATH="$(clean_path "$S31")" bash "$QUALITY_BIN" collect .specclaw 2>/dev/null )"
+c31_exit=$?
+assert_eq "31a a repo with no duplication exits 0" "0" "$c31_exit"
+assert_eq_nonempty "31b the clone list is present and empty, never absent" "0" \
+  "$(printf '%s' "$c31_out" | jq -r '.duplication_clones.clones | length')"
+assert_eq_nonempty "31c the census reports honest zeroes" "0/0/0/false" \
+  "$(printf '%s' "$c31_out" | jq -r '.duplication_clones.census | "\(.clones_found)/\(.clones_in_scope)/\(.clones_captured)/\(.truncated)"')"
+assert_eq "31d and no clone QI is invented" "0" \
+  "$(printf '%s' "$c31_out" | jq -r '[.quality_issues[] | select(.metric=="duplication-clone")] | length')"
+
+# jscpd absent entirely is a different state again, and must also not crash.
+C31B="$WORK/c31b"; clone_project "$C31B"
+S31B="$WORK/c31b-stub"
+stub_scc "$S31B" "$clone_scc2"
+c31b_out="$( cd "$C31B" && PATH="$(clean_path "$S31B")" bash "$QUALITY_BIN" collect .specclaw 2>/dev/null )"
+assert_eq "31e with no jscpd at all: exit 0" "0" "$?"
+assert_eq_nonempty "31f and the clone census is zeroed rather than missing" "0" \
+  "$(printf '%s' "$c31b_out" | jq -r '.duplication_clones.census.clones_found')"
 
 # ── Result ───────────────────────────────────────────────────────────────────
 

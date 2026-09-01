@@ -54,6 +54,23 @@
   run and make two reports months apart incomparable — which is the only thing
   a permanent id is for.
 
+  A `duplication-clone` entry carries FIVE fields instead of four, because a
+  clone is a relationship and no single location identifies it:
+
+    duplication-clone|fileA|fileB|module|sha256:<hash of the fragment>
+
+  Slot 2 holds the PEER FILE, not a function — a clone entry always reports
+  Function as —, and names its other side in Clone peer instead. The two sides
+  are put in a canonical order (smaller path, then smaller start line) before
+  the key is built, because the detector reports first/second in scan order and
+  an unordered pair would flip between runs and mint a new id each time.
+
+  The hash is of the fragment with whitespace normalised, not of the raw text:
+  clone detection works on a token stream, so re-indenting a block leaves the
+  same clone, and hashing raw text would retire a hotspot nobody touched. Line
+  numbers are deliberately absent from the key for the same reason — editing
+  code ABOVE a clone shifts it down without changing it at all.
+
   A RENAMED FILE therefore yields a new QI-### plus a resolved old one. That is
   the intended behaviour and not a defect: inferring the rename would carry an
   id, and its whole history, onto code nobody measured.
@@ -107,7 +124,11 @@
   - **Module:** <MOD-###, or MOD-UNASSIGNED when no module cites this file>
   - **File:** <repo-relative path, or — for a module-level metric>
   - **Function:** <function name, or — for a file- or module-level metric>
-  - **Metric:** <complexity | function_length | file_length | duplication>
+  - **Metric:** <complexity | function_length | file_length | duplication |
+    duplication-clone>
+  - **Clone peer:** <the other side of a duplication-clone pair, as a
+    repo-relative path — present ONLY on a duplication-clone entry, absent on
+    every other. The File field above names the first side.>
   - **Value:** <the measured value at the last check, or — when resolved>
   - **Severity:** <WARN | HIGH at the last check, or — when resolved>
   - **Status:** <open | resolved | excluded-by-scope>
