@@ -194,6 +194,64 @@ quality:
   # without becoming something the rebuild must clear.
   remediation_severity_floor: HIGH
 
+  # ── Scan scope: what the quality scan measures ─────────────────────────────
+  #
+  # The scan measures production code. Generated migrations, designer files,
+  # minified bundles, vendored dependencies and test suites are excluded by
+  # default, because a hotspot in a file nobody maintains is not a finding about
+  # this project's code — and left in, it distorts module rollups, duplication
+  # percentages and the legacy-vs-target compare.
+  #
+  # THE DEFAULT PATTERNS ARE NOT HERE. They ship with the plugin, in
+  # lib/quality-exclusions.yaml, grouped into the five categories named below.
+  # Read that file to see exactly what each category matches and why; it also
+  # documents the matching semantics in full. This block is the PROJECT layer
+  # that overlays them.
+  #
+  # Matching, in one line: globs against repo-relative paths, case-insensitive,
+  # `**` crosses directories and `*` does not, and `**/x` matches `x` at any
+  # depth including the repo root.
+  #
+  # NOTHING IS HIDDEN. Every excluded file is counted, per category, into
+  # quality.json's `exclusions.census` and narrated in the report's "Scan scope"
+  # section. The effective set is hashed, and `--compare` refuses to compute a
+  # delta across two snapshots whose hashes differ rather than silently
+  # comparing two different denominators.
+  exclusions:
+
+    # Each category on or off independently. Switching one off does not delete
+    # its patterns — they live in lib/quality-exclusions.yaml and come back the
+    # moment this flips to true.
+    generated: true
+    third_party_and_build: true
+    tests: true
+    pipeline_owned: true
+    data_and_lockfiles: true
+
+    # Measure test code into its OWN reported bucket instead of leaving it out.
+    # Requires `tests: true` above — this decides where the test files go, not
+    # whether they are separated. Test code is never folded into a production
+    # module rollup either way: its norms are different (long fixture builders,
+    # repetitive arrange/assert blocks that read as duplication) and mixing the
+    # two makes both numbers mean less.
+    tests_as_separate_bucket: false
+
+    # This project's own additions. Same glob syntax.
+    #   - "**/ThirdPartyControls/**"
+    extra_excludes: []
+
+    # Files forced back IN despite matching an enabled category. Always wins.
+    #
+    # This is the escape hatch for the one trap in the defaults:
+    # `third_party_and_build` excludes `bin/`, `build/`, `out/`, `target/` and
+    # `packages/`, which are build-output directories in .NET, Maven/Gradle,
+    # Rust and NuGet — and legitimate SOURCE directories in shell, Go, Python
+    # and plugin repos. If this project keeps source in one of them, name it
+    # here rather than switching the whole category off:
+    #   - "bin/**"
+    #   - "src/db/Migrations/HandWrittenBackfill.cs"
+    include_overrides: []
+
 # Plugin housekeeping
 plugin:
   update_check: true   # /specclaw:status checks the plugin repo for a newer published

@@ -32,12 +32,18 @@
       cyclomatic complexity of 34 against a threshold of 20" is client-safe.
       "Quality concerns were identified" is just useless.
 
-  ── COVERAGE COMES FIRST, AND IT IS NOT A CAVEAT ────────────────────────────
+  ── SCOPE AND COVERAGE COME FIRST, AND NEITHER IS A CAVEAT ──────────────────
 
-  The Measurement Coverage section sits ABOVE the findings, deliberately. A
-  reader who takes a module rollup at face value without knowing that complexity
-  was unmeasurable for a third of the tree has been misled, and putting coverage
-  at the bottom under "limitations" is exactly how that happens.
+  The Scan Scope and Measurement Coverage sections sit ABOVE the findings,
+  deliberately, and in that order. A reader who takes a module rollup at face
+  value without knowing that complexity was unmeasurable for a third of the
+  tree — or that a third of the tree was never in scope — has been misled, and
+  putting either at the bottom under "limitations" is exactly how that happens.
+
+  They answer two different questions and both have to be asked. Scope says
+  which FILES were looked at; coverage says which METRICS could be computed for
+  them. A file left out of the scan and a metric no tool could compute are both
+  reported, never inferred, and never quietly netted off against each other.
 
   NOT-MEASURED is a result, never a gap to be filled. No value in this document
   is ever estimated, extrapolated or inferred. The three reasons and what each
@@ -73,6 +79,49 @@
   Two or three sentences a delivery lead can act on: how much was measured, how
   many modules sit at HIGH, and the single thing most worth attention. No
   hedging, no throat-clearing.
+-->
+
+## Scan scope
+
+{{scan_scope}}
+
+<!--
+  WHAT WAS MEASURED, AND WHAT WAS DELIBERATELY NOT. Short — a paragraph and a
+  small table — and it comes FIRST, ahead of coverage, because it answers the
+  earlier question. Coverage says which metrics could be computed for the files
+  that were looked at; this says which files were looked at.
+
+  Read it from the artifact's `exclusions` block and from nowhere else:
+
+    exclusions.categories       each category and whether it was applied
+    exclusions.extra_excludes   this project's own additions
+    exclusions.include_overrides  files deliberately measured despite matching
+    exclusions.census.by_category  how many files each category accounted for
+    files.enumerated / files.measured / files.excluded
+
+  AN EXCLUDED FILE IS A DECISION, NOT AN ABSENCE. State the counts plainly and
+  positively: "the scan measured 412 of the 1,806 files in the tree; 1,394 were
+  outside its scope, of which 1,201 were dependency and build output, 158 were
+  test code and 35 were generated". Never write it as a caveat, an apology, or a
+  limitation, and never leave it implied — a reader who assumes every file was
+  measured has been misled just as badly as one who assumes every metric was.
+
+  Say in one sentence why production code is what gets measured: a hotspot in a
+  generated migration or a vendored dependency is a finding about a code
+  generator or a third party, not about this codebase, and leaving it in
+  distorts every module rollup it lands in.
+
+  A `disposition` of `measured_separately` is NOT an exclusion. Those files were
+  measured, into their own bucket, and are reported apart from the production
+  modules rather than left out. Say which bucket and where its numbers are.
+
+  If `include_overrides` is non-empty, name what was forced back in and note
+  that it was a deliberate choice.
+
+  The census counts FILES, not lines. Do not convert one into the other, do not
+  estimate the volume of code skipped, and do not describe the excluded share as
+  a percentage of the codebase's size — the artifact does not carry that figure
+  and inventing it is exactly the kind of number that gets quoted back.
 -->
 
 ## Measurement Coverage
@@ -133,6 +182,14 @@
   deleted so the history stays readable. A resolved entry is never presented as
   a current problem, and never dropped silently.
 
+  `excluded-by-scope` IS NOT `resolved`, and the two never share a list. It
+  means the file that hotspot names is no longer inside the scan scope — the
+  measurement stopped, nothing was fixed. Give it its own short list, name the
+  category that excluded each one, and say the difference in a sentence. A
+  reader who reads "excluded-by-scope" as "dealt with" has been told the
+  opposite of the truth, and it is the flattering direction, which is why it
+  needs saying rather than implying.
+
   An empty hotspot list is stated plainly — together with the coverage, because
   "nothing reached the threshold" reads very differently when half the tree was
   NOT-MEASURED.
@@ -143,9 +200,15 @@
 {{methodology}}
 
 <!--
-  Which tool produced which metric, how files were selected (and what was
-  excluded: vendored, generated and dependency directories), and how a status
+  Which tool produced which metric, how files were selected, and how a status
   band is assigned. Enough that a sceptical reader can reproduce the numbers.
+
+  On selection, state the two facts that make the numbers reproducible: the
+  exclusion set was applied ONCE, at file selection, and every tool measured the
+  identical resulting file list — so the complexity scan and the duplication
+  percentage share a denominator rather than each having their own. The full
+  scope is in the Scan Scope section above; do not restate the category tables
+  here, just say the mechanism.
 
   Also state plainly what this report does NOT claim: it measures structural
   properties of source code. It says nothing about whether the software is

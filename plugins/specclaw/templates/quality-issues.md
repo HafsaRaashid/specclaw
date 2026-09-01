@@ -60,14 +60,36 @@
 
   ── STATUS ───────────────────────────────────────────────────────────────
 
-    open      the hotspot exceeded its threshold in the most recent run
-    resolved  it did not
+    open               the hotspot exceeded its threshold in the most recent run
+    resolved           it did not
+    excluded-by-scope  it was not measured: the file it names is outside the
+                       configured scan scope
 
   `resolved` is not deletion and is not absolution. The entry stays here
   forever, because "this used to be a hotspot" is itself a finding — it is how
   anyone can later tell a module that was cleaned up from one that was never
   bad. A resolved entry that exceeds its threshold again flips back to `open`
   under its ORIGINAL id, with its original First seen date intact.
+
+  `excluded-by-scope` IS NOT `resolved`, and the distinction is the reason it
+  exists as a third status rather than being folded into the second. `resolved`
+  says the code was measured and came back under its threshold. This says the
+  code was not measured at all — the scan scope changed and stopped looking. In
+  the first case someone did something; in the second, nobody did, and the
+  module only LOOKS better. Recording that as `resolved` would be the most
+  flattering lie this registry could tell, and the reader least able to catch it
+  is the one most likely to be shown it.
+
+  Such an entry keeps its id and its original First seen date, gains an
+  **Excluded by scope:** line naming the category and the exclusion config hash
+  that produced the decision, and leaves the open-hotspot rollups — because it
+  is not open. It generates no rebuild remediation item, and a module's existing
+  item records its departure as a dated `⊘ Scope change` line rather than as a
+  retirement, for exactly the same reason.
+
+  A file brought back into scope — the category switched off, or the path added
+  to `include_overrides` — is measured again on the next run and its entry flips
+  back to `open` or `resolved` on the evidence, under its original id.
 
   ── WHICH SEVERITIES GET REGISTERED ──────────────────────────────────────
 
@@ -88,7 +110,9 @@
   - **Metric:** <complexity | function_length | file_length | duplication>
   - **Value:** <the measured value at the last check, or — when resolved>
   - **Severity:** <WARN | HIGH at the last check, or — when resolved>
-  - **Status:** <open | resolved>
+  - **Status:** <open | resolved | excluded-by-scope>
+  - **Excluded by scope:** <category (exclusion config hash) — present ONLY on
+    an excluded-by-scope entry, absent on every other>
   - **First seen:** <ISO-8601 of the run that first registered it — never
     updated afterwards, on any subsequent run, for any reason>
   - **Last checked:** <ISO-8601 of the most recent run>

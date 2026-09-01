@@ -788,6 +788,44 @@ quality_qualifying_qis() {
   ' "$qj" 2>/dev/null | tr -d '\r' || true
 }
 
+# Registered hotspots the quality scan no longer MEASURES, one row each:
+#   module_id  qi_id
+#
+# These are QI-### entries whose file fell outside the configured scan scope on
+# the last measurement. They are not open — they generate no backlog item and
+# appear in no rollup — but they are emphatically not resolved either, and the
+# difference is the whole point of reading them separately.
+#
+# A remediation item's ledger records a hotspot leaving it as "Retired — no
+# longer open at or above the floor", which reads as "somebody fixed it". For a
+# hotspot that stopped being measured that sentence is false, and it is false in
+# the flattering direction: the module looks like it improved because the scan
+# stopped looking. So this feeds a distinct, dated SCOPE CHANGE line instead.
+#
+# Same degradation contract as every helper here: absent file, absent jq or
+# unreadable JSON all produce nothing, and the backlog renders as though the
+# feature did not exist.
+quality_excluded_by_scope_qis() {
+  local qj="$1"
+  [ -f "$qj" ] || return 0
+  command -v jq >/dev/null 2>&1 || return 0
+  jq -r '
+    [ .quality_issues[]? | select(.status == "excluded-by-scope") ]
+    | sort_by(.id)[]
+    | [ (.module_id // "MOD-UNASSIGNED"), (.id // "") ]
+    | join("\u001f")
+  ' "$qj" 2>/dev/null | tr -d '\r' || true
+}
+
+# The exclusion config hash the last measurement scoped itself with, for citing
+# in a scope-change note. Empty when the snapshot predates scan scoping.
+quality_scope_hash() {
+  local qj="$1"
+  [ -f "$qj" ] || return 0
+  command -v jq >/dev/null 2>&1 || return 0
+  jq -r '.exclusions.config_hash // empty' "$qj" 2>/dev/null | tr -d '\r' || true
+}
+
 # How many of a module's OPEN hotspots sit below the floor — the advisory count
 # (PD-03). These generate no item on purpose: registering an id for a WARN is a
 # decision about record-keeping, holding a rebuild to it is a decision about
@@ -1743,6 +1781,19 @@ cmd_render() {
   done < <(quality_qualifying_qis "$qr_json" "$qr_floor")
   [ -z "$qr_offmap_qis" ] || warn "these open quality hotspots name a module module-map.md does not define and generate no remediation item: ${qr_offmap_qis}"
 
+  # Hotspots the scan STOPPED MEASURING, per module. Read into a flat lookup so
+  # the ledger below can tell a hotspot that was fixed from one whose file left
+  # the scan scope. Both leave the item's basis list; only one of them is an
+  # improvement, and the item must not imply the wrong one.
+  declare -A QR_SCOPED_SET
+  QR_SCOPED_SET[__init__]=1; unset 'QR_SCOPED_SET[__init__]'
+  local qr_scope_hash qsmod qsqi
+  qr_scope_hash="$(quality_scope_hash "$qr_json")"
+  while IFS=$'\x1f' read -r qsmod qsqi; do
+    [ -n "$qsqi" ] || continue
+    QR_SCOPED_SET[$qsqi]="$qsmod"
+  done < <(quality_excluded_by_scope_qis "$qr_json")
+
   # Next free BL number. Read from the rendered document AND this run's draft,
   # so a struck tombstone, a deferred item and a brand-new draft item all hold
   # their numbers — ids are permanent and are never reused (CONTRACT.md (c)).
@@ -1832,7 +1883,7 @@ cmd_render() {
     # makes a second --refresh a no-op for this item.
     qr_ledger="${QR_LEDGER[$qr_id]:-}"
     if ! $qr_is_new && [ -n "${QR_PRIOR_QIS[$qr_id]:-}" ]; then
-      local qr_added="" qr_gone="" qr_tok
+      local qr_added="" qr_gone="" qr_scoped="" qr_tok
       for qr_tok in $(printf '%s' "${QR_QIS_OF[$qm]:-}" | tr ',' ' '); do
         [ -n "$qr_tok" ] || continue
         case ",${QR_PRIOR_QIS[$qr_id]}," in
@@ -1840,12 +1891,22 @@ cmd_render() {
           *) qr_added="${qr_added}${qr_added:+, }${qr_tok}" ;;
         esac
       done
+      # A hotspot that left the basis list left it for one of two reasons, and
+      # they are recorded separately because they mean opposite things. It
+      # stopped exceeding its threshold (someone did something), or its file
+      # stopped being measured (nobody did anything and the scan moved). Folding
+      # the second into the "Retired" line would credit the rebuild with an
+      # improvement that consists entirely of not looking.
       for qr_tok in $(printf '%s' "${QR_PRIOR_QIS[$qr_id]}" | tr ',' ' '); do
         [ -n "$qr_tok" ] || continue
         case ",${QR_QIS_OF[$qm]:-}," in
-          *",${qr_tok},"*) ;;
-          *) qr_gone="${qr_gone}${qr_gone:+, }${qr_tok}" ;;
+          *",${qr_tok},"*) continue ;;
         esac
+        if [ -n "${QR_SCOPED_SET[$qr_tok]:-}" ]; then
+          qr_scoped="${qr_scoped}${qr_scoped:+, }${qr_tok}"
+        else
+          qr_gone="${qr_gone}${qr_gone:+, }${qr_tok}"
+        fi
       done
       if [ -n "$qr_added" ]; then
         qr_ledger="${qr_ledger}${qr_ledger:+
@@ -1854,6 +1915,10 @@ cmd_render() {
       if [ -n "$qr_gone" ]; then
         qr_ledger="${qr_ledger}${qr_ledger:+
 }⊖ **Retired ${qr_today}:** ${qr_gone} — no longer open at or above the ${qr_floor} floor in quality.json. Recorded permanently; the id is never reused."
+      fi
+      if [ -n "$qr_scoped" ]; then
+        qr_ledger="${qr_ledger}${qr_ledger:+
+}⊘ **Scope change ${qr_today}:** ${qr_scoped} — no longer MEASURED: the file each names is outside the configured scan scope${qr_scope_hash:+ (exclusion config ${qr_scope_hash})}. Nothing was fixed and nothing was deleted — the hotspot left this item because the scan stopped looking at it, the \`QI-###\` keeps its id and its first-seen date, and this item keeps its number."
       fi
     fi
 
