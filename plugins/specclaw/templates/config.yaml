@@ -194,6 +194,41 @@ quality:
   # without becoming something the rebuild must clear.
   remediation_severity_floor: HIGH
 
+  # ── Duplication clone pairs ────────────────────────────────────────────────
+  #
+  # The per-module duplication percentage above says HOW MUCH code is
+  # duplicated. These control the other half of the question — WHERE — by
+  # preserving the clone pairs the detector found: two file:line ranges, the
+  # duplicated line count, and the module each side belongs to.
+  #
+  # No duplicated SOURCE is ever stored or reported. Each clone carries its two
+  # locations and a hash of the normalised fragment, which is its stable
+  # identity across runs; the ranges point at code that is already in the
+  # repository. A quality report is the artifact most likely to be forwarded
+  # outside the team, and one that embeds source cannot be.
+  clone_qi_min_lines: 30       # a clone at or above this many duplicated lines
+                               # earns a permanent QI-### and enters the same
+                               # accountability chain as every other hotspot.
+                               # This is the whole significance judgement, so
+                               # everything registered is HIGH — quality.register_severity
+                               # picks a band and a clone has no band.
+
+  clone_function_min_overlap: 0.5   # a function name is attached to a clone side
+                               # only when that function CONTAINS the clone's
+                               # start line and covers at least this fraction of
+                               # the clone's lines. Anything else — a clone
+                               # straddling two functions, a language with no
+                               # function-level measurement, two functions both
+                               # qualifying — reports file:range with no name.
+                               # Never a nearest-match guess.
+
+  clone_capture_top_n: 50      # how many clones quality.json stores, largest
+                               # first. Truncation is always visible in the
+                               # census; QI registration is NOT bounded by this,
+                               # so a permanent id is never lost to a display cap.
+
+  clone_report_top_m: 10       # how many the report's hotspot section shows.
+
   # ── Scan scope: what the quality scan measures ─────────────────────────────
   #
   # The scan measures production code. Generated migrations, designer files,
