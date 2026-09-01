@@ -2670,6 +2670,42 @@ assert_contains "35l and the ids involved" "QI-001 (recorded value 210)" "$c35b_
 assert_eq "35m and the registry is left exactly as it was" "2" \
   "$(grep -c '^### QI-' "$C35B/.specclaw/analysis/quality-issues.md")"
 
+# PD-03 gives the surviving number to the LOWEST id. A collector-written
+# registry is already in id order, so an implementation that trusted document
+# order would pass every test above and still hand the number to whichever entry
+# happened to be typed first in a hand-edited one.
+C35C="$WORK/c35c"; new_project "$C35C"; module_map_one "$C35C"
+S35C="$WORK/c35c-stub"
+stub_scc "$S35C" '[{"Name":"C#","Files":[{"Location":"src/Calc.cs","Lines":80,"Code":70}]}]'
+stub_lizard "$S35C" "$(liz_row_range 'src/Calc.cs' '' 3 210 10 220)
+$(liz_row_range 'src/Calc.cs' '' 3 180 300 480)"
+cat > "$C35C/.specclaw/analysis/quality-issues.md" <<'C35CREG'
+# Quality Issues: Fixture
+
+**Path measured:** .
+**Last updated:** 2026-08-01T00:00:00Z
+
+### QI-007
+
+- **Key:** function_length|src/Calc.cs||MOD-001
+- **Value:** 999
+- **Status:** open
+- **First seen:** 2026-08-01T00:00:00Z
+
+### QI-002
+
+- **Key:** function_length|src/Calc.cs||MOD-001
+- **Value:** 210
+- **Status:** open
+- **First seen:** 2026-08-01T00:00:00Z
+C35CREG
+( cd "$C35C" && PATH="$(clean_path "$S35C")" bash "$QUALITY_BIN" collect .specclaw >/dev/null 2>&1 )
+c35c_map="$(jq -r '[.quality_issues[] | "\(.id)=\(.status)"] | sort | join(" ")' "$C35C/.specclaw/analysis/quality.json")"
+assert_eq_nonempty "35n the lowest id survives even when the registry lists it second" \
+  "QI-002=open QI-007=superseded-duplicate QI-008=open" "$c35c_map"
+c35c_sup="$(jq -r '.quality_issues[] | select(.status == "superseded-duplicate") | .superseded_by' "$C35C/.specclaw/analysis/quality.json")"
+assert_eq_nonempty "35o and the tombstone points at it, not at whichever came first" "QI-002" "$c35c_sup"
+
 # ── Case 36 — the scan funnel is computed, and the report shows it ───────────
 
 echo

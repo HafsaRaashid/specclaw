@@ -1592,8 +1592,21 @@ migrate_qi_registry() {
           changed = 1
           continue
         }
-        # the collision. Ids ascend already: read_qi_registry emits in document
-        # order and the writer sorts by id, so gi[k, *] is lowest-first.
+        # the collision. PD-03 gives the surviving number to the LOWEST id, so
+        # the group is sorted rather than assumed: a collector-written registry
+        # is already in id order, but a hand-edited one is in whatever order
+        # someone typed, and "lowest" decided by typing order is not a rule.
+        # Groups are two to five entries, so an insertion sort is the whole cost.
+        for (g = 2; g <= ng; g++) {
+          hold = gi[k, g]
+          hv = pid[hold]; sub(/^QI-/, "", hv); hv = hv + 0
+          for (j = g - 1; j >= 1; j--) {
+            jv = pid[gi[k, j]]; sub(/^QI-/, "", jv); jv = jv + 0
+            if (jv <= hv) break
+            gi[k, j + 1] = gi[k, j]
+          }
+          gi[k, j + 1] = hold
+        }
         for (i = 1; i <= nl; i++) claimed[i] = 0
         survivor = ""
         for (g = 1; g <= ng; g++) {
