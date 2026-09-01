@@ -47,6 +47,28 @@
 #  12  spaces / unicode paths      → filenames with spaces and non-ASCII survive
 #                                   enumeration, classification, the scc join and
 #                                   the module join, and register hotspots intact
+#  13  quality remediation items → the QUALITY-REMEDIATION backlog item: which
+#                                   modules earn one, the severity floor, the dated
+#                                   ledger, the gate and the computed quality state
+#  14  scan exclusions            → generated, vendored and test files are excluded
+#                                   from the scan and censused per category
+#  15  one measured list          → scc, lizard and jscpd all measure the identical
+#                                   post-exclusion list, never their own ignore rules
+#  16  include_overrides          → one named file is forced back in; its category
+#                                   still excludes the rest
+#  17  case-insensitive matching  → Migrations/, migrations/ and MIGRATIONS/ all excluded
+#  18  spaced paths               → filtered as whole paths, never word-split
+#  19  scope mismatch             → compare stops with QUALITY-SCOPE-MISMATCH, writes no
+#                                   delta and reaches no gate verdict; matching scopes
+#                                   compare normally
+#  20  excluded-by-scope QI       → a registered hotspot whose file leaves the scope
+#                                   keeps its id and is NEVER marked resolved; its
+#                                   rebuild item records a dated scope change, not a
+#                                   retirement, and is not renumbered
+#  21  scoping is neutral         → every category off measures exactly what the
+#                                   pre-change collector measured
+#  22  tests as a bucket          → test code measured into MOD-TESTS, absent from
+#                                   every production module rollup, registering no QI
 #
 # Plain bash + coreutils, plus jq for assertions (same as run-parser-tests.sh
 # and run-cs-body-parser-tests.sh). Run from anywhere:
@@ -1286,6 +1308,629 @@ assert_contains "13j3 a module with no such item reads as having none, not as pa
 assert_contains "13j4 and the notes say what an open item means" \
   "A module with an open quality remediation item is not a done module" \
   "$(cat "$QRB_MS")"
+
+# ── Scan-exclusion fixtures (Cases 14–22) ────────────────────────────────────
+#
+# The collector measures production code. These cases pin the mechanism that
+# decides what "production" means, because every one of its failure modes is
+# silent: a pattern that stops matching measures dependencies as though the team
+# wrote them, a pattern that over-matches hides the product, and either way the
+# resulting number looks entirely plausible.
+#
+# The DEFAULT patterns come from lib/quality-exclusions.yaml, which these cases
+# deliberately do NOT stub. They assert against the shipped defaults, so a future
+# edit to that file that changes what a category means fails here rather than in
+# a client's report.
+
+# excl_project <dir> — a tree with one file in every shape the defaults name.
+# Everything is .cs or .js so the capability table classifies all of it: a file
+# excluded for being unclassifiable would prove nothing about exclusions.
+excl_project() {
+  local d="$1"
+  rm -rf "$d"
+  mkdir -p "$d/.specclaw/analysis" "$d/src" "$d/src/Migrations" "$d/tests" \
+           "$d/node_modules/leftpad" "$d/web"
+  printf 'public class Calc { }\n'      > "$d/src/Calc.cs"          # production
+  printf 'public class Order { }\n'     > "$d/src/Order.cs"         # production
+  printf 'var app = 1;\n'               > "$d/web/app.js"           # production
+  printf 'public class Init { }\n'      > "$d/src/Migrations/20240101_Init.cs"
+  printf 'public class Form { }\n'      > "$d/src/Form.Designer.cs"
+  printf 'public class CalcTests { }\n' > "$d/tests/CalcTests.cs"
+  printf 'module.exports = 1;\n'        > "$d/node_modules/leftpad/index.js"
+  printf 'var a=1;\n'                   > "$d/web/app.min.js"
+}
+
+# Rows for every file in excl_project, measured and excluded alike. A stub that
+# only emitted rows for the files it expected to survive would pass whether the
+# filter worked or not.
+EXCL_ALL_PATHS='src/Calc.cs src/Order.cs web/app.js src/Migrations/20240101_Init.cs src/Form.Designer.cs tests/CalcTests.cs node_modules/leftpad/index.js web/app.min.js'
+
+excl_stub_all() {
+  local dir="$1"
+  # Every EXCLUDED file is hotspot-sized (1500 lines, well past the HIGH band)
+  # and every production file is not. That asymmetry is what makes the
+  # "no excluded path appears in the artifact" assertions bite: a file that
+  # leaks past the filter registers a permanent QI carrying its path, so a grep
+  # can catch it. At a passing size a leak would be invisible and the assertion
+  # would hold whether the filter worked or not.
+  stub_scc "$dir" '[{"Name":"C#","Files":[
+   {"Location":"src/Calc.cs","Lines":40,"Code":30},
+   {"Location":"src/Order.cs","Lines":40,"Code":30},
+   {"Location":"src/Migrations/20240101_Init.cs","Lines":1500,"Code":1400},
+   {"Location":"src/Form.Designer.cs","Lines":1500,"Code":1400},
+   {"Location":"tests/CalcTests.cs","Lines":1500,"Code":1400}]},
+   {"Name":"JavaScript","Files":[
+   {"Location":"web/app.js","Lines":40,"Code":30},
+   {"Location":"node_modules/leftpad/index.js","Lines":1500,"Code":1400},
+   {"Location":"web/app.min.js","Lines":1500,"Code":1400}]}]'
+  stub_lizard "$dir" "$(liz_row 'src/Calc.cs' 'Run' 4 12)
+$(liz_row 'src/Order.cs' 'Run' 4 12)
+$(liz_row 'web/app.js' 'Run' 4 12)
+$(liz_row 'src/Migrations/20240101_Init.cs' 'Up' 4 12)
+$(liz_row 'src/Form.Designer.cs' 'Init' 4 12)
+$(liz_row 'tests/CalcTests.cs' 'Test' 4 12)
+$(liz_row 'node_modules/leftpad/index.js' 'Pad' 4 12)
+$(liz_row 'web/app.min.js' 'Min' 4 12)"
+  stub_jscpd "$dir" '{"statistics":{"paths":{
+   "src/Calc.cs":{"lines":40,"duplicatedLines":1},
+   "src/Order.cs":{"lines":40,"duplicatedLines":1},
+   "web/app.js":{"lines":40,"duplicatedLines":1},
+   "src/Migrations/20240101_Init.cs":{"lines":40,"duplicatedLines":1},
+   "src/Form.Designer.cs":{"lines":40,"duplicatedLines":1},
+   "tests/CalcTests.cs":{"lines":40,"duplicatedLines":1},
+   "node_modules/leftpad/index.js":{"lines":40,"duplicatedLines":1},
+   "web/app.min.js":{"lines":40,"duplicatedLines":1}}}}'
+}
+
+# census_of <json> <category> — the file count the artifact attributes to one
+# category, or 0 when it names none.
+census_of() {
+  jq -r --arg c "$2" '[.exclusions.census.by_category[] | select(.category == $c) | .files] | (.[0] // 0)' "$1"
+}
+
+# ── Case 14 — the default set scopes the scan, and says what it left out ─────
+
+echo
+echo "--- Case 14: generated, vendored and test files are excluded and censused ---"
+C14="$WORK/c14"; excl_project "$C14"
+S14="$WORK/c14-stub"; excl_stub_all "$S14"
+
+c14_out="$( cd "$C14" && PATH="$(clean_path "$S14")" bash "$QUALITY_BIN" collect .specclaw 2>/dev/null )"
+c14_exit=$?
+assert_eq "14a collect exits 0 with exclusions applied" "0" "$c14_exit"
+C14_JSON="$C14/.specclaw/analysis/quality.json"
+
+c14_counts="$(printf '%s' "$c14_out" | jq -r '"\(.files.enumerated)/\(.files.measured)/\(.files.excluded)"')"
+assert_eq_nonempty "14b 8 files enumerated, 3 measured, 5 excluded by scope" "8/3/5" "$c14_counts"
+
+# A file is enumerated FIRST and excluded SECOND, never pruned before anyone
+# counted it. That ordering is what lets the census report a real number; an
+# enumerator that skipped these directories would report every one of them as
+# containing nothing, which is a worse artifact than a slower run.
+c14_total="$(jq -r '[.exclusions.census.by_category[].files] | add' "$C14_JSON")"
+assert_eq_nonempty "14b2 every excluded file was counted before it was excluded" "5" "$c14_total"
+
+# The measured set is exactly the production files. Asserted as a SET, not a
+# count: three files of the wrong three would satisfy a count.
+c14_measured="$(printf '%s' "$c14_out" | jq -r '[.coverage[].files] | add')"
+assert_eq_nonempty "14c every measured file was classified" "3" "$c14_measured"
+
+assert_eq_nonempty "14d the generated category accounts for the migration, the designer file and the minified bundle" \
+  "3" "$(census_of "$C14_JSON" generated)"
+assert_eq_nonempty "14e the tests category accounts for the test file" \
+  "1" "$(census_of "$C14_JSON" tests)"
+assert_eq_nonempty "14f the third-party category accounts for the dependency" \
+  "1" "$(census_of "$C14_JSON" third_party_and_build)"
+
+# Nothing excluded may appear anywhere in the artifact — not in a rollup, not in
+# a coverage row, not in a hotspot key. A path that survives into any of them is
+# a file being measured after the scan said it was out of scope.
+c14_leak=""
+for p in src/Migrations/20240101_Init.cs src/Form.Designer.cs tests/CalcTests.cs node_modules/leftpad/index.js web/app.min.js; do
+  grep -qF "$p" "$C14_JSON" && c14_leak="${c14_leak}${p} "
+done
+if [[ -z "$c14_leak" ]]; then
+  pass "14g no excluded path appears anywhere in the artifact"
+else
+  fail "14g no excluded path appears anywhere in the artifact (leaked: $c14_leak)"
+fi
+
+# 14g bites only because every excluded file is hotspot-sized: a leak would mint
+# a QI naming it. Pin that the production files DID register nothing, so the
+# assertion above is known to be discriminating rather than vacuous.
+c14_qi="$(printf '%s' "$c14_out" | jq -r '[.quality_issues[] | select(.status == "open")] | length')"
+assert_eq "14g2 and no hotspot was registered at all, since only excluded files were oversized" "0" "$c14_qi"
+
+# The census is not a silent omission: the effective config travels with it.
+c14_cfg="$(jq -r '.exclusions.categories | keys | join(",")' "$C14_JSON")"
+assert_eq_nonempty "14h the effective config records every category" \
+  "data_and_lockfiles,generated,pipeline_owned,tests,third_party_and_build" "$c14_cfg"
+c14_hash="$(jq -r '.exclusions.config_hash' "$C14_JSON")"
+case "$c14_hash" in
+  sha256:*) pass "14i the effective scope is hashed into the artifact" ;;
+  *) fail "14i the effective scope is hashed into the artifact (got '$c14_hash')" ;;
+esac
+
+# ── Case 15 — one exclusion pass, one measured list, all three tools ──────────
+#
+# THE POINT OF PD-02. Each stub above emits a row for all eight files, so each
+# tool would happily report on the excluded ones. If any tool's denominator came
+# from its own ignore flags instead of the shared list, its count would differ
+# from the others — a duplication percentage over one denominator and a
+# complexity scan over another silently corrupts every rollup that combines them.
+
+echo "--- Case 15: scc, lizard and jscpd all measure the identical post-exclusion list ---"
+c15_sets="$(printf '%s' "$c14_out" | jq -r '"\(.files.measured)/\(.files.sized)/\(.files.function_measured)/\(.files.duplication_measured)"')"
+assert_eq_nonempty "15a all three tools measured exactly the 3 files the filter kept" "3/3/3/3" "$c15_sets"
+
+# And the same at module grain: the rollup's file count is the shared list too.
+c15_modfiles="$(printf '%s' "$c14_out" | jq -r '[.modules[].files] | add')"
+assert_eq_nonempty "15b the module rollups are computed over that same list" "3" "$c15_modfiles"
+
+# ── Case 16 — include_overrides forces a file back in ────────────────────────
+
+echo "--- Case 16: include_overrides rescues an otherwise-excluded file ---"
+C16="$WORK/c16"; excl_project "$C16"
+cat > "$C16/.specclaw/config.yaml" <<'CFG'
+version: 1
+quality:
+  exclusions:
+    include_overrides:
+      - "src/Migrations/20240101_Init.cs"
+CFG
+c16_out="$( cd "$C16" && PATH="$(clean_path "$S14")" bash "$QUALITY_BIN" collect .specclaw 2>/dev/null )"
+
+# 9 enumerated, not 8: this case writes a .specclaw/config.yaml, which is itself
+# enumerated and then excluded under pipeline_owned. That is the mechanism
+# working — the pipeline's own files are scoped out like any others, and counted
+# like any others rather than being invisible to the tree walk.
+c16_counts="$(printf '%s' "$c16_out" | jq -r '"\(.files.measured)/\(.files.excluded)"')"
+assert_eq_nonempty "16a the overridden file is measured: 4 measured, 5 excluded" "4/5" "$c16_counts"
+
+if grep -qF 'src/Migrations/20240101_Init.cs' "$C16/.specclaw/analysis/quality.json"; then
+  pass "16b the overridden file reaches the measurement"
+else
+  fail "16b the overridden file reaches the measurement"
+fi
+
+# The override rescues that ONE file and nothing else in its category — an
+# override that switched the whole category off would be a different feature.
+assert_eq_nonempty "16c the category still excludes its other two files" \
+  "2" "$(census_of "$C16/.specclaw/analysis/quality.json" generated)"
+
+c16_ovr="$(printf '%s' "$c16_out" | jq -r '.exclusions.include_overrides | join(",")')"
+assert_eq_nonempty "16d the override is recorded in the effective config, not applied invisibly" \
+  "src/Migrations/20240101_Init.cs" "$c16_ovr"
+
+# ── Case 17 — matching is case-insensitive ───────────────────────────────────
+#
+# Repos that have been through a Windows checkout carry both Migrations/ and
+# migrations/. A case-sensitive default would exclude one and measure the other,
+# which is the worst outcome available: the number is wrong and still plausible.
+
+echo "--- Case 17: Migrations/ and migrations/ are both excluded ---"
+C17="$WORK/c17"
+rm -rf "$C17"; mkdir -p "$C17/.specclaw/analysis" "$C17/src/Migrations" "$C17/src/migrations" "$C17/src/MIGRATIONS"
+printf 'public class A { }\n' > "$C17/src/Keep.cs"
+printf 'public class B { }\n' > "$C17/src/Migrations/Upper.cs"
+printf 'public class C { }\n' > "$C17/src/migrations/Lower.cs"
+printf 'public class D { }\n' > "$C17/src/MIGRATIONS/Shout.cs"
+S17="$WORK/c17-stub"
+stub_scc "$S17" '[{"Name":"C#","Files":[
+ {"Location":"src/Keep.cs","Lines":40,"Code":30},
+ {"Location":"src/Migrations/Upper.cs","Lines":40,"Code":30},
+ {"Location":"src/migrations/Lower.cs","Lines":40,"Code":30},
+ {"Location":"src/MIGRATIONS/Shout.cs","Lines":40,"Code":30}]}]'
+
+c17_out="$( cd "$C17" && PATH="$(clean_path "$S17")" bash "$QUALITY_BIN" collect .specclaw 2>/dev/null )"
+c17_counts="$(printf '%s' "$c17_out" | jq -r '"\(.files.enumerated)/\(.files.measured)"')"
+assert_eq_nonempty "17a all three casings are excluded; only the production file is measured" "4/1" "$c17_counts"
+
+# 4 enumerated, 3 measured is WRONG if only one casing matched — assert the
+# category count directly rather than inferring it from the total.
+assert_eq_nonempty "17b the generated category accounts for all three casings" \
+  "3" "$(census_of "$C17/.specclaw/analysis/quality.json" generated)"
+assert_eq_nonempty "17c and the production file survived" "1" \
+  "$(printf '%s' "$c17_out" | jq -r '.files.measured')"
+
+# ── Case 18 — paths with spaces are filtered without word-splitting ──────────
+#
+# Case 12 proved a spaced path survives measurement. This proves it survives the
+# FILTER: one spaced path excluded, one spaced path kept, neither split.
+
+echo "--- Case 18: spaced paths are excluded and measured correctly, never split ---"
+C18="$WORK/c18"
+rm -rf "$C18"; mkdir -p "$C18/.specclaw/analysis" "$C18/src" "$C18/src/Connected Services/Ref"
+printf 'public class A { }\n' > "$C18/src/Order Service.cs"
+printf 'public class B { }\n' > "$C18/src/Connected Services/Ref/Reference.cs"
+S18="$WORK/c18-stub"
+# BOTH files are oversized, so each would register a permanent QI carrying its
+# path if it were measured. That makes the pair of assertions below symmetrical
+# and discriminating: the kept path must appear in the registry and the excluded
+# one must not. quality.json carries no plain file list, so a hotspot is the
+# observable a spaced path can actually be checked through.
+stub_scc "$S18" '[{"Name":"C#","Files":[
+ {"Location":"src/Order Service.cs","Lines":1500,"Code":1400},
+ {"Location":"src/Connected Services/Ref/Reference.cs","Lines":1500,"Code":1400}]}]'
+
+c18_out="$( cd "$C18" && PATH="$(clean_path "$S18")" bash "$QUALITY_BIN" collect .specclaw 2>/dev/null )"
+c18_counts="$(printf '%s' "$c18_out" | jq -r '"\(.files.enumerated)/\(.files.measured)/\(.files.excluded)"')"
+assert_eq_nonempty "18a the spaced excluded path is excluded and the spaced kept path is measured" "2/1/1" "$c18_counts"
+
+if grep -qF 'src/Order Service.cs' "$C18/.specclaw/analysis/quality.json"; then
+  pass "18b the kept spaced path reaches the measurement with its space intact"
+else
+  fail "18b the kept spaced path reaches the measurement with its space intact"
+fi
+if grep -qF 'Connected Services' "$C18/.specclaw/analysis/quality.json"; then
+  fail "18c the excluded spaced path does not leak into the artifact"
+else
+  pass "18c the excluded spaced path does not leak into the artifact"
+fi
+
+# The spaced pattern matched as one path, not as two words: a split would have
+# left "Connected" and "Services/Ref/Reference.cs" both unmatched and the file
+# measured. 18a's count already proves it; this pins the LOC so a future change
+# that measures it anyway cannot pass by coincidence.
+c18_loc="$(printf '%s' "$c18_out" | jq -r '[.modules[].loc] | add')"
+assert_eq_nonempty "18d only the kept file's LOC is counted" "1400" "$c18_loc"
+
+# ── Case 19 — compare refuses two snapshots measured over different scopes ────
+
+echo "--- Case 19: a scope mismatch stops compare by name; matching scopes compare ---"
+C19="$WORK/c19"; excl_project "$C19"
+
+# Legacy measured under the DEFAULT scope.
+( cd "$C19" && PATH="$(clean_path "$S14")" bash "$QUALITY_BIN" collect .specclaw ) >/dev/null 2>&1
+# Target measured after the scope changed under it.
+cat > "$C19/.specclaw/config.yaml" <<'CFG'
+version: 1
+quality:
+  exclusions:
+    tests: false
+CFG
+( cd "$C19" && PATH="$(clean_path "$S14")" bash "$QUALITY_BIN" collect .specclaw --target ) >/dev/null 2>&1
+
+c19_l="$(jq -r '.exclusions.config_hash' "$C19/.specclaw/analysis/quality.json")"
+c19_t="$(jq -r '.exclusions.config_hash' "$C19/.specclaw/analysis/quality-target.json")"
+if [[ -n "$c19_l" && "$c19_l" != "$c19_t" ]]; then
+  pass "19a switching a category off changes the scope hash"
+else
+  fail "19a switching a category off changes the scope hash (legacy '$c19_l', target '$c19_t')"
+fi
+
+c19_err="$( cd "$C19" && bash "$QUALITY_BIN" compare .specclaw 2>&1 >/dev/null )"
+c19_exit=$?
+if [[ "$c19_exit" -ne 0 ]]; then
+  pass "19b compare across mismatched scopes exits non-zero"
+else
+  fail "19b compare across mismatched scopes exits non-zero (exit 0)"
+fi
+assert_contains "19c the stop is named, not a generic error" "QUALITY-SCOPE-MISMATCH" "$c19_err"
+# WHICH side is stale is computed against the config on disk, not guessed by
+# convention. Here the target was measured under the current config and the
+# legacy side was not, so the legacy side is the one to re-measure — naming the
+# other would send someone to redo the snapshot that was already correct.
+assert_contains "19d it names the side that does not match the current config" \
+  "quality.json — re-measure it" "$c19_err"
+assert_contains "19d2 and says the other side is already current" \
+  "quality-target.json already matches the current config" "$c19_err"
+
+if [[ -f "$C19/.specclaw/analysis/quality-delta.json" ]]; then
+  fail "19e no delta is written across mismatched scopes"
+else
+  pass "19e no delta is written across mismatched scopes"
+fi
+
+# The gate inherits it: no verdict is computed across mismatched scopes.
+c19_gate="$( cd "$C19" && bash "$QUALITY_BIN" compare .specclaw --gate 2>&1 )"
+if printf '%s' "$c19_gate" | grep -q 'QUALITY-GATE:'; then
+  fail "19f no QUALITY-GATE verdict is reached across mismatched scopes"
+else
+  pass "19f no QUALITY-GATE verdict is reached across mismatched scopes"
+fi
+
+# Re-measure the legacy side under the same scope: now they match and the delta
+# computes, proving the stop is about the scope and not about compare itself.
+( cd "$C19" && PATH="$(clean_path "$S14")" bash "$QUALITY_BIN" collect .specclaw ) >/dev/null 2>&1
+( cd "$C19" && bash "$QUALITY_BIN" compare .specclaw ) >/dev/null 2>&1
+c19_exit2=$?
+assert_eq "19g re-measuring the stale side lets the comparison run" "0" "$c19_exit2"
+if [[ -f "$C19/.specclaw/analysis/quality-delta.json" ]]; then
+  pass "19h and the delta is written"
+  c19_scope="$(jq -r '.scan_scope.config_hash' "$C19/.specclaw/analysis/quality-delta.json")"
+  assert_eq_nonempty "19i the delta records the scope both sides shared" \
+    "$(jq -r '.exclusions.config_hash' "$C19/.specclaw/analysis/quality.json")" "$c19_scope"
+else
+  fail "19h and the delta is written"
+  fail "19i the delta records the scope both sides shared"
+fi
+
+# ── Case 20 — a registered QI whose file leaves the scope ────────────────────
+#
+# The hotspot was not fixed. Marking it `resolved` would credit somebody with
+# work nobody did, in the flattering direction, and it is exactly the reading a
+# module rollup invites. So it gets its own status, keeps its id, and its
+# departure from the rebuild item is recorded as a scope change rather than a
+# retirement.
+
+echo "--- Case 20: an excluded file's QI becomes excluded-by-scope, never resolved ---"
+C20="$WORK/c20"
+rm -rf "$C20"; mkdir -p "$C20/.specclaw/analysis" "$C20/src" "$C20/legacy"
+printf 'public class Keep { }\n' > "$C20/src/Keep.cs"
+printf 'public class Big { }\n'  > "$C20/legacy/Big.cs"
+cat > "$C20/.specclaw/analysis/module-map.md" <<'MM'
+# Module Map: Scope
+
+**Status:** CONFIRMED by fixture, 2026-09-01
+
+## Modules
+
+### MOD-001 — Legacy
+
+- **Evidence:**
+  - `legacy/Big.cs:1` — the oversized unit
+MM
+S20="$WORK/c20-stub"
+# legacy/Big.cs is a file_length HIGH hotspot, so it earns a permanent id.
+stub_scc "$S20" '[{"Name":"C#","Files":[
+ {"Location":"src/Keep.cs","Lines":40,"Code":30},
+ {"Location":"legacy/Big.cs","Lines":1500,"Code":1400}]}]'
+
+( cd "$C20" && PATH="$(clean_path "$S20")" bash "$QUALITY_BIN" collect .specclaw ) >/dev/null 2>&1
+C20_JSON="$C20/.specclaw/analysis/quality.json"
+c20_id="$(jq -r '[.quality_issues[] | select(.status == "open" and .file == "legacy/Big.cs")] | .[0].id // ""' "$C20_JSON")"
+if [[ -n "$c20_id" ]]; then
+  pass "20a the oversized file is registered as ${c20_id}"
+else
+  fail "20a the oversized file is registered (no open QI found)"
+fi
+
+# Now put that file out of scope and re-measure.
+cat > "$C20/.specclaw/config.yaml" <<'CFG'
+version: 1
+quality:
+  exclusions:
+    extra_excludes:
+      - "legacy/**"
+CFG
+( cd "$C20" && PATH="$(clean_path "$S20")" bash "$QUALITY_BIN" collect .specclaw ) >/dev/null 2>&1
+
+c20_status="$(jq -r --arg id "$c20_id" '[.quality_issues[] | select(.id == $id)] | .[0].status // ""' "$C20_JSON")"
+assert_eq_nonempty "20b its status becomes excluded-by-scope, not resolved" "excluded-by-scope" "$c20_status"
+
+c20_same="$(jq -r --arg id "$c20_id" '[.quality_issues[] | select(.id == $id)] | length' "$C20_JSON")"
+assert_eq_nonempty "20c it keeps its id rather than being deleted or renumbered" "1" "$c20_same"
+
+c20_open="$(jq -r --arg id "$c20_id" '[.quality_issues[] | select(.id == $id and .status == "open")] | length' "$C20_JSON")"
+assert_eq "20d it leaves the open-hotspot rollups" "0" "$c20_open"
+
+c20_cat="$(jq -r --arg id "$c20_id" '[.quality_issues[] | select(.id == $id)] | .[0].excluded_by.category // ""' "$C20_JSON")"
+assert_eq_nonempty "20e it records which category excluded it" "extra_excludes" "$c20_cat"
+c20_h="$(jq -r --arg id "$c20_id" '[.quality_issues[] | select(.id == $id)] | .[0].excluded_by.config_hash // ""' "$C20_JSON")"
+assert_eq_nonempty "20f and the exclusion config that made the decision" \
+  "$(jq -r '.exclusions.config_hash' "$C20_JSON")" "$c20_h"
+
+# The registry document carries it too — the registry is the permanent record,
+# quality.json is a projection that gets archived.
+C20_REG="$C20/.specclaw/analysis/quality-issues.md"
+assert_contains "20g the registry records the status" "**Status:** excluded-by-scope" "$(cat "$C20_REG")"
+assert_contains "20h and the scope that produced it" "**Excluded by scope:** extra_excludes" "$(cat "$C20_REG")"
+
+# ── 20i–20l — the rebuild-plan remediation item records a SCOPE CHANGE ───────
+#
+# Its existing "Retired" line means "no longer above the floor", which reads as
+# "somebody fixed it". For a hotspot that stopped being measured that sentence
+# is false in the flattering direction, so it gets a distinct dated line.
+
+QSC="$WORK/c20-plan"; qr_project "$QSC"
+cat > "$QSC/.specclaw/analysis/quality.json" <<'QJ'
+{"schema_version":1,
+ "exclusions":{"config_hash":"sha256:aaaa"},
+ "thresholds":{"register_severity":"HIGH"},
+ "modules":[{"module_id":"MOD-001","rollup_status":"HIGH"}],
+ "quality_issues":[
+   {"id":"QI-001","module_id":"MOD-001","status":"open","metric":"complexity",
+    "file":"legacy/auth/session","function":"Validate","value":34,"severity":"HIGH"},
+   {"id":"QI-002","module_id":"MOD-001","status":"open","metric":"file_length",
+    "file":"legacy/auth/gen.Designer.cs","function":null,"value":1420,"severity":"HIGH"}]}
+QJ
+qr_render "$QSC"
+QSC_BL="$(qr_backlog "$QSC")"
+qsc_item="$(grep -oE '^### BL-[0-9]{3} — MOD-001 quality remediation' "$QSC_BL" | grep -oE 'BL-[0-9]{3}' | head -1)"
+if [[ -n "$qsc_item" ]]; then
+  pass "20i MOD-001 gets a quality remediation item (${qsc_item})"
+else
+  fail "20i MOD-001 gets a quality remediation item"
+fi
+
+# QI-002's file is now out of scope. QI-001 is untouched.
+cat > "$QSC/.specclaw/analysis/quality.json" <<'QJ'
+{"schema_version":1,
+ "exclusions":{"config_hash":"sha256:bbbb"},
+ "thresholds":{"register_severity":"HIGH"},
+ "modules":[{"module_id":"MOD-001","rollup_status":"HIGH"}],
+ "quality_issues":[
+   {"id":"QI-001","module_id":"MOD-001","status":"open","metric":"complexity",
+    "file":"legacy/auth/session","function":"Validate","value":34,"severity":"HIGH"},
+   {"id":"QI-002","module_id":"MOD-001","status":"excluded-by-scope","metric":"file_length",
+    "file":"legacy/auth/gen.Designer.cs","function":null,"value":null,"severity":null,
+    "excluded_by":{"category":"generated","config_hash":"sha256:bbbb"}}]}
+QJ
+qr_refresh "$QSC"
+qsc_body="$(qr_block "$QSC_BL" "$qsc_item")"
+
+assert_contains "20j the departure is recorded as a dated scope change" \
+  "⊘ **Scope change $(date +%Y-%m-%d):** QI-002" "$qsc_body"
+assert_contains "20k and says plainly that nothing was fixed" \
+  "Nothing was fixed and nothing was deleted" "$qsc_body"
+if printf '%s' "$qsc_body" | grep -q '⊖ \*\*Retired.*QI-002'; then
+  fail "20l it is NOT recorded as a retirement (that would claim work nobody did)"
+else
+  pass "20l it is NOT recorded as a retirement (that would claim work nobody did)"
+fi
+qsc_still="$(grep -cE "^### ${qsc_item} — MOD-001 quality remediation" "$QSC_BL" || true)"
+assert_eq "20m the item keeps its number and is not renumbered" "1" "$qsc_still"
+assert_contains "20n and the hotspot that is still open stays on the item" "QI-001" "$qsc_body"
+
+# ── Case 21 — the exclusion mechanism changes no measurement ─────────────
+#
+# WHY THIS IS NOT LITERALLY "EVERY CATEGORY OFF". The config that turns them off
+# lives at .specclaw/config.yaml, which is itself a file in the tree, and the
+# PRE-change collector always excluded .specclaw/ with a hardcoded filter. So a
+# run with pipeline_owned off is measuring a file the old one never saw, and the
+# two are not comparable no matter how correct both are.
+#
+# The comparable configuration is the one that reproduces the old hardcoded
+# filter exactly: pipeline_owned ON (the old collector excluded .specclaw/) and
+# the other four OFF, over a tree containing none of node_modules, vendor, dist
+# or build (the rest of what it hardcoded). On that tree the two scopes are the
+# same scope, and every measured value must match.
+
+echo "--- Case 21: with the old filter's scope reproduced, no measurement changes ---"
+C21="$WORK/c21"
+rm -rf "$C21"; mkdir -p "$C21/.specclaw/analysis" "$C21/src"
+printf 'public class A { }\n' > "$C21/src/A.cs"
+printf 'public class B { }\n' > "$C21/src/B.cs"
+cat > "$C21/.specclaw/config.yaml" <<'CFG'
+version: 1
+quality:
+  exclusions:
+    generated: false
+    third_party_and_build: false
+    tests: false
+    data_and_lockfiles: false
+CFG
+S21="$WORK/c21-stub"
+stub_scc "$S21" '[{"Name":"C#","Files":[
+ {"Location":"src/A.cs","Lines":1400,"Code":1300},
+ {"Location":"src/B.cs","Lines":40,"Code":30}]}]'
+stub_lizard "$S21" "$(liz_row 'src/A.cs' 'Run' 34 150)"
+
+( cd "$C21" && PATH="$(clean_path "$S21")" bash "$QUALITY_BIN" collect .specclaw ) >/dev/null 2>&1
+C21_JSON="$C21/.specclaw/analysis/quality.json"
+
+c21_scope="$(jq -r '"\(.files.measured)/\(.exclusions.census.files_total)"' "$C21_JSON")"
+assert_eq_nonempty "21a only the pipeline's own config file is out of scope" "2/1" "$c21_scope"
+assert_eq_nonempty "21a2 and it is the pipeline_owned category that accounts for it" \
+  "1" "$(census_of "$C21_JSON" pipeline_owned)"
+
+# The measurement itself, against the collector as it was before scan scoping.
+#
+# Stripped: generated_at (a timestamp), the whole exclusions block and
+# excluded_by (fields that did not exist), and files.enumerated / .measured /
+# .excluded. That last group is a RENAME, not a changed measurement: the old
+# `enumerated` counted files after its hardcoded filter, which is what
+# `measured` counts now. 21c asserts that equivalence directly rather than
+# hiding it, and everything else — every status, rollup, LOC, coverage row and
+# QI id — must be byte-identical.
+#
+# `first_seen` is NORMALISED rather than deleted, and only where it equals its
+# own snapshot's generated_at. On a first run against an empty registry that is
+# every entry by construction — first_seen IS the run's clock — so comparing
+# them literally compares two wall-clock readings taken seconds apart and can
+# never match. Replacing it only in that case keeps the field's real content
+# under comparison for any entry carrying an older date, which is the thing
+# permanence is about.
+q_strip() {
+  jq -S '.generated_at as $ga
+         | del(.generated_at, .exclusions)
+         | .files |= del(.enumerated, .measured, .excluded)
+         | (.quality_issues // []) |= map(del(.excluded_by)
+             | if .first_seen == $ga then .first_seen = "<registered by this run>" else . end)' "$1"
+}
+PRE21="$WORK/pre-quality-collect"
+C21B_JSON=""
+if git -C "$SCRIPT_DIR" show "origin/main:plugins/specclaw/bin/specclaw-bf-quality-collect" > "$PRE21" 2>/dev/null && [[ -s "$PRE21" ]]; then
+  C21B="$WORK/c21-pre"
+  rm -rf "$C21B"; cp -R "$C21" "$C21B"; rm -rf "$C21B/.specclaw/analysis"; mkdir -p "$C21B/.specclaw/analysis"
+  ( cd "$C21B" && PATH="$(clean_path "$S21")" bash "$PRE21" collect .specclaw ) >/dev/null 2>&1
+  C21B_JSON="$C21B/.specclaw/analysis/quality.json"
+fi
+if [[ -n "$C21B_JSON" && -s "$C21B_JSON" ]]; then
+  if diff <(q_strip "$C21B_JSON") <(q_strip "$C21_JSON") >/dev/null 2>&1; then
+    pass "21b every measured value is identical to the pre-change collector's"
+  else
+    fail "21b every measured value is identical to the pre-change collector's"
+    diff <(q_strip "$C21B_JSON") <(q_strip "$C21_JSON") | head -20
+  fi
+  c21_pre_enum="$(jq -r '.files.enumerated' "$C21B_JSON")"
+  assert_eq_nonempty "21c the set of files measured is the same size as before the rename" \
+    "$c21_pre_enum" "$(jq -r '.files.measured' "$C21_JSON")"
+else
+  echo "NOTE: 21b/21c pre-change binary not retrievable (origin/main absent, e.g. a shallow clone) — skipping the comparison."
+  PASS=$((PASS + 2))
+fi
+
+# Standing on its own, without the old binary: the scan measured both source
+# files and classified them exactly as the thresholds say.
+c21_self="$(jq -r '"\(.files.measured)/\(.files.classified)/\(.files.sized)"' "$C21_JSON")"
+assert_eq_nonempty "21d both source files were measured, classified and sized" "2/2/2" "$c21_self"
+c21_hot="$(jq -r '[.quality_issues[] | select(.status == "open") | .metric] | sort | join(",")' "$C21_JSON")"
+assert_eq_nonempty "21e and the hotspots are exactly the three the thresholds define" \
+  "complexity,file_length,function_length" "$c21_hot"
+
+# ── Case 22 — tests as a separately-reported bucket ──────────────────────────
+#
+# PD-06's escape hatch. Test code gets measured, into MOD-TESTS, and never into
+# a production module rollup — its norms are different and mixing the two makes
+# both numbers mean less.
+
+echo "--- Case 22: tests_as_separate_bucket measures test code into its own bucket ---"
+C22="$WORK/c22"; excl_project "$C22"
+# The test file is cited by a module, so this also proves the bucket OVERRIDES a
+# citation rather than merging with it — otherwise test code walks back into the
+# production rollup through the module map's side door.
+cat > "$C22/.specclaw/analysis/module-map.md" <<'MM'
+# Module Map: Bucket
+
+**Status:** CONFIRMED by fixture, 2026-09-01
+
+## Modules
+
+### MOD-001 — Calc
+
+- **Evidence:**
+  - `src/Calc.cs:1` — the calculator
+  - `tests/CalcTests.cs:1` — its tests
+MM
+cat > "$C22/.specclaw/config.yaml" <<'CFG'
+version: 1
+quality:
+  exclusions:
+    tests_as_separate_bucket: true
+CFG
+c22_out="$( cd "$C22" && PATH="$(clean_path "$S14")" bash "$QUALITY_BIN" collect .specclaw 2>/dev/null )"
+
+# 10 enumerated: the 8 fixture files plus this case's own config.yaml and
+# module-map.md, both of which are enumerated and then excluded under
+# pipeline_owned like everything else in .specclaw/.
+c22_counts="$(printf '%s' "$c22_out" | jq -r '"\(.files.measured)/\(.files.excluded)"')"
+assert_eq_nonempty "22a the test file is measured: 4 measured, 6 excluded" "4/6" "$c22_counts"
+
+c22_bucket="$(printf '%s' "$c22_out" | jq -r '[.modules[] | select(.module_id == "MOD-TESTS") | .files] | (.[0] // 0)')"
+assert_eq_nonempty "22b it lands in its own MOD-TESTS bucket" "1" "$c22_bucket"
+
+c22_prod="$(printf '%s' "$c22_out" | jq -r '.modules[] | select(.module_id == "MOD-001") | .files')"
+assert_eq_nonempty "22c and NOT in the production module that cites it" "1" "$c22_prod"
+
+c22_disp="$(printf '%s' "$c22_out" | jq -r '[.exclusions.census.by_category[] | select(.category == "tests") | .disposition] | (.[0] // "")')"
+assert_eq_nonempty "22d the census reports it as measured, not as excluded" "measured_separately" "$c22_disp"
+
+c22_totals="$(printf '%s' "$c22_out" | jq -r '"\(.exclusions.census.files_total)/\(.exclusions.census.files_bucketed)"')"
+assert_eq_nonempty "22e bucketed files are counted apart from excluded ones" "6/1" "$c22_totals"
+
+# QI ids name production hotspots. A bucket entry earning one would make "open
+# hotspots in this module" mean two different things depending on a config flag.
+c22_qi="$(printf '%s' "$c22_out" | jq -r '[.quality_issues[] | select(.module_id == "MOD-TESTS")] | length')"
+assert_eq "22f the bucket registers no QI-###" "0" "$c22_qi"
+
+# With the toggle off, the same tree puts the test file back out of scope —
+# proving the bucket is what moved it, not something else in this fixture.
+rm -f "$C22/.specclaw/config.yaml"; rm -rf "$C22/.specclaw/analysis/archive"
+c22b_out="$( cd "$C22" && PATH="$(clean_path "$S14")" bash "$QUALITY_BIN" collect .specclaw 2>/dev/null )"
+c22b_bucket="$(printf '%s' "$c22b_out" | jq -r '[.modules[] | select(.module_id == "MOD-TESTS")] | length')"
+assert_eq "22g with the toggle off there is no bucket at all" "0" "$c22b_bucket"
 
 # ── Result ───────────────────────────────────────────────────────────────────
 
