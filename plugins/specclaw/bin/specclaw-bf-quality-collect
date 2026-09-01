@@ -2910,6 +2910,145 @@ Re-measure and compare again:
   return 0
 }
 
+# ─── PD-07: the report lint ──────────────────────────────────────────────────
+#
+# The report is prose written by an agent, and until now nothing compared it to
+# the artifact it narrates. It did not have to be true, only plausible, and it
+# was: a MOD-010 row for a nine-module artifact, a status tally that summed a
+# five-HIGH set to six, a funnel flattened into one figure. Each of those was
+# checkable in one line against a file sitting next to it.
+#
+# So this runs after the report is written, on every run, as part of the normal
+# flow rather than as a test. Four checks, all mechanical, none of them reading
+# prose:
+#
+#   1  every MOD-### in the document is in module_rollup_summary.module_ids
+#   2  every QI-### in the document is in the registry
+#   3, 4, 5  each anchored region is byte-identical to the report_blocks field
+#            it was copied from
+#
+# WHY BLOCKS RATHER THAN PARSING SENTENCES. There is no reliable way to pull
+# "1,892" out of a paragraph and know which quantity it claims to be. So the
+# figures do not live in paragraphs: they live between anchors, are rendered by
+# the collector, and are compared whole. A document is either carrying the
+# computed block or it is failing.
+#
+# Exit 0 on a clean report, 1 on any discrepancy, naming what disagreed with
+# what. It reads two files and writes none.
+report_block_region() {
+  local report="$1" name="$2"
+  awk -v b="<!-- quality-report:${name}:begin -->" -v e="<!-- quality-report:${name}:end -->" '
+    index($0, b) == 1 { inb = 1; next }
+    index($0, e) == 1 { inb = 0; next }
+    inb { print }
+  ' "$report" | tr -d '\r' | sed -e :a -e '/^[[:space:]]*$/{$d;N;ba' -e '}'
+}
+
+cmd_lint_report() {
+  local specclaw_dir="" report="" qjson=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      -h|--help) usage ;;
+      -*) die "unknown option '$1' for lint-report." ;;
+      *)
+        if   [ -z "$specclaw_dir" ]; then specclaw_dir="$1"
+        elif [ -z "$report" ];       then report="$1"
+        elif [ -z "$qjson" ];        then qjson="$1"
+        else die "unexpected argument '$1' for lint-report."
+        fi ;;
+    esac
+    shift
+  done
+  [ -n "$specclaw_dir" ] || usage
+  [ -n "$report" ] || usage
+
+  local specclaw_abs; specclaw_abs="$(cd "$specclaw_dir" 2>/dev/null && pwd)" \
+    || die "not a directory: ${specclaw_dir}"
+  [ -n "$qjson" ] || qjson="${specclaw_abs}/analysis/quality.json"
+
+  [ -f "$report" ] || die "REPORT-LINT: no report at ${report}. It is written by the narration step; run that first."
+  [ -f "$qjson" ]  || die "REPORT-LINT: no artifact at ${qjson}. The report cannot be checked against a measurement that is not there."
+  jq -e . "$qjson" >/dev/null 2>&1 || die "REPORT-LINT: ${qjson} is not valid JSON."
+
+  local fails=0
+  _lint_fail() { echo "REPORT-LINT FAIL: $1" >&2; fails=$((fails + 1)); }
+
+  # ── 1. every MOD-### the document names exists in the measurement ─────────
+  #
+  # The check that would have caught MOD-010 on the day it shipped. Ids are
+  # pulled as tokens, so it does not matter whether one appears in the table, a
+  # sentence or a heading — a module the artifact never measured cannot be
+  # mentioned at all.
+  local known_mods; known_mods="$(jq -r '.module_rollup_summary.module_ids[]?' "$qjson" | LC_ALL=C sort -u)"
+  local seen_mods;  seen_mods="$(grep -oE 'MOD-[0-9]+' "$report" 2>/dev/null | LC_ALL=C sort -u || true)"
+  local unknown_mods
+  unknown_mods="$(LC_ALL=C comm -23 <(printf '%s\n' "$seen_mods" | grep -v '^$' || true) \
+                                    <(printf '%s\n' "$known_mods" | grep -v '^$' || true) || true)"
+  if [ -n "$unknown_mods" ]; then
+    _lint_fail "the report names $(printf '%s' "$unknown_mods" | tr '\n' ' ' | sed 's/ *$//'), which the measurement does not contain. Its modules are: $(printf '%s' "$known_mods" | tr '\n' ' ' | sed 's/ *$//')"
+  fi
+
+  # ── 2. every QI-### the document names exists in the registry ─────────────
+  #
+  # The registry is the source, quality_issues[] its projection, so the registry
+  # is what is checked. A target-scope report registers nothing and is checked
+  # against the artifact's own ids instead.
+  local reg known_qis
+  reg="$(qi_registry_path "$specclaw_abs")"
+  if [ -f "$reg" ]; then
+    known_qis="$(grep -oE '^### QI-[0-9]+' "$reg" | grep -oE 'QI-[0-9]+' | LC_ALL=C sort -u)"
+  else
+    known_qis="$(jq -r '.quality_issues[]?.id' "$qjson" | LC_ALL=C sort -u)"
+  fi
+  local seen_qis unknown_qis
+  seen_qis="$(grep -oE 'QI-[0-9]+' "$report" 2>/dev/null | LC_ALL=C sort -u || true)"
+  unknown_qis="$(LC_ALL=C comm -23 <(printf '%s\n' "$seen_qis" | grep -v '^$' || true) \
+                                   <(printf '%s\n' "$known_qis" | grep -v '^$' || true) || true)"
+  if [ -n "$unknown_qis" ]; then
+    _lint_fail "the report names $(printf '%s' "$unknown_qis" | tr '\n' ' ' | sed 's/ *$//'), which is not a registered hotspot id"
+  fi
+
+  # ── 3-5. each anchored region, byte for byte ──────────────────────────────
+  local name field want got
+  for name in scan-funnel module-rollup coverage-sentence; do
+    case "$name" in
+      scan-funnel)       field="scan_funnel_md" ;;
+      module-rollup)     field="module_rollup_md" ;;
+      coverage-sentence) field="coverage_sentence_md" ;;
+    esac
+    # tr -d CR on BOTH sides. jq built for Windows opens stdout in text mode and
+    # turns every newline in a multi-line string into CRLF, so a byte-for-byte
+    # comparison against a file the agent wrote with bare newlines fails on two
+    # blocks that are character-identical. A carriage return is never content
+    # here, so deleting it cannot hide a real difference.
+    want="$(jq -r --arg f "$field" '.report_blocks[$f] // ""' "$qjson" | tr -d '\r')"
+    if [ -z "$want" ]; then
+      _lint_fail "the measurement carries no report_blocks.${field}, so the ${name} block in the report has no source. Re-run the collection step."
+      continue
+    fi
+    if ! grep -qF "<!-- quality-report:${name}:begin -->" "$report"; then
+      _lint_fail "the ${name} anchors are missing from the report. Every computed block sits between its anchors; without them the figures in that section are unchecked."
+      continue
+    fi
+    got="$(report_block_region "$report" "$name")"
+    if [ "$got" != "$want" ]; then
+      _lint_fail "the ${name} block in the report differs from report_blocks.${field}. It is copied verbatim, never edited or re-derived.
+--- computed ---
+${want}
+--- in the report ---
+${got}
+----------------"
+    fi
+  done
+
+  if [ "$fails" -gt 0 ]; then
+    echo "REPORT-LINT: ${fails} discrepancy(ies) between ${report} and ${qjson}." >&2
+    return 1
+  fi
+  echo "REPORT-LINT: PASS — every MOD-###, every QI-### and all three computed blocks in ${report} agree with ${qjson}." >&2
+  return 0
+}
+
 # ─── dispatch ────────────────────────────────────────────────────────────────
 
 usage() {
@@ -2917,6 +3056,7 @@ usage() {
 Usage:
   specclaw-bf-quality-collect collect <specclaw_dir> [path] [--target]
   specclaw-bf-quality-collect compare <specclaw_dir> [--gate]
+  specclaw-bf-quality-collect lint-report <specclaw_dir> <report.md> [quality.json]
 USAGE
   exit 2
 }
@@ -2926,6 +3066,7 @@ sub="$1"; shift
 case "$sub" in
   collect) cmd_collect "$@" ;;
   compare) cmd_compare "$@" ;;
+  lint-report) cmd_lint_report "$@" ;;
   -h|--help|help) usage ;;
-  *) die "unknown subcommand '${sub}'. Expected 'collect' or 'compare'." ;;
+  *) die "unknown subcommand '${sub}'. Expected 'collect', 'compare' or 'lint-report'." ;;
 esac

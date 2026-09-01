@@ -29,9 +29,9 @@ Two rules. Both exist because a previous report broke them, and both failures sh
 
 | Template token | Artifact field | Anchors it sits between |
 |---|---|---|
-| `{{scan_funnel}}` | `report_blocks.scan_funnel_md` | `<!-- specclaw:scan-funnel:begin -->` / `:end` |
-| `{{module_rollup}}` | `report_blocks.module_rollup_md` | `<!-- specclaw:module-rollup:begin -->` / `:end` |
-| `{{coverage_sentence}}` | `report_blocks.coverage_sentence_md` | `<!-- specclaw:coverage-sentence:begin -->` / `:end` |
+| `{{scan_funnel}}` | `report_blocks.scan_funnel_md` | `<!-- quality-report:scan-funnel:begin -->` / `:end` |
+| `{{module_rollup}}` | `report_blocks.module_rollup_md` | `<!-- quality-report:module-rollup:begin -->` / `:end` |
+| `{{coverage_sentence}}` | `report_blocks.coverage_sentence_md` | `<!-- quality-report:coverage-sentence:begin -->` / `:end` |
 
 Copy each one verbatim, character for character, including the anchor comments around it. Do not reflow it, re-align a column, change a dash, add a row, drop a row, reorder rows, or restate its totals in a sentence of your own. A bash lint diffs each region against its field after you write the file and fails the run on a single changed byte, naming the region.
 
@@ -145,4 +145,4 @@ If `quality_issues[]` is empty, say so plainly and say what it means given the c
 
 ## Output
 
-Write exactly the one report file you were told to write, from the template you were given. Fill every template token — including `{{scan_funnel}}`, `{{module_rollup}}`, `{{coverage_sentence}}`, `{{module_rollup_notes}}` and `{{anomalies}}` — and keep every `<!-- specclaw:… -->` anchor comment exactly where the template puts it, because the lint locates the copied blocks by them. Write nothing else — no summary file, no notes, no edits to any other document. The JSON artifact is not yours to modify.
+Write exactly the one report file you were told to write, from the template you were given. Fill every template token — including `{{scan_funnel}}`, `{{module_rollup}}`, `{{coverage_sentence}}`, `{{module_rollup_notes}}` and `{{anomalies}}` — and keep every `<!-- quality-report:… -->` anchor comment exactly where the template puts it, because the lint locates the copied blocks by them. Write nothing else — no summary file, no notes, no edits to any other document. The JSON artifact is not yours to modify.

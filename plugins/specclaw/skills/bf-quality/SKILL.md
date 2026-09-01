@@ -76,7 +76,25 @@ Requires both `quality.json` and `quality-target.json`; it fails fast naming whi
 
 The agent writes the report itself. This skill writes no document.
 
-## Step 3 — Report to the user
+Three of the report's sections are not narration at all. `report_blocks.scan_funnel_md`, `report_blocks.module_rollup_md` and `report_blocks.coverage_sentence_md` are markdown the collector rendered, and the agent pastes each one verbatim between the `<!-- quality-report:… -->` anchors the template puts them in. Tell it so explicitly when you spawn it.
+
+## Step 3 — Lint the report against the artifact
+
+```bash
+specclaw-bf-quality-collect lint-report .specclaw <report.md> <artifact.json>
+```
+
+Run this every time, on the report that was just written, before saying anything to the user. It is part of the normal flow, not a test.
+
+It checks four things mechanically: that every `MOD-###` in the document exists in the measurement, that every `QI-###` exists in the registry, and that each of the three anchored blocks is byte-identical to the field it was copied from.
+
+**If it exits non-zero, do not report the findings to the user.** Show the lint's output, which names exactly what disagreed, and re-run the narration step telling the agent what to fix. A report that fails this is not a report with a small error in it — it is a document making claims the measurement does not support, and those are the claims most likely to be forwarded to a client.
+
+This exists because a previous report invented a module row that appeared nowhere in the JSON, mis-summed its own status tally, and collapsed a five-stage scan funnel into a single figure that matched none of its stages. Every correct number was already in the artifact. Nothing compared the two.
+
+For a compare run there is nothing to lint: `quality-delta.md` narrates deltas and carries no computed blocks. Skip this step and say so.
+
+## Step 4 — Report to the user
 
 State plainly, in this order:
 
@@ -112,7 +130,11 @@ quality:
 
 Hotspots are registered in `.specclaw/analysis/quality-issues.md`, which joins `ST-###` and `IS-###` under `templates/CONTRACT.md` (c): ids are assigned once, sequentially, and never renumbered, reused or deleted. It carries their carve-out too — the registry is **append/update-in-place and is never archived**, because a registry that gets archived and regenerated is precisely the silent re-pointing (c) exists to prevent.
 
-A hotspot's identity is the tuple `metric|file|function|module`, never its value. Re-running on unchanged code therefore produces byte-identical id assignments. A hotspot that no longer exceeds its threshold has its `Status` flipped to `resolved` and keeps its id and `First seen` date forever — it is never removed, because "this used to be a hotspot" is itself the finding. A renamed file yields a new `QI-###` plus a resolved old one; inferring the rename would carry an id onto code nobody measured.
+A hotspot's identity is the tuple `metric|file|scope|module|start_line`, never its value. Re-running on unchanged code therefore produces byte-identical id assignments. A hotspot that no longer exceeds its threshold has its `Status` flipped to `resolved` and keeps its id and `First seen` date forever — it is never removed, because "this used to be a hotspot" is itself the finding. A renamed file yields a new `QI-###` plus a resolved old one; inferring the rename would carry an id onto code nobody measured.
+
+`scope` and `start_line` are what make two hotspots in one file distinguishable. The measuring tool reports the short function name, so two overloads share one string, and every unnamed function is reported under one name — so the four-field key that preceded this collapsed several hotspots onto one id and, on the following run, deleted all but one of them. `scope` is the function name, `<anonymous>` where the tool could not name it, or `*global*` where the metric has no function; `start_line` is 1 for a file-level metric and 0 for a module-level one. The collector asserts key uniqueness before it writes anything.
+
+A registry still holding four-field keys is **migrated, never renumbered**: an id whose old key named one hotspot keeps its number and records the new key, and an id whose old key turned out to name several is assigned by the `Value` each entry recorded. The losers become `superseded-duplicate`, a terminal status naming the id that now owns their hotspot; nothing is deleted. Where the recorded values do not decide it, the run **stops** with `QUALITY-MIGRATION-AMBIGUOUS` rather than guessing. Each migration is recorded, dated, in the registry's `## Migration record` section, and a second run is a no-op.
 
 `quality.json`'s `quality_issues[]` is a regenerated **projection** of that registry, not the registry itself. One direction per fact.
 

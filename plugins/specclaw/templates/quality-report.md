@@ -36,7 +36,7 @@
 
   Three regions of this document are bounded by anchors that look like
 
-    <!-- specclaw:scan-funnel:begin -->  …  <!-- specclaw:scan-funnel:end -->
+    <!-- quality-report:scan-funnel:begin -->  …  <!-- quality-report:scan-funnel:end -->
 
   Between each pair goes ONE field from the artifact's `report_blocks`, pasted
   verbatim, character for character, with nothing added and nothing reflowed:
@@ -112,9 +112,9 @@
 
 ## Scan scope
 
-<!-- specclaw:scan-funnel:begin -->
+<!-- quality-report:scan-funnel:begin -->
 {{scan_funnel}}
-<!-- specclaw:scan-funnel:end -->
+<!-- quality-report:scan-funnel:end -->
 
 {{scan_scope}}
 
@@ -183,9 +183,9 @@
 
 ## Module Rollup
 
-<!-- specclaw:module-rollup:begin -->
+<!-- quality-report:module-rollup:begin -->
 {{module_rollup}}
-<!-- specclaw:module-rollup:end -->
+<!-- quality-report:module-rollup:end -->
 
 {{module_rollup_notes}}
 
@@ -332,21 +332,22 @@
 
 ## Methodology
 
+<!-- quality-report:coverage-sentence:begin -->
+{{coverage_sentence}}
+<!-- quality-report:coverage-sentence:end -->
+
 {{methodology}}
 
 <!--
   Which tool produced which metric, how files were selected, and how a status
   band is assigned. Enough that a sceptical reader can reproduce the numbers.
 
-  On selection, the mechanism is stated by a block, not by you:
+  Selection is already stated, by the block above: `{{coverage_sentence}}` is
+  `report_blocks.coverage_sentence_md`, verbatim, between its anchors. Your prose
+  goes under it and says which tool produced which metric and how a band is
+  assigned. Do not restate the selection mechanism in your own words.
 
-    <!-- specclaw:coverage-sentence:begin -->
-    {{coverage_sentence}}
-    <!-- specclaw:coverage-sentence:end -->
-
-  `{{coverage_sentence}}` is `report_blocks.coverage_sentence_md`, verbatim.
-
-  It replaces a claim this template used to make and that was false in the
+  That block replaces a claim this template used to make and that was false in the
   flattering direction: that every metric "shares a denominator". They share a
   SCOPE — one exclusion pass, one in-scope list, handed to all three tools — and
   what each metric then managed on that list differs by hundreds of files,
