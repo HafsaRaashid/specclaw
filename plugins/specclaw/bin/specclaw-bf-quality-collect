@@ -901,6 +901,7 @@ run_jscpd() {
     -1 1 -2 1 \
     "$rdir/files" "$rdir/norm" > "$out" || true
 
+  [ -s "$out" ] || { rm -rf "$rdir"; return 1; }  
   rm -rf "$rdir"
   return 0
 }
