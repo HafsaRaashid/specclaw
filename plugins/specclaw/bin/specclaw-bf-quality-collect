@@ -851,32 +851,57 @@ run_lizard() {
 run_jscpd() {
   local project_root="$1" scope_arg="$2" files="$3" out="$4" globs="$5"
   : > "$out"
-  local rdir raw; rdir="$(mktemp -d)"
-  # jscpd's --ignore speaks ** globs natively, so it receives the effective
-  # pattern list verbatim rather than a translation. Still an optimisation, not
-  # the mechanism — the intersection below is what decides the denominator.
+
+  local rdir raw
+  rdir="$(mktemp -d)"
+
   local -a iargs=()
   [ -n "$globs" ] && iargs=(--ignore "$globs")
-  # jscpd exits non-zero once its own --threshold trips. Same reasoning as
-  # lizard: its exit code is about its policy, not ours.
+
   ( cd "$project_root" && jscpd --silent --reporters json --output "$rdir" \
       ${iargs[@]+"${iargs[@]}"} \
       "$scope_arg" ) >/dev/null 2>&1 || true
+
   raw="$rdir/jscpd-report.json"
   [ -f "$raw" ] || { rm -rf "$rdir"; return 1; }
-  # Two report shapes in the wild: per-format `sources`, and a flat `paths`.
-  # Read whichever is present rather than pinning a tool version.
-  jq -r --arg root "$project_root" '
+
+  jq -r '
+    def stats:
+      (.statistic // .statistics // {});
+
     def rows:
-      ( (.statistics.formats // {}) | to_entries[]? | (.value.sources // {}) | to_entries[]? ),
-      ( (.statistics.paths  // {}) | to_entries[]? );
-    [ rows ] | unique_by(.key) | .[]
-    | [ .key, (.value.lines // 0), (.value.duplicatedLines // 0) ] | @tsv
+      (
+        (stats.formats // {})
+        | to_entries[]?
+        | (.value.sources // {})
+        | to_entries[]?
+      ),
+      (
+        (stats.paths // {})
+        | to_entries[]?
+      );
+
+    [rows]
+    | unique_by(.key)
+    | .[]
+    | [
+        .key,
+        (.value.lines // 0),
+        (.value.duplicatedLines // 0)
+      ]
+    | @tsv
   ' "$raw" 2>/dev/null \
-    | sed -e "s|^${project_root}/||" \
-    | norm_paths | LC_ALL=C sort -u > "$rdir/norm" || { rm -rf "$rdir"; return 1; }
+    | norm_paths \
+    | LC_ALL=C sort -u > "$rdir/norm" \
+    || { rm -rf "$rdir"; return 1; }
+
   LC_ALL=C sort -u "$files" > "$rdir/files"
-  LC_ALL=C join -t$'\t' -1 1 -2 1 "$rdir/files" "$rdir/norm" > "$out" || true
+
+  LC_ALL=C join -t$'\t' \
+    -1 1 -2 1 \
+    "$rdir/files" "$rdir/norm" > "$out" || true
+
+  [ -s "$out" ] || { rm -rf "$rdir"; return 1; }  
   rm -rf "$rdir"
   return 0
 }
