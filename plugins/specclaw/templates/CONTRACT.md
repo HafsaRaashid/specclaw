@@ -223,15 +223,31 @@ registry is a separate document rather than a section of the snapshot: an id
 space that gets rotated with the evidence it labels is the silent re-pointing
 this section exists to prevent. A hotspot that no longer exceeds its threshold
 has its `Status` flipped to `resolved` and keeps its id and `First seen` date
-permanently; it never becomes a tombstone and is never removed, because "this
-used to be a hotspot" is what makes a module somebody cleaned up
-distinguishable from one that was never bad. Identity is the entry's declared
-`Key` (`metric|file|function|module`), never the measured value — values move
+permanently; it is never removed, because "this used to be a hotspot" is what
+makes a module somebody cleaned up distinguishable from one that was never bad.
+Identity is the entry's declared `Key`
+(`metric|file|scope|module|start_line`), never the measured value — values move
 on every commit, and keying on one would mint a fresh id per run and make two
 reports months apart incomparable, which is the only thing a permanent id is
-for. A renamed file therefore yields a new `QI-NNN` plus a resolved old one:
-inferring the rename would carry an id, and its whole history, onto code nobody
-measured. Unlike every other id in this section, nothing reads a `QI-NNN` and
+for. `scope` and `start_line` are what make two hotspots in one file distinct:
+the measuring tool reports the short function name, so two overloads are one
+string and every unnamed function is reported under one name, and the
+four-field key that preceded this gave several hotspots one id and then deleted
+all but one of them on the following run. A renamed file yields a new `QI-NNN`
+plus a resolved old one: inferring the rename would carry an id, and its whole
+history, onto code nobody measured.
+
+`QI-NNN` has one terminal status of its own, `superseded-duplicate`, and it is
+the single exception to "never a tombstone" above. It marks an id that was one
+of several sharing a key before the key could tell those hotspots apart, and it
+names the id that now owns the hotspot in a **Superseded by:** field. Such an
+entry keeps its number, its `First seen` date and the historical key it was a
+duplicate under, is carried forward verbatim on every later run, and is never
+re-judged — which is why it is a status rather than a deletion. Reshaping the
+key is the only thing that can produce one, it is done by a recorded, dated
+migration that maps ids rather than renumbering them, and where the record does
+not decide which id owned which hotspot the collector stops instead of
+guessing. Unlike every other id in this section, nothing reads a `QI-NNN` and
 no command's behaviour changes because of one — it is a record, not a gate.
 
 An id that no longer describes anything becomes a **tombstone** rather than
