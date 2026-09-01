@@ -1774,9 +1774,27 @@ cmd_render() {
     QR_LINES_OF[$qmod]="${QR_LINES_OF[$qmod]:-}- ${qqi} — ${qmetric}, ${qwhere}, measured ${qvalue:-n/a}, ${qsev}
 "
     QR_QIS_OF[$qmod]="${QR_QIS_OF[$qmod]:+${QR_QIS_OF[$qmod]},}${qqi}"
+    # ── the metric this hotspot will be MEASURED on, which is not always the
+    # metric it is REPORTED as ────────────────────────────────────────────────
+    #
+    # QR_METRICS_OF feeds one thing only: the join against quality-delta.json,
+    # which is keyed "<module>|<dimension>" over the four dimensions the delta
+    # actually carries. A metric with no dimension there can never match a row,
+    # and the completion check reads a missing row as "no entry in the delta" —
+    # so the item would report OPEN forever, however good the rebuild is. A
+    # permanently unsatisfiable acceptance criterion is worse than none.
+    #
+    # `duplication-clone` is such a metric. It is a real, separately-registered
+    # hotspot — a specific pair of duplicated blocks — but the delta measures
+    # duplication per module, as a percentage, and that percentage IS the proof
+    # that the clone was not carried into the rebuild. So it is folded to
+    # `duplication` HERE, for the join only. Everywhere the hotspot is reported
+    # — the item body, the registry, the report — it keeps its own name.
+    local qdim="$qmetric"
+    [ "$qdim" = "duplication-clone" ] && qdim="duplication"
     case ",${QR_METRICS_OF[$qmod]:-}," in
-      *",${qmetric},"*) ;;
-      *) QR_METRICS_OF[$qmod]="${QR_METRICS_OF[$qmod]:+${QR_METRICS_OF[$qmod]},}${qmetric}" ;;
+      *",${qdim},"*) ;;
+      *) QR_METRICS_OF[$qmod]="${QR_METRICS_OF[$qmod]:+${QR_METRICS_OF[$qmod]},}${qdim}" ;;
     esac
   done < <(quality_qualifying_qis "$qr_json" "$qr_floor")
   [ -z "$qr_offmap_qis" ] || warn "these open quality hotspots name a module module-map.md does not define and generate no remediation item: ${qr_offmap_qis}"
