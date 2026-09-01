@@ -848,60 +848,264 @@ run_lizard() {
 }
 
 # dup.tsv: relpath <TAB> lines <TAB> duplicated_lines
+# dup.tsv: relpath <TAB> lines <TAB> duplicated_lines
+ # dup.tsv: relpath <TAB> lines <TAB> duplicated_lines
 run_jscpd() {
   local project_root="$1" scope_arg="$2" files="$3" out="$4" globs="$5"
   : > "$out"
 
-  local rdir raw
+  local rdir raw summary_top
   rdir="$(mktemp -d)"
+
+  summary_top="$(wc -l < "$files" | tr -d ' ')"
+  [ -n "$summary_top" ] && [ "$summary_top" -gt 0 ] || summary_top=1
 
   local -a iargs=()
   [ -n "$globs" ] && iargs=(--ignore "$globs")
 
-  ( cd "$project_root" && jscpd --silent --reporters json --output "$rdir" \
+  # ── First try the jscpd v5 form ──────────────────────────────────────────
+  #
+  # v5 --summary gives us the per-file denominator that is no longer present
+  # under statistics.formats.*.sources (in v5, sources is only a count).
+  (
+    cd "$project_root" &&
+    jscpd \
+      --silent \
+      --no-gitignore \
+      --summary \
+      --summary-top "$summary_top" \
+      --summary-by lines \
+      --reporters json \
+      --output "$rdir" \
       ${iargs[@]+"${iargs[@]}"} \
-      "$scope_arg" ) >/dev/null 2>&1 || true
+      "$scope_arg"
+  ) >/dev/null 2>&1 || true
 
   raw="$rdir/jscpd-report.json"
-  [ -f "$raw" ] || { rm -rf "$rdir"; return 1; }
 
-  jq -r '
-    def stats:
-      (.statistic // .statistics // {});
+  # ── Compatibility fallback ───────────────────────────────────────────────
+  #
+  # Older jscpd versions and the regression-suite fake jscpd may not understand
+  # the v5 summary flags. Retry using the long-standing CLI contract.
+  if [ ! -f "$raw" ]; then
+    (
+      cd "$project_root" &&
+      jscpd \
+        --silent \
+        --reporters json \
+        --output "$rdir" \
+        ${iargs[@]+"${iargs[@]}"} \
+        "$scope_arg"
+    ) >/dev/null 2>&1 || true
+  fi
 
-    def rows:
-      (
-        (stats.formats // {})
-        | to_entries[]?
-        | (.value.sources // {})
-        | to_entries[]?
-      ),
-      (
-        (stats.paths // {})
-        | to_entries[]?
-      );
+  [ -f "$raw" ] || {
+    rm -rf "$rdir"
+    return 1
+  }
 
-    [rows]
-    | unique_by(.key)
-    | .[]
-    | [
-        .key,
-        (.value.lines // 0),
-        (.value.duplicatedLines // 0)
-      ]
-    | @tsv
-  ' "$raw" 2>/dev/null \
-    | norm_paths \
-    | LC_ALL=C sort -u > "$rdir/norm" \
-    || { rm -rf "$rdir"; return 1; }
+  # A report file that is not valid JSON is a genuine parse/integration error.
+  if ! jq -e '.' "$raw" >/dev/null 2>&1; then
+    rm -rf "$rdir"
+    return 1
+  fi
 
+  : > "$rdir/norm"
+
+  # ── Shape A: jscpd v5 summary ────────────────────────────────────────────
+  #
+  # --summary appends per-file information to the JSON report. Extract every
+  # object carrying a file path/name and a line count. Folder summary rows are
+  # harmless: the final intersection with measurable.txt removes them.
+  if jq -e '.summary != null and (.summary | type == "object")' \
+      "$raw" >/dev/null 2>&1; then
+
+    jq -r '
+      .summary
+      | ..
+      | objects
+      | select(
+          (has("path") or has("name"))
+          and (.lines? != null)
+        )
+      | [
+          (.path // .name // ""),
+          (.lines // 0)
+        ]
+      | @tsv
+    ' "$raw" 2>/dev/null \
+      | norm_paths \
+      | awk -F'\t' -v OFS='\t' -v pfx="$scope_arg" '
+          {
+            path = $1
+            lines = $2
+
+            if (path == "" || lines !~ /^[0-9]+$/) next
+
+            # jscpd reports paths relative to the directory it was asked to
+            # scan. Restore the repo-relative scope prefix when required.
+            if (pfx != "" && pfx != ".") {
+              if (path != pfx && index(path, pfx "/") != 1) {
+                path = pfx "/" path
+              }
+            }
+
+            print path, lines
+          }
+        ' \
+      | LC_ALL=C sort -t$'\t' -k1,1 -u \
+      > "$rdir/scanned" || true
+
+    if [ -s "$rdir/scanned" ]; then
+
+      # Each duplicate has two source ranges. Both count as duplicated coverage.
+      jq -r '
+        .duplicates[]?
+        | (.firstFile, .secondFile)
+        | [
+            (.name // ""),
+            (.startLoc.line // .start // 0),
+            (.endLoc.line // .end // 0)
+          ]
+        | @tsv
+      ' "$raw" 2>/dev/null \
+        | norm_paths \
+        | awk -F'\t' -v OFS='\t' -v pfx="$scope_arg" '
+            {
+              path = $1
+              start = $2
+              end = $3
+
+              if (path == "") next
+              if (start !~ /^[0-9]+$/ || end !~ /^[0-9]+$/) next
+              if (start < 1 || end < start) next
+
+              if (pfx != "" && pfx != ".") {
+                if (path != pfx && index(path, pfx "/") != 1) {
+                  path = pfx "/" path
+                }
+              }
+
+              print path, start, end
+            }
+          ' > "$rdir/intervals" || true
+
+      # Clone intervals may overlap. Count each duplicated source line only once.
+      awk -F'\t' -v OFS='\t' '
+        {
+          file = $1
+          start = $2 + 0
+          end = $3 + 0
+
+          for (line = start; line <= end; line++) {
+            covered[file SUBSEP line] = 1
+          }
+        }
+
+        END {
+          for (key in covered) {
+            split(key, parts, SUBSEP)
+            count[parts[1]]++
+          }
+
+          for (file in count) {
+            print file, count[file]
+          }
+        }
+      ' "$rdir/intervals" \
+        | LC_ALL=C sort -t$'\t' -k1,1 \
+        > "$rdir/duplicated"
+
+      # Files with no clones still count as successfully measured with zero
+      # duplicated lines.
+      awk -F'\t' -v OFS='\t' '
+        NR == FNR {
+          duplicated[$1] = $2 + 0
+          next
+        }
+
+        {
+          file = $1
+          lines = $2 + 0
+          dup = (file in duplicated ? duplicated[file] : 0)
+
+          if (dup > lines) dup = lines
+
+          print file, lines, dup
+        }
+      ' "$rdir/duplicated" "$rdir/scanned" \
+        | LC_ALL=C sort -t$'\t' -k1,1 \
+        > "$rdir/norm"
+    fi
+  fi
+
+  # ── Shape B: legacy / regression-fixture JSON ────────────────────────────
+  #
+  # Older jscpd reports — and the existing SpecClaw regression fake — may
+  # expose per-file data under:
+  #
+  #   statistics.formats.<format>.sources
+  #   statistics.paths
+  #
+  # In jscpd v5, `sources` is a NUMBER, so type-check it before to_entries.
+  # This branch therefore cannot mistake the v5 aggregate count for a map.
+  if [ ! -s "$rdir/norm" ]; then
+    jq -r '
+      def stats:
+        (.statistics // .statistic // {});
+
+      def legacy_rows:
+        (
+          (stats.formats // {})
+          | to_entries[]?
+          | select(
+              (((.value.sources // null) | type) == "object")
+            )
+          | (.value.sources | to_entries[]?)
+        ),
+        (
+          (stats.paths // {})
+          | select(type == "object")
+          | to_entries[]?
+        );
+
+      [legacy_rows]
+      | unique_by(.key)
+      | .[]
+      | [
+          .key,
+          (.value.lines // 0),
+          (.value.duplicatedLines // 0)
+        ]
+      | @tsv
+    ' "$raw" 2>/dev/null \
+      | norm_paths \
+      | LC_ALL=C sort -t$'\t' -k1,1 -u \
+      > "$rdir/norm" || true
+  fi
+
+  # Neither known report shape produced per-file measurement rows.
+  [ -s "$rdir/norm" ] || {
+    rm -rf "$rdir"
+    return 1
+  }
+
+  # ── Authoritative SpecClaw scope intersection ────────────────────────────
+  #
+  # The collector's post-exclusion file list owns scope. jscpd output cannot
+  # introduce a file that was excluded upstream.
   LC_ALL=C sort -u "$files" > "$rdir/files"
 
   LC_ALL=C join -t$'\t' \
     -1 1 -2 1 \
-    "$rdir/files" "$rdir/norm" > "$out" || true
+    "$rdir/files" "$rdir/norm" \
+    > "$out" || true
 
-  [ -s "$out" ] || { rm -rf "$rdir"; return 1; }  
+  [ -s "$out" ] || {
+    rm -rf "$rdir"
+    return 1
+  }
+
   rm -rf "$rdir"
   return 0
 }
