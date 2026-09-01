@@ -155,6 +155,54 @@
   that row.
 -->
 
+## Top Duplication Hotspots
+
+{{duplication_hotspots}}
+
+<!--
+  WHERE the duplication is. The Module Rollup above says how MUCH — a
+  percentage per module — and a percentage is not something anyone can act on.
+  This section names the pairs.
+
+  Read it from `duplication_clones` and nowhere else. Every entry is already
+  scoped, ordered and thresholded; render, do not re-rank.
+
+  One line per clone, top `capture.clone_report_top_m` by duplicated lines:
+
+    `src/Billing/InvoiceCalc.cs:44-59` ↔ `src/Quotes/QuoteCalc.cs:58-73`
+    — 16 duplicated lines — MOD-004
+
+  Append, only when the artifact carries them:
+    - ` — FunctionName()` after a side whose `function` is non-null
+    - ` — cross-module` when `cross_module` is true, and name BOTH module ids
+      (`MOD-001 ↔ MOD-004`) rather than one — a clone spanning two modules is a
+      coupling finding, and showing one id hides half of it
+    - ` — QI-###` when `qi_id` is non-null
+
+  NEVER SHOW THE DUPLICATED CODE. The artifact deliberately does not carry it,
+  so there is nothing to paste even by accident — but do not go and read the
+  files to quote it either. Line ranges point at the code for anyone who wants
+  it; a report that embeds source is one that cannot be forwarded.
+
+  A `function` of `null` means no function could be attached MECHANICALLY —
+  either the language has no function-level measurement here, or the clone
+  straddles two functions, or nothing met the containment rule. Render the
+  file:range alone. Never substitute the nearest function name, never infer one
+  from the file name, and do not remark on the absence line by line.
+
+  TRUNCATION IS STATED, not implied. When `census.clones_captured` is less than
+  `census.clones_in_scope`, close with one line naming both numbers and the
+  total duplicated lines — e.g. "showing the 10 largest of 137 clone pairs
+  found in scope, covering 4,210 duplicated lines in total". When
+  `census.clones_outside_scope` is non-zero, say that too: those pairs had at
+  least one side outside the measured scope and were not examined.
+
+  ZERO CLONES IS A RESULT. Say plainly that no duplicate blocks were found at
+  or above the detection threshold, and say it next to the coverage — "no
+  clones found" means much less when duplication was NOT-MEASURED for most of
+  the tree. Do not omit the section.
+-->
+
 ## Thresholds Applied
 
 {{thresholds}}
