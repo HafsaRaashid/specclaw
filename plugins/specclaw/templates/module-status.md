@@ -86,6 +86,27 @@
       When this column is non-zero the verdict column reads PASS* rather
       than PASS. The two travel together so neither can be read alone.
 
+  Quality remediation
+      The **Quality state:** of this module's QUALITY-REMEDIATION backlog item,
+      if it has one: BLOCKED (its functional items are not built yet, so there
+      is nothing to measure), OPEN (measured and not yet within thresholds
+      without regressing), or DONE.
+
+      "—" means the module has no such item at all — the normal state of a
+      project that has never run /specclaw:bf-quality, and a different thing
+      entirely from an item that exists and has not passed.
+
+      COMPUTED ELSEWHERE. The verdict is worked out in rebuild-backlog.md from
+      .specclaw/analysis/quality-delta.json and is only READ here, like every
+      other number in this view. It clears by re-measuring the target
+      (/specclaw:bf-quality --target, then --compare), never by editing either
+      document.
+
+      This is the one column that can say a module is unfinished for a reason
+      that has nothing to do with fixtures: a module whose every scenario
+      PASSes can still be carrying an open remediation item, and it is not
+      done.
+
   Open questions
       OPEN entries in pending-questions.md plus unanswered entries in
       clarifications.md whose text names this MOD-###. These are soft

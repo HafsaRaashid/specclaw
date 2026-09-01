@@ -565,10 +565,17 @@ if grep -qE '^- \*\*MOD-001 — Core:\*\* 1/1 capability bullets covered; 0 excl
 else
   fail "7c with no quality.json the rollup line ends exactly where it always did (got: $(grep -E '^- \*\*MOD-001' "$C7A_OUT" | head -1))"
 fi
-if grep -qi 'quality' "$C7A_OUT"; then
-  fail "7d with no quality.json the document mentions quality nowhere (found: $(grep -in 'quality' "$C7A_OUT" | head -2))"
+# GENERATED content only. Every HTML comment in the rendered file is the
+# template's own prose, copied verbatim whether or not quality.json exists, and
+# the template has to document the quality-remediation mechanism for
+# QUALITY-MEASURED to be discoverable at all. Stripping the comments is what
+# keeps this assertion about what it was always about: that a project which
+# never measured gets a document with no quality FINDINGS in it.
+c7a_generated="$(awk '/^<!--/{c=1} c{ if (/-->/) c=0; next } {print}' "$C7A_OUT")"
+if printf '%s' "$c7a_generated" | grep -qi 'quality'; then
+  fail "7d with no quality.json nothing generated mentions quality (found: $(printf '%s' "$c7a_generated" | grep -in 'quality' | head -2))"
 else
-  pass "7d with no quality.json the document mentions quality nowhere"
+  pass "7d with no quality.json nothing generated mentions quality"
 fi
 
 # THE NEUTRALITY PROOF. Diff the two runs and require every differing line to be
@@ -888,6 +895,397 @@ fi
 # is still fully measured — it just is not attributed to its module.
 c12_unassigned_loc="$(printf '%s' "$c12_out" | jq -r '.modules[] | select(.module_id == "MOD-UNASSIGNED") | .loc')"
 assert_eq "12f (documents a pre-existing gap) a spaced citation is unmatched, so both files sit under MOD-UNASSIGNED" "1340" "$c12_unassigned_loc"
+
+# ── Case 13 — quality remediation backlog items ──────────────────────────────
+#
+# The measured hotspots stop being advice and become something the rebuild is
+# accountable for. Every assertion here is about a state BASH computed: which
+# modules get an item, which hotspots each lists, whether it is gated, and
+# whether the delta says it is done. The agent narrates; it decides nothing.
+#
+# WHAT KEEPS THIS OPTIONAL is asserted first and asserted twice — here, and in
+# Case 7's byte-for-byte diff of an annotated against an un-annotated render.
+
+echo
+echo "--- Case 13: quality remediation items ---"
+
+REPLAY_BIN="$BIN_DIR/specclaw-bf-replay"
+
+# A three-module project: MOD-001 and MOD-002 will measure HIGH, MOD-003 only
+# WARN. That is the shape the whole severity-floor behaviour turns on.
+qr_project() {
+  local root="$1"
+  rm -rf "$root"; mkdir -p "$root/.specclaw/analysis"
+  cat > "$root/.specclaw/analysis/module-map.md" <<'MM'
+# Module Map: QR
+
+**Status:** CONFIRMED by Tester, 2026-08-31
+
+## Modules
+
+### MOD-001 — Auth
+
+- **Business rules:** DR-001
+- **Depends on:** None
+
+### MOD-002 — Billing
+
+- **Business rules:** DR-002
+- **Depends on:** MOD-001
+
+### MOD-003 — Reports
+
+- **Business rules:** DR-003
+- **Depends on:** MOD-002
+MM
+  printf '### DR-001 — a\n### DR-002 — b\n### DR-003 — c\n' \
+    > "$root/.specclaw/analysis/domain-model.md"
+  cat > "$root/draft.md" <<'DR'
+### BL-001 — Sign In
+
+**Module:** MOD-001
+**Depends on:** None
+**Acceptance basis (domain-model.md):**
+- DR-001: a session is authenticated before any action.
+
+### BL-002 — Raise an Invoice
+
+**Module:** MOD-002
+**Depends on:** BL-001
+**Acceptance basis (domain-model.md):**
+- DR-002: an invoice has at least one line.
+
+### BL-003 — Monthly Statement
+
+**Module:** MOD-003
+**Depends on:** BL-002
+**Acceptance basis (domain-model.md):**
+- DR-003: a statement covers one calendar month.
+
+## Sequencing Rationale
+
+Auth, then billing, then reporting.
+
+## Coverage Check
+
+- **MOD-001** — "Sign in" → BL-001
+- **MOD-002** — "Raise an invoice" → BL-002
+- **MOD-003** — "Monthly statement" → BL-003
+DR
+}
+
+# MOD-001: two HIGH hotspots. MOD-002: one HIGH. MOD-003: one WARN only, which
+# under the default HIGH floor must produce an advisory count and NO item.
+qr_quality_json() {
+  cat > "$1/.specclaw/analysis/quality.json" <<'QJ'
+{"schema_version":1,
+ "thresholds":{"complexity_high":20,"file_length_high":1000,"register_severity":"WARN"},
+ "modules":[{"module_id":"MOD-001","rollup_status":"HIGH"},
+            {"module_id":"MOD-002","rollup_status":"HIGH"},
+            {"module_id":"MOD-003","rollup_status":"WARN"}],
+ "quality_issues":[
+   {"id":"QI-001","module_id":"MOD-001","status":"open","metric":"complexity",
+    "file":"legacy/auth/session","function":"Validate","value":34,"severity":"HIGH"},
+   {"id":"QI-002","module_id":"MOD-001","status":"open","metric":"file_length",
+    "file":"legacy/auth/session","function":null,"value":1420,"severity":"HIGH"},
+   {"id":"QI-003","module_id":"MOD-002","status":"open","metric":"duplication",
+    "file":null,"function":null,"value":22.5,"severity":"HIGH"},
+   {"id":"QI-004","module_id":"MOD-003","status":"open","metric":"complexity",
+    "file":"legacy/reports/monthly","function":"Build","value":13,"severity":"WARN"},
+   {"id":"QI-009","module_id":"MOD-001","status":"resolved","metric":"complexity",
+    "file":"legacy/auth/old","function":"Gone","value":null,"severity":null}]}
+QJ
+}
+
+qr_render()  { ( cd "$1" && bash "$REBUILD_BIN" render .specclaw ./draft.md ) >/dev/null 2>&1; }
+qr_refresh() { : > "$1/empty-draft.md"; ( cd "$1" && bash "$REBUILD_BIN" render .specclaw ./empty-draft.md ) >/dev/null 2>&1; }
+qr_backlog() { printf '%s' "$1/.specclaw/analysis/rebuild-backlog.md"; }
+qr_block()   { awk -v id="$2" '$0 ~ ("^### " id " ") {f=1;next} f && /^### / {exit} f' "$1"; }
+qr_section() { awk '/^## Backlog/{f=1} /^## Sequencing Rationale/{f=0} f' "$1"; }
+
+# Append a note block to one item, exactly where a human would: under its own
+# Status-notes heading, after the last bash-written field of that item.
+qr_add_note() {
+  local f="$1" id="$2" anchor="$3" note="$4"
+  awk -v id="$id" -v anchor="$anchor" -v note="$note" '
+    $0 ~ ("^### " id " ") { inblock = 1 }
+    { print }
+    inblock && index($0, anchor) == 1 {
+      print ""
+      print "**Status notes (human-added):**"
+      print note
+      inblock = 0
+    }
+  ' "$f" > "$f.tmp" && mv "$f.tmp" "$f"
+}
+
+# ── 13a — optionality: no quality.json, no remediation anything ──────────────
+# The byte-for-byte half of this guarantee is Case 7's diff; this half asserts
+# that nothing the new mechanism emits leaks into a project that never measured.
+QRA="$WORK/qr-a"; qr_project "$QRA"; qr_render "$QRA"
+# Every HTML comment in the rendered file comes from the template verbatim and
+# is present whether or not quality.json exists — the template documents the
+# mechanism, which is what makes QUALITY-MEASURED discoverable at all. What must
+# be untouched is the GENERATED content, so that is what this strips down to.
+qra_out="$(awk '/^<!--/{c=1} c{ if (/-->/) c=0; next } {print}' "$(qr_backlog "$QRA")")"
+if [[ "$qra_out" == *"QUALITY-REMEDIATION"* || "$qra_out" == *"QUALITY-MEASURED"* || "$qra_out" == *"Quality state"* || "$qra_out" == *"quality"* ]]; then
+  fail "13a with no quality.json nothing generated mentions quality at all"
+else
+  pass "13a with no quality.json nothing generated mentions quality at all"
+fi
+assert_eq "13a2 and no item beyond the three drafted ones exists" "3" \
+  "$(grep -cE '^### BL-[0-9]{3} ' "$(qr_backlog "$QRA")")"
+
+# ── 13b — two HIGH modules get one item each; the WARN module gets none ──────
+QRB="$WORK/qr-b"; qr_project "$QRB"; qr_quality_json "$QRB"; qr_render "$QRB"
+QRB_OUT="$(qr_backlog "$QRB")"
+assert_eq "13b exactly two remediation items are generated" "2" \
+  "$(grep -c '^\*\*Item type:\*\* QUALITY-REMEDIATION' "$QRB_OUT")"
+assert_eq "13b2 they take the next free ids, in module order" "BL-004 BL-005" \
+  "$(grep -B4 '^\*\*Item type:\*\* QUALITY-REMEDIATION' "$QRB_OUT" | grep -oE 'BL-[0-9]{3}' | paste -sd' ' -)"
+assert_contains "13b3 the MOD-001 item lists both of its HIGH hotspots" \
+  "- QI-001 — complexity, legacy/auth/session::Validate, measured 34, HIGH" \
+  "$(qr_block "$QRB_OUT" BL-004)"
+assert_contains "13b4 a file-level hotspot keeps its own empty function field" \
+  "- QI-002 — file_length, legacy/auth/session, measured 1420, HIGH" \
+  "$(qr_block "$QRB_OUT" BL-004)"
+assert_contains "13b5 a module-wide hotspot says so rather than naming a file" \
+  "- QI-003 — duplication, module-wide, measured 22.5, HIGH" \
+  "$(qr_block "$QRB_OUT" BL-005)"
+if qr_block "$QRB_OUT" BL-004 | grep -q 'QI-009'; then
+  fail "13b6 a resolved hotspot is never listed as something to remediate"
+else
+  pass "13b6 a resolved hotspot is never listed as something to remediate"
+fi
+# MOD-003's WARN hotspot: an advisory count on its rollup line, and no item.
+assert_contains "13b7 the WARN-only module gets an advisory count, not an item" \
+  "1 advisory QI below the HIGH remediation floor (no item generated)" \
+  "$(grep -E '^- \*\*MOD-003 — ' "$QRB_OUT")"
+if grep -A6 '^### BL-00[45] ' "$QRB_OUT" | grep -q 'MOD-003'; then
+  fail "13b8 no remediation item is generated for the WARN-only module"
+else
+  pass "13b8 no remediation item is generated for the WARN-only module"
+fi
+# The new Verification value, and the item's own third axis.
+assert_contains "13b9 the item's Verification is the new QUALITY-MEASURED channel" \
+  "**Verification:** QUALITY-MEASURED" "$(qr_block "$QRB_OUT" BL-004)"
+if qr_block "$QRB_OUT" BL-004 | grep -q 'NO BASELINE DATA'; then
+  fail "13b10 a remediation item never reports NO BASELINE DATA"
+else
+  pass "13b10 a remediation item never reports NO BASELINE DATA"
+fi
+# PD-04, asserted on a RENDERED item and not only on the template: the
+# acceptance criterion is a measurement of the target, never an instruction to
+# go and change the legacy implementation.
+qrb_body="$(qr_block "$QRB_OUT" BL-004)"
+if printf '%s' "$qrb_body" | grep -qiE 'refactor|clean up|rewrite (the )?legacy|fix the legacy'; then
+  fail "13b11 the item never asks anyone to change the legacy implementation"
+else
+  pass "13b11 the item never asks anyone to change the legacy implementation"
+fi
+assert_contains "13b12 and states the measured criterion in the target's terms" \
+  "the REBUILT MOD-001 measures within the configured thresholds" "$qrb_body"
+
+# ── 13c — idempotency: two consecutive refreshes are identical ───────────────
+# Compared refresh-to-refresh rather than render-to-refresh: the first run also
+# merges the agent's draft, which is a different operation from re-deriving an
+# existing document, and conflating the two would test the wrong thing.
+QRC="$WORK/qr-c"; qr_project "$QRC"; qr_quality_json "$QRC"
+qr_render "$QRC"; qr_refresh "$QRC"
+qrc_one_4="$(qr_block "$(qr_backlog "$QRC")" BL-004)"
+qrc_one_5="$(qr_block "$(qr_backlog "$QRC")" BL-005)"
+qrc_one="$(qr_section "$(qr_backlog "$QRC")")"
+qr_refresh "$QRC"
+qrc_two_4="$(qr_block "$(qr_backlog "$QRC")" BL-004)"
+qrc_two_5="$(qr_block "$(qr_backlog "$QRC")" BL-005)"
+qrc_two="$(qr_section "$(qr_backlog "$QRC")")"
+
+# THE CLAIM UNDER TEST is that a remediation item is a pure function of
+# quality.json: same hotspots in, byte-identical item out, no second item, no
+# new ledger line, no renumbering. Asserted on the items themselves rather than
+# on the whole section, because the section carries a pre-existing whitespace
+# drift that has nothing to do with this mechanism (see 13c4).
+if [[ -n "$qrc_one_4" && "$qrc_one_4" == "$qrc_two_4" && "$qrc_one_5" == "$qrc_two_5" ]]; then
+  pass "13c an unchanged quality.json regenerates both remediation items byte-identically"
+else
+  fail "13c an unchanged quality.json regenerates both remediation items byte-identically ($(diff <(printf '%s' "$qrc_one_4") <(printf '%s' "$qrc_two_4") | head -c 300))"
+fi
+assert_eq "13c2 and the remediation ids are unchanged across both runs" "BL-004 BL-005" \
+  "$(grep -B4 '^\*\*Item type:\*\* QUALITY-REMEDIATION' "$(qr_backlog "$QRC")" | grep -oE 'BL-[0-9]{3}' | paste -sd' ' -)"
+
+# And the whole Backlog section is byte-identical — no item appears, disappears,
+# changes a field, or gains a line. Strict equality, no whitespace normalization:
+# see 13c4 for why that is now assertable.
+if [[ -n "$qrc_one" && "$qrc_one" == "$qrc_two" ]]; then
+  pass "13c3 and the whole Backlog section is byte-identical between the two runs"
+else
+  fail "13c3 and the whole Backlog section is byte-identical between the two runs ($(diff <(printf '%s' "$qrc_one") <(printf '%s' "$qrc_two") | head -c 300))"
+fi
+
+# 13c4 GUARDS A FIXED DEFECT. render writes an item as "heading, blank, body", so
+# the parse that reads a preserved item back handed the body that blank as its
+# own first line — and the next render prepended another. Every --refresh added
+# one blank line under every preserved item's heading, without bound and without
+# ever being visible in review. Four refreshes, four blank lines.
+#
+# Leading blanks are now stripped on both the preserved and the draft path, so a
+# first render and every refresh after it agree. This asserts the invariant
+# directly rather than only through 13c3's equality, so a regression names the
+# cause instead of printing a whitespace diff.
+qrc_drift_ok=true
+for qrc_id in BL-001 BL-002 BL-003 BL-004 BL-005; do
+  qrc_n="$(qr_block "$(qr_backlog "$QRC")" "$qrc_id" | sed -n '1,4p' | grep -c '^$')"
+  [[ "$qrc_n" -le 1 ]] || { qrc_drift_ok=false; qrc_bad="${qrc_id} has ${qrc_n}"; }
+done
+if $qrc_drift_ok; then
+  pass "13c4 no item accumulates blank lines under its heading across refreshes"
+else
+  fail "13c4 no item accumulates blank lines under its heading across refreshes (${qrc_bad})"
+fi
+
+# ── 13d — a newly measured hotspot APPENDS to the module's existing item ─────
+QRD="$WORK/qr-d"; qr_project "$QRD"; qr_quality_json "$QRD"
+qr_render "$QRD"; qr_refresh "$QRD"
+jq '.quality_issues += [{"id":"QI-011","module_id":"MOD-001","status":"open",
+     "metric":"function_length","file":"legacy/auth/session","function":"Renew",
+     "value":260,"severity":"HIGH"}]' \
+  "$QRD/.specclaw/analysis/quality.json" > "$QRD/q.tmp" \
+  && mv "$QRD/q.tmp" "$QRD/.specclaw/analysis/quality.json"
+qr_refresh "$QRD"
+QRD_OUT="$(qr_backlog "$QRD")"
+assert_eq "13d the re-measured run creates no second item for the module" "2" \
+  "$(grep -c '^\*\*Item type:\*\* QUALITY-REMEDIATION' "$QRD_OUT")"
+assert_eq "13d2 and renumbers nothing" "BL-004 BL-005" \
+  "$(grep -B4 '^\*\*Item type:\*\* QUALITY-REMEDIATION' "$QRD_OUT" | grep -oE 'BL-[0-9]{3}' | paste -sd' ' -)"
+assert_contains "13d3 the new hotspot is listed on the existing item" \
+  "- QI-011 — function_length, legacy/auth/session::Renew, measured 260, HIGH" \
+  "$(qr_block "$QRD_OUT" BL-004)"
+assert_contains "13d4 and the addition is recorded, dated" \
+  "⊕ **Added $(date +%Y-%m-%d):** QI-011" "$(qr_block "$QRD_OUT" BL-004)"
+
+# ── 13e — gating on the declared BUILT: signal ───────────────────────────────
+QRE="$WORK/qr-e"; qr_project "$QRE"; qr_quality_json "$QRE"; qr_render "$QRE"
+QRE_OUT="$(qr_backlog "$QRE")"
+assert_contains "13e with no BUILT: note the remediation item is BLOCKED" \
+  "**Gate:** BLOCKED — quality: awaiting functional items" "$(qr_block "$QRE_OUT" BL-004)"
+assert_contains "13e2 and its Quality state says there is nothing to measure yet" \
+  "**Quality state:** BLOCKED" "$(qr_block "$QRE_OUT" BL-004)"
+qr_add_note "$QRE_OUT" BL-001 "**Verification:**" "- BUILT: PR #12, merged 2026-08-30"
+qr_refresh "$QRE"
+assert_contains "13e3 once every functional item is BUILT the gate goes CLEAR" \
+  "**Gate:** CLEAR" "$(qr_block "$QRE_OUT" BL-004)"
+
+# ── 13f — completion is computed from the delta, never asserted ──────────────
+# Same project, now gate-clear, so the state below reflects the measurement and
+# nothing else.
+cat > "$QRE/.specclaw/analysis/quality-delta.json" <<'QD'
+{"schema_version":1,"generated_at":"2026-09-01T10:00:00Z",
+ "deltas":[
+   {"module_id":"MOD-001","metric":"complexity","legacy_status":"HIGH","target_status":"PASS","classification":"improved"},
+   {"module_id":"MOD-001","metric":"function_length","legacy_status":"PASS","target_status":"PASS","classification":"unchanged"},
+   {"module_id":"MOD-001","metric":"duplication","legacy_status":"PASS","target_status":"PASS","classification":"unchanged"},
+   {"module_id":"MOD-001","metric":"file_length","legacy_status":"HIGH","target_status":"WARN","classification":"improved"}]}
+QD
+qr_refresh "$QRE"
+assert_contains "13f a delta within thresholds with no regression computes DONE" \
+  "**Quality state:** DONE" "$(qr_block "$QRE_OUT" BL-004)"
+assert_contains "13f2 and cites the delta it was computed from" \
+  "2026-09-01T10:00:00Z" "$(qr_block "$QRE_OUT" BL-004)"
+# A regressing delta reopens it and names the metric that failed.
+jq '.deltas |= map(if .metric == "file_length"
+      then .target_status = "HIGH" | .classification = "regressed" else . end)' \
+  "$QRE/.specclaw/analysis/quality-delta.json" > "$QRE/d.tmp" \
+  && mv "$QRE/d.tmp" "$QRE/.specclaw/analysis/quality-delta.json"
+qr_refresh "$QRE"
+qre_state="$(qr_block "$QRE_OUT" BL-004 | grep '^\*\*Quality state:\*\*')"
+assert_contains "13f3 a regressing delta leaves the item open" "**Quality state:** OPEN" "$qre_state"
+assert_contains "13f4 and names the failing metric" "file_length regressed to HIGH" "$qre_state"
+
+# ── 13g — bf-replay refuses a remediation item cleanly ───────────────────────
+mkdir -p "$QRE/.specclaw/baseline/fixtures"
+cat > "$QRE/.specclaw/baseline/manifest.json" <<'MJ'
+{"manifest_schema":3,"fixtures":[
+  {"scenario_id":"GM-001","business_rules_pinned":"DR-001","verifies_backlog_item":"BL-001",
+   "module_ids":["MOD-001"],"legacy_commit_sha":"abc1234"}]}
+MJ
+qrg_err="$(bash "$REPLAY_BIN" resolve "$QRE/.specclaw" BL-004 "$QRE/sel.json" 2>&1 >/dev/null)"
+qrg_exit=$?
+assert_eq "13g the refusal exits 1, the same as every other non-applicable --item scope" "1" "$qrg_exit"
+assert_contains "13g2 it names the item type" "is a QUALITY-REMEDIATION item" "$qrg_err"
+assert_contains "13g3 it points at the command that DOES verify it" \
+  "/specclaw:bf-quality --compare" "$qrg_err"
+if [[ "$qrg_err" == *"NO BASELINE DATA"* ]]; then
+  fail "13g4 the refusal never reports NO BASELINE DATA"
+else
+  pass "13g4 the refusal never reports NO BASELINE DATA"
+fi
+if [[ -e "$QRE/sel.json" ]]; then
+  fail "13g5 nothing was created on disk"
+else
+  pass "13g5 nothing was created on disk"
+fi
+# THE CONTROL, and the reason it asserts on the error rather than on a
+# selection: this fixture's manifest is deliberately a stub, so BL-001 stops at
+# the baseline-integrity check further down. That is exactly the point — it got
+# PAST the item-kind switch, which a remediation item never does. Asserting the
+# guard is narrow means asserting it fires for one item and not the other, not
+# that the other one completes a full replay.
+qrg_ok_err="$(bash "$REPLAY_BIN" resolve "$QRE/.specclaw" BL-001 "$QRE/sel-ok.json" 2>&1 >/dev/null)"
+if [[ "$qrg_ok_err" == *"QUALITY-REMEDIATION"* ]]; then
+  fail "13g6 the guard is narrow — it does not fire on an ordinary item"
+else
+  pass "13g6 the guard is narrow — it does not fire on an ordinary item"
+fi
+assert_contains "13g7 and that item reaches the join the guard skips" \
+  "Baseline check failed" "$qrg_ok_err"
+
+# ── 13h — a human status note on a remediation item survives verbatim ────────
+QRH="$WORK/qr-h"; qr_project "$QRH"; qr_quality_json "$QRH"; qr_render "$QRH"
+QRH_OUT="$(qr_backlog "$QRH")"
+qr_add_note "$QRH_OUT" BL-004 "**Quality state:**" \
+  "- Agreed with Dana 2026-08-31: the session validator is being split, not ported."
+qr_refresh "$QRH"
+assert_contains "13h a status note on a remediation item survives a refresh verbatim" \
+  "- Agreed with Dana 2026-08-31: the session validator is being split, not ported." \
+  "$(qr_block "$QRH_OUT" BL-004)"
+assert_eq "13h2 and is not duplicated by the regeneration" "1" \
+  "$(qr_block "$QRH_OUT" BL-004 | grep -c 'Agreed with Dana')"
+
+# ── 13i — the severity floor is config, and lowering it changes the outcome ──
+QRI="$WORK/qr-i"; qr_project "$QRI"; qr_quality_json "$QRI"
+cat > "$QRI/.specclaw/config.yaml" <<'CY'
+project:
+  name: QR
+
+quality:
+  register_severity: WARN
+  remediation_severity_floor: WARN
+CY
+qr_render "$QRI"
+QRI_OUT="$(qr_backlog "$QRI")"
+assert_eq "13i lowering the floor to WARN gives the WARN-only module an item too" "3" \
+  "$(grep -c '^\*\*Item type:\*\* QUALITY-REMEDIATION' "$QRI_OUT")"
+assert_contains "13i2 and that item lists the WARN hotspot" \
+  "- QI-004 — complexity, legacy/reports/monthly::Build, measured 13, WARN" \
+  "$(qr_block "$QRI_OUT" BL-006)"
+if grep -qE '^- \*\*MOD-003 — .*advisory QI below' "$QRI_OUT"; then
+  fail "13i3 nothing is below the floor any more, so no advisory count is printed"
+else
+  pass "13i3 nothing is below the floor any more, so no advisory count is printed"
+fi
+
+# ── 13j — module-status reports an open remediation item per module ──────────
+( cd "$QRB" && bash "$REBUILD_BIN" module-status .specclaw ) >/dev/null 2>&1
+QRB_MS="$QRB/.specclaw/analysis/module-status.md"
+assert_contains "13j module-status carries a Quality remediation column" \
+  "| Quality remediation |" "$(grep -m1 '^| Module |' "$QRB_MS")"
+assert_contains "13j2 a module with an open item is visibly not done" \
+  "| ⚠ BLOCKED |" "$(grep -m1 '^| MOD-001 |' "$QRB_MS")"
+assert_contains "13j3 a module with no such item reads as having none, not as passing" \
+  "| — |" "$(grep -m1 '^| MOD-003 |' "$QRB_MS")"
+assert_contains "13j4 and the notes say what an open item means" \
+  "A module with an open quality remediation item is not a done module" \
+  "$(cat "$QRB_MS")"
 
 # ── Result ───────────────────────────────────────────────────────────────────
 

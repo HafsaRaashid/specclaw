@@ -637,6 +637,18 @@ Fix: run /specclaw:bf-rebuild-plan first."
           die "--item ${bl_id} is a STRUCK tombstone in ${backlog_file} (${item_title}), not an active backlog item. Its id stays claimed forever so nothing reuses it, but there is no behaviour to accept: a struck item was removed from the rebuild deliberately. Nothing was created on disk."
           ;;
       esac
+      # ── A quality remediation item is not replayable, and saying so is the
+      # whole point of this guard. It cites no DR-### rule and maps to no
+      # GM-### fixture, so the DR join below would select nothing and this run
+      # would report a confident "NO BASELINE DATA — 0 fixtures mapped" — which
+      # reads as "somebody forgot to record a fixture" when the truth is that
+      # this kind of item is never accepted by fixture comparison at all. Its
+      # acceptance is a MEASUREMENT, and it has its own command.
+      if extract_heading_block "$backlog_file" "$bl_id" \
+           | grep -qE '^\*\*Item type:\*\* QUALITY-REMEDIATION'; then
+        die "--item ${bl_id} is a QUALITY-REMEDIATION item in ${backlog_file} (${item_title}), not a behavioural backlog item. It cites no DR-### rule and maps to no GM-### fixture, so there is nothing for a replay to compare — its **Verification:** line reads QUALITY-MEASURED for exactly that reason. Nothing was created on disk.
+Fix: /specclaw:bf-quality --target <the rebuilt tree>, then /specclaw:bf-quality --compare. That writes quality-delta.json, and the item's own **Quality state:** line in rebuild-backlog.md carries the resulting verdict."
+      fi
       ;;
     module)
       module_id="$target"

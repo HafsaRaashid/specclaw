@@ -698,6 +698,142 @@ normalize_id_list() {
   printf '%s' "$raw" | { grep -oE "$pattern" | awk '!seen[$0]++' | paste -sd, -; } || true
 }
 
+# ─── Quality remediation (optional; inert without .specclaw/analysis/quality.json) ──
+#
+# /specclaw:bf-quality measures the legacy tree and registers each hotspot it
+# finds as a permanent QI-###. Annotating a module's rollup line with that
+# measurement — which this command already did — tells a reader which module is
+# in the worst shape. It does not make the REBUILD answerable for any of it.
+#
+# These helpers are the input side of the item that does. Every one of them
+# degrades to producing nothing when quality.json is absent, jq is not on PATH,
+# or the JSON does not parse, which is what keeps the whole feature optional:
+# a project that never runs /specclaw:bf-quality renders a byte-identical
+# backlog to one rendered before this existed.
+#
+# WHAT IS DELIBERATELY NOT HERE: any read of the legacy source, any
+# re-derivation of a metric, any threshold comparison of its own. Every
+# severity and status below was computed once, by the quality collector, and is
+# read back verbatim. See that script's "WHY BASH OWNS THE VERDICTS".
+
+# The three bands, ranked, so "at or above the floor" is one integer compare.
+# An unrecognized or absent severity ranks -1 and therefore qualifies for
+# nothing: a quality_issues[] entry with a null severity is the shape a RESOLVED
+# record has, and resolved hotspots are not what a rebuild is held to.
+# EVERY jq READ BELOW IS PIPED THROUGH `tr -d '\r'`, and that is not cosmetic.
+# jq on Windows writes its output in text mode, so each line arrives CRLF-
+# terminated and the CR lands on the LAST field of the row. It is invisible in
+# every printf and every diff, and it makes an exact string compare fail: a
+# dimension classified "regressed\r" tested unequal to "regressed", so a
+# regressing target was reported as merely still-above-threshold and a module
+# with a regression contributed no regression note at all. The same guard is
+# already applied to every other jq read in this file.
+#
+# The four dimensions quality-delta.json compares, in its own order. Named once
+# here so the "no hotspot left to retire" branch checks the same set the delta
+# reports rather than a list restated at the point of use.
+QR_DIMENSIONS="complexity function_length duplication file_length"
+
+qr_severity_rank() {
+  case "$(printf '%s' "${1:-}" | tr '[:lower:]' '[:upper:]')" in
+    HIGH) printf '2' ;;
+    WARN) printf '1' ;;
+    PASS) printf '0' ;;
+    *)    printf -- '-1' ;;
+  esac
+}
+
+# The severity floor, from the SAME config block the quality thresholds live in
+# (PD-03 — no inline magic value). Deliberately independent of that section's
+# register_severity: one decides which hotspots get a permanent id, this decides
+# which of them the rebuild must clear.
+read_remediation_floor() {
+  local config_file="$1" v=""
+  [ -f "$config_file" ] && v="$(yaml_val "$config_file" "quality.remediation_severity_floor")"
+  case "$(printf '%s' "${v:-}" | tr '[:lower:]' '[:upper:]')" in
+    HIGH|"") printf 'HIGH' ;;
+    WARN)    printf 'WARN' ;;
+    *)
+      warn "config.yaml quality.remediation_severity_floor must be HIGH or WARN ('${v}') — using HIGH."
+      printf 'HIGH' ;;
+  esac
+}
+
+# Open hotspots at or above the floor, one row each:
+#   module_id  qi_id  metric  file  function  value  severity
+#
+# UNIT-SEPARATED (\x1f), NOT TAB-SEPARATED, and that is load-bearing. A tab is
+# an IFS whitespace character, so `read` collapses a run of them into ONE
+# delimiter and every empty field in the middle of a row silently disappears.
+# A hotspot with no function — file_length, duplication — has exactly that
+# shape, and its severity landed in its value column.
+# Sorted by id so the rendered list is stable across runs — an item whose
+# hotspot list reordered itself every refresh would show a diff on every run
+# and idempotency would be unprovable.
+quality_qualifying_qis() {
+  local qj="$1" floor="$2"
+  [ -f "$qj" ] || return 0
+  command -v jq >/dev/null 2>&1 || return 0
+  jq -r --arg floor "$floor" '
+    def rank: {"PASS":0,"WARN":1,"HIGH":2}[. // ""] // -1;
+    [ .quality_issues[]?
+      | select(.status == "open")
+      | select((.severity | rank) >= ($floor | rank)) ]
+    | sort_by(.id)[]
+    | [ (.module_id // "MOD-UNASSIGNED"), (.id // ""), (.metric // "unknown"),
+        (.file // ""), (.function // ""),
+        (if .value == null then "" else (.value | tostring) end),
+        (.severity // "") ]
+    | join("\u001f")
+  ' "$qj" 2>/dev/null | tr -d '\r' || true
+}
+
+# How many of a module's OPEN hotspots sit below the floor — the advisory count
+# (PD-03). These generate no item on purpose: registering an id for a WARN is a
+# decision about record-keeping, holding a rebuild to it is a decision about
+# scope, and they are not the same decision.
+quality_below_floor_count() {
+  local qj="$1" floor="$2" mid="$3"
+  [ -f "$qj" ] || { printf '0'; return 0; }
+  command -v jq >/dev/null 2>&1 || { printf '0'; return 0; }
+  jq -r --arg floor "$floor" --arg m "$mid" '
+    def rank: {"PASS":0,"WARN":1,"HIGH":2}[. // ""] // -1;
+    [ .quality_issues[]?
+      | select(.status == "open" and .module_id == $m)
+      | select((.severity | rank) >= 0 and (.severity | rank) < ($floor | rank)) ]
+    | length
+  ' "$qj" 2>/dev/null | tr -d '\r' || printf '0'
+}
+
+# quality-delta.json's per-dimension verdicts, one unit-separated row each:
+#   module_id  metric  target_status  classification
+#
+# WHERE THIS FILE COMES FROM. /specclaw:bf-quality --target measures the rebuilt
+# tree and --compare writes the delta, and BOTH write into the same
+# .specclaw/analysis/ directory this command already reads quality.json from —
+# --target changes which tree is measured, never where the artifact lands. So
+# there is no second location to look in and no copy-back step to get wrong.
+quality_delta_rows() {
+  local dj="$1"
+  [ -f "$dj" ] || return 0
+  command -v jq >/dev/null 2>&1 || return 0
+  jq -r '
+    .deltas[]?
+    | [ (.module_id // ""), (.metric // ""),
+        (.target_status // "NOT-MEASURED"), (.classification // "NOT-COMPARABLE") ]
+    | join("\u001f")
+  ' "$dj" 2>/dev/null | tr -d '\r' || true
+}
+
+# The delta's own generation timestamp, for citing in the computed state. Empty
+# when there is no delta — every caller treats that as "not measured yet".
+quality_delta_stamp() {
+  local dj="$1"
+  [ -f "$dj" ] || return 0
+  command -v jq >/dev/null 2>&1 || return 0
+  jq -r '.generated_at // empty' "$dj" 2>/dev/null | tr -d '\r' || true
+}
+
 # ─── Subcommand: collect ─────────────────────────────────────────────────────
 
 cmd_collect() {
@@ -1120,6 +1256,17 @@ cmd_render() {
   # stripped), the human-added Status-notes tail (verbatim), old Gate/
   # Verification (for the change report), and struck/deferred status. ──
   declare -A EXIST_TITLE EXIST_STATIC EXIST_TAIL EXIST_STATUS EXIST_OLD_GATE EXIST_OLD_VERIF
+  # Quality-remediation items already in the document, recognised by their own
+  # declared "**Item type:**" field and NEVER by their title or their position.
+  # QR_ID_OF[MOD-###] is what makes ID permanence work across a refresh: a
+  # module that already has an item reuses that id forever, and only a module
+  # that has none is ever assigned a new number.
+  declare -A QR_ID_OF QR_IS_REM QR_PRIOR_QIS QR_LEDGER QR_PRIOR_BODY
+  QR_ID_OF[__init__]=1; unset 'QR_ID_OF[__init__]'
+  QR_IS_REM[__init__]=1; unset 'QR_IS_REM[__init__]'
+  QR_PRIOR_QIS[__init__]=1; unset 'QR_PRIOR_QIS[__init__]'
+  QR_LEDGER[__init__]=1; unset 'QR_LEDGER[__init__]'
+  QR_PRIOR_BODY[__init__]=1; unset 'QR_PRIOR_BODY[__init__]'
   local existing_ids=""
   if $is_refresh; then
     split_blocks "$backlog_file" "$workdir/existing" "BL"
@@ -1138,6 +1285,44 @@ cmd_render() {
       fi
       EXIST_OLD_GATE[$id]="$(block_single_field "$f" "Gate")"
       EXIST_OLD_VERIF[$id]="$(block_single_field "$f" "Verification")"
+      # ── A quality-remediation item, recognised by its declared type ───────
+      # Its body is bash-written in full and re-derived every run, so unlike
+      # every other item nothing of it is preserved as static text — except two
+      # things that ARE history and could not be recomputed: the dated ⊕/⊖
+      # ledger of hotspots added or retired since it was created, and (for the
+      # case where quality.json has since been removed) the whole prior body,
+      # which is then kept verbatim rather than regenerated from nothing.
+      if grep -qE '^\*\*Item type:\*\* QUALITY-REMEDIATION' "$f"; then
+        QR_IS_REM[$id]=1
+        local qr_mod
+        qr_mod="$(printf '%s' "$(block_single_field "$f" "Module")" | { grep -oE 'MOD-[0-9]{3}' | head -1; } || true)"
+        [ -n "$qr_mod" ] && QR_ID_OF[$qr_mod]="$id"
+        QR_PRIOR_QIS[$id]="$(normalize_id_list "$(grep -E '^- QI-[0-9]+ —' "$f" 2>/dev/null || true)" 'QI-[0-9]+')"
+        QR_LEDGER[$id]="$(grep -E '^[⊕⊖] \*\*' "$f" 2>/dev/null || true)"
+        QR_PRIOR_BODY[$id]="$(tail -n +2 "$f" | awk '
+          /^\*\*Gate:\*\*/ { skip=1; next }
+          /^\*\*Verification:\*\*/ { skip=1; next }
+          /^\*\*Quality state:\*\*/ { skip=1; next }
+          /^\*\*Status notes \(human-added\):\*\*/ { intail=1; next }
+          intail { next }
+          skip && /^\*\*/ { skip=0 }
+          skip { next }
+          { print }
+        ' | strip_trailing_separator)"
+      fi
+      # LEADING BLANK LINES ARE DROPPED (the `sed '/./,$!d'` below, the same
+      # idiom the Sequencing/Coverage reads use), and that fixes a real,
+      # unbounded drift rather than tidying whitespace.
+      #
+      # render writes an item as "heading, blank, body". `tail -n +2` therefore
+      # hands this parse a body whose FIRST line is that blank, the next render
+      # prepends its own, and the item grows one blank line under its heading on
+      # every single --refresh, forever. Four refreshes, four blank lines. It is
+      # invisible in review and it never stops.
+      #
+      # The blank between heading and body belongs to the RENDERER, so the body
+      # must not carry a copy of it. The same strip is applied on the draft path
+      # for the same reason, so a first render and every refresh after it agree.
       # Static head = every line except the heading itself, the two fields
       # bash recomputes from scratch every run (Gate:/Verification:), and
       # the Deferred status marker/Status-notes tail (handled separately
@@ -1180,6 +1365,7 @@ cmd_render() {
         /^\*\*Gate:\*\*/ { skip=1; next }
         /^\*\*Verification:\*\*/ { skip=1; next }
         /^\*\*UI fidelity:\*\*/ { skip=1; next }
+        /^\*\*Quality state:\*\*/ { skip=1; next }
         /^⚠ / { next }
         /^\*\*Status:\*\* Deferred/ { skip=1; next }
         /^\*\*Status notes \(human-added\):\*\*/ { intail=1; next }
@@ -1187,7 +1373,7 @@ cmd_render() {
         /^\*\*Settled constraints/ { skip=0 }
         skip { next }
         { print }
-      ' | strip_trailing_separator)"
+      ' | sed '/./,$!d' | strip_trailing_separator)"
       EXIST_TAIL[$id]="$(awk '
         /^\*\*Status notes \(human-added\):\*\*/ { intail=1 }
         intail { print }
@@ -1431,7 +1617,7 @@ cmd_render() {
     [ -n "${STRIKE_REASON[$id]:-}" ] && continue
     [ -n "${DEFER_REASON[$id]:-}" ] && continue
     FINAL_TITLE[$id]="$(block_title_after_dash "$f")"
-    FINAL_BODY[$id]="$(tail -n +2 "$f" | strip_trailing_separator)"
+    FINAL_BODY[$id]="$(tail -n +2 "$f" | sed '/./,$!d' | strip_trailing_separator)"
     if [[ " ${existing_ids} " == *" ${id} "* ]]; then
       FINAL_TAIL[$id]="${EXIST_TAIL[$id]:-}"
       revised_ids="${revised_ids} ${id}"
@@ -1487,6 +1673,225 @@ cmd_render() {
     done
   done
   rm -f "$workdir/body.tmp"
+
+  # ── Quality remediation items ────────────────────────────────────────────
+  #
+  # THE GAP THIS CLOSES. Until now a measured hotspot changed exactly one thing
+  # about the rebuild: a suffix on a coverage-rollup line telling a reader which
+  # legacy module is in the worst shape. Nothing in the backlog made the
+  # REBUILT module's health an acceptance condition, so a faithful reproduction
+  # of a 1400-line function passed every check this document can compute.
+  #
+  # ONE ITEM PER MODULE, NEVER ONE PER HOTSPOT. A large legacy tree registers
+  # hundreds of QI-###; an item each would bury the functional backlog under
+  # them. The module is already the migration and acceptance unit here
+  # (MOD-### -> BL-0## -> DR-### -> GM-###), and it is also the finest grain the
+  # target-side measurement can actually be taken at.
+  #
+  # ACCEPTANCE IS MEASURED, NEVER LITERAL. The item never asks anyone to edit a
+  # named legacy file — that file is not part of the target and will not exist
+  # there. The QI ids are the evidence for WHY the item exists; the proof that
+  # it is done is quality-delta.json.
+  #
+  # INERT WITHOUT quality.json. No file, no jq, unreadable JSON, or no hotspot
+  # at or above the floor and nothing below produces anything, and the rendered
+  # document is byte-identical to one rendered before this existed.
+  local qr_json="$analysis_dir/quality.json"
+  local qr_delta="$analysis_dir/quality-delta.json"
+  local qr_floor qr_today qr_delta_stamp
+  qr_floor="$(read_remediation_floor "$specclaw_dir_abs/config.yaml")"
+  qr_today="$(date +%Y-%m-%d)"
+  qr_delta_stamp="$(quality_delta_stamp "$qr_delta")"
+
+  declare -A QR_MOD QR_METRICS
+  QR_MOD[__init__]=1; unset 'QR_MOD[__init__]'
+  QR_METRICS[__init__]=1; unset 'QR_METRICS[__init__]'
+
+  # Qualifying hotspots, grouped per module: the rendered bullet lines, the id
+  # list (for the ledger diff), and the distinct metrics (for the delta join).
+  declare -A QR_LINES_OF QR_QIS_OF QR_METRICS_OF
+  QR_LINES_OF[__init__]=1; unset 'QR_LINES_OF[__init__]'
+  QR_QIS_OF[__init__]=1; unset 'QR_QIS_OF[__init__]'
+  QR_METRICS_OF[__init__]=1; unset 'QR_METRICS_OF[__init__]'
+  local qr_qualifying_mods="" qr_offmap_qis=""
+  local qmod qqi qmetric qfile qfunc qvalue qsev qwhere
+  while IFS=$'\x1f' read -r qmod qqi qmetric qfile qfunc qvalue qsev; do
+    [ -n "$qqi" ] || continue
+    # A hotspot in a module module-map.md does not define cannot become an item:
+    # it would have no module to be grouped under, no functional items to wait
+    # on, and no target-side rollup to be measured against. Reported, never
+    # folded into a real module by guesswork — the same rule an item with an
+    # unknown **Module:** field gets.
+    if [[ " ${mod_ids} " != *" ${qmod} "* ]]; then
+      qr_offmap_qis="${qr_offmap_qis}${qr_offmap_qis:+, }${qqi} (${qmod})"
+      continue
+    fi
+    case " ${qr_qualifying_mods} " in
+      *" ${qmod} "*) ;;
+      *) qr_qualifying_mods="${qr_qualifying_mods} ${qmod}" ;;
+    esac
+    qwhere="$qfile"
+    [ -n "$qfunc" ] && qwhere="${qwhere:+${qwhere}::}${qfunc}"
+    [ -n "$qwhere" ] || qwhere="module-wide"
+    QR_LINES_OF[$qmod]="${QR_LINES_OF[$qmod]:-}- ${qqi} — ${qmetric}, ${qwhere}, measured ${qvalue:-n/a}, ${qsev}
+"
+    QR_QIS_OF[$qmod]="${QR_QIS_OF[$qmod]:+${QR_QIS_OF[$qmod]},}${qqi}"
+    case ",${QR_METRICS_OF[$qmod]:-}," in
+      *",${qmetric},"*) ;;
+      *) QR_METRICS_OF[$qmod]="${QR_METRICS_OF[$qmod]:+${QR_METRICS_OF[$qmod]},}${qmetric}" ;;
+    esac
+  done < <(quality_qualifying_qis "$qr_json" "$qr_floor")
+  [ -z "$qr_offmap_qis" ] || warn "these open quality hotspots name a module module-map.md does not define and generate no remediation item: ${qr_offmap_qis}"
+
+  # Next free BL number. Read from the rendered document AND this run's draft,
+  # so a struck tombstone, a deferred item and a brand-new draft item all hold
+  # their numbers — ids are permanent and are never reused (CONTRACT.md (c)).
+  local qr_next=1 qr_seen
+  while IFS= read -r qr_seen; do
+    [ -n "$qr_seen" ] || continue
+    qr_seen=$((10#$qr_seen))
+    [ "$qr_seen" -ge "$qr_next" ] && qr_next=$((qr_seen + 1))
+  done < <({ grep -hoE '^### BL-[0-9]{3}' "$backlog_file" "$draft_file" 2>/dev/null | grep -oE '[0-9]{3}'; } || true)
+
+  # Every module that gets an item this run: one with a qualifying hotspot,
+  # unioned with every module that ALREADY has one. The union is what makes the
+  # id permanent — a module whose hotspots were all resolved keeps its item and
+  # its number rather than having them silently disappear.
+  local qr_target_mods="" qm
+  for qm in $qr_qualifying_mods; do
+    qr_target_mods="${qr_target_mods} ${qm}"
+  done
+  for qm in ${QR_ID_OF[@]+"${!QR_ID_OF[@]}"}; do
+    case " ${qr_target_mods} " in
+      *" ${qm} "*) ;;
+      *) qr_target_mods="${qr_target_mods} ${qm}" ;;
+    esac
+  done
+
+  local qr_id qr_is_new qr_deps qr_fid qr_ledger qr_basis
+  for qm in $(printf '%s' "$qr_target_mods" | tr ' ' '\n' | sort -u); do
+    [ -n "$qm" ] || continue
+    qr_id="${QR_ID_OF[$qm]:-}"
+    qr_is_new=false
+    if [ -z "$qr_id" ]; then
+      qr_id="$(printf 'BL-%03d' "$qr_next")"
+      qr_next=$((qr_next + 1))
+      qr_is_new=true
+    fi
+
+    # A --module run re-plans one module and leaves every other module's items
+    # untouched — including this one's body. Nothing is minted for an
+    # out-of-scope module either: a new id assigned by a run that was told not
+    # to plan that module would be an item nobody asked for.
+    if [ -n "$module_scope" ] && [ "$qm" != "$module_scope" ]; then
+      if $qr_is_new; then
+        qr_next=$((qr_next - 1))
+      else
+        QR_MOD[$qr_id]="$qm"
+        QR_METRICS[$qr_id]="${QR_METRICS_OF[$qm]:-}"
+      fi
+      continue
+    fi
+
+    QR_MOD[$qr_id]="$qm"
+    QR_METRICS[$qr_id]="${QR_METRICS_OF[$qm]:-}"
+
+    # quality.json is gone (or unreadable) but the item exists: keep the body
+    # that was written when it COULD be measured, verbatim. Regenerating an
+    # empty hotspot list from a file that is not there would erase the record of
+    # what was found, which is the one thing a permanent id exists to hold.
+    if [ ! -f "$qr_json" ] && [ -n "${QR_PRIOR_BODY[$qr_id]:-}" ]; then
+      FINAL_TITLE[$qr_id]="${EXIST_TITLE[$qr_id]:-${qm} quality remediation}"
+      FINAL_BODY[$qr_id]="${QR_PRIOR_BODY[$qr_id]}"
+      ITEM_MOD[$qr_id]="$qm"
+      ITEM_RULES[$qr_id]=""
+      ITEM_SCRS[$qr_id]=""
+      continue
+    fi
+
+    # ── The functional items this module's health will be measured on ───────
+    # Every active item declaring this module that is not itself a remediation
+    # item. They become the "Depends on" list (so the item sorts last within its
+    # own module) and the gating set below.
+    qr_deps=""
+    for qr_fid in $(printf '%s' "$active_ids" | tr ' ' '\n' | sort -u); do
+      [ "${ITEM_MOD[$qr_fid]:-}" = "$qm" ] || continue
+      [ -n "${QR_IS_REM[$qr_fid]:-}" ] && continue
+      qr_deps="${qr_deps}${qr_deps:+, }${qr_fid}"
+    done
+
+    # ── The dated ledger ────────────────────────────────────────────────────
+    # A re-measured quality.json that turns up a new qualifying hotspot APPENDS
+    # it to this module's existing item — it never creates a second item and it
+    # never renumbers anything. The append is recorded here, dated, because the
+    # hotspot list itself is regenerated from scratch every run and so cannot
+    # carry its own history. A hotspot that stops qualifying is recorded the
+    # same way rather than silently vanishing.
+    #
+    # An unchanged quality.json produces neither kind of line, which is what
+    # makes a second --refresh a no-op for this item.
+    qr_ledger="${QR_LEDGER[$qr_id]:-}"
+    if ! $qr_is_new && [ -n "${QR_PRIOR_QIS[$qr_id]:-}" ]; then
+      local qr_added="" qr_gone="" qr_tok
+      for qr_tok in $(printf '%s' "${QR_QIS_OF[$qm]:-}" | tr ',' ' '); do
+        [ -n "$qr_tok" ] || continue
+        case ",${QR_PRIOR_QIS[$qr_id]}," in
+          *",${qr_tok},"*) ;;
+          *) qr_added="${qr_added}${qr_added:+, }${qr_tok}" ;;
+        esac
+      done
+      for qr_tok in $(printf '%s' "${QR_PRIOR_QIS[$qr_id]}" | tr ',' ' '); do
+        [ -n "$qr_tok" ] || continue
+        case ",${QR_QIS_OF[$qm]:-}," in
+          *",${qr_tok},"*) ;;
+          *) qr_gone="${qr_gone}${qr_gone:+, }${qr_tok}" ;;
+        esac
+      done
+      if [ -n "$qr_added" ]; then
+        qr_ledger="${qr_ledger}${qr_ledger:+
+}⊕ **Added ${qr_today}:** ${qr_added} — measured after this item was created, and appended to it rather than given an item of their own."
+      fi
+      if [ -n "$qr_gone" ]; then
+        qr_ledger="${qr_ledger}${qr_ledger:+
+}⊖ **Retired ${qr_today}:** ${qr_gone} — no longer open at or above the ${qr_floor} floor in quality.json. Recorded permanently; the id is never reused."
+      fi
+    fi
+
+    qr_basis="${QR_LINES_OF[$qm]:-}"
+    if [ -n "$qr_basis" ]; then
+      qr_basis="$(printf '%s' "$qr_basis" | strip_trailing_separator)"
+    else
+      qr_basis="- _None open at or above the ${qr_floor} floor in this snapshot. The item keeps its id and its acceptance criterion regardless: a module that measures clean in the legacy tree can still be rebuilt into one that does not._"
+    fi
+
+    FINAL_TITLE[$qr_id]="${qm} quality remediation"
+    FINAL_BODY[$qr_id]="**Module:** ${qm}
+**Item type:** QUALITY-REMEDIATION — generated from measured hotspots in \`.specclaw/analysis/quality.json\`, not from a functional capability. Bash writes this item in full on every run; only the dated ledger below and any human status note survive a \`--refresh\`.
+**Maps to capability:** none — this item carries no capability bullet and is counted in no coverage line. It exists so that the rebuilt module's measured health is an acceptance condition rather than a hope.
+**Depends on:** ${qr_deps:-None}
+**Acceptance basis (.specclaw/analysis/quality.json, classified against \`config.yaml\`'s \`quality:\` thresholds at a \`remediation_severity_floor\` of ${qr_floor}):**
+${qr_basis}${qr_ledger:+
+
+${qr_ledger}}
+
+**Acceptance criterion — MEASURED, never literal:** the REBUILT ${qm} measures within the configured thresholds on every dimension listed above and regresses on none, as evidenced by \`.specclaw/analysis/quality-delta.json\`. The \`QI-###\` ids above are the evidence for WHY this item exists; the delta is the proof that it is done. Nothing here asks anyone to change the legacy implementation: that implementation is not part of the target, and the files named above will not exist there.
+
+**Grain of the proof:** a listed hotspot counts as retired when the delta's entry for its module and its metric measures below the ${qr_floor} floor and is not classified \`regressed\`. Module × metric is the finest grain the delta can carry — a hotspot's identity names a legacy file and function, and neither exists in the rebuilt tree to be measured a second time.
+
+**Verification inputs needed:**
+- A measured target snapshot and a comparison: \`/specclaw:bf-quality --target <path to the rebuilt tree>\`, then \`/specclaw:bf-quality --compare\`. Nothing else — this item needs no golden-master capture and no stakeholder decision."
+    ITEM_MOD[$qr_id]="$qm"
+    ITEM_RULES[$qr_id]=""
+    ITEM_SCRS[$qr_id]=""
+    ITEM_DEPS[$qr_id]="$(printf '%s' "$qr_deps" | tr -d ' ')"
+    QR_IS_REM[$qr_id]=1
+    if $qr_is_new; then
+      FINAL_TAIL[$qr_id]=""
+      active_ids="${active_ids} ${qr_id}"
+      new_ids="${new_ids} ${qr_id}"
+      warn "generated ${qr_id} — ${qm} quality remediation (${QR_QIS_OF[$qm]:-no qualifying hotspot}). Its id is permanent and is never renumbered."
+    fi
+  done
 
   # ── Dependency rank via fixed-point iteration (small, shallow DAG) ──────
   declare -A RANK
@@ -1600,7 +2005,121 @@ cmd_render() {
     done
   fi
   UI_FIDELITY[__init__]=1; unset 'UI_FIDELITY[__init__]'
+
+  # ── quality-delta.json, read once into two lookups keyed "<mod>|<metric>" ──
+  # Absent file, absent jq or unreadable JSON leaves both empty, and every
+  # remediation item then reports honestly that nothing has been measured yet
+  # rather than defaulting to a verdict either way.
+  declare -A QD_TARGET QD_CLASS QD_HAS_MOD QD_REGRESSED
+  QD_TARGET[__init__]=1; unset 'QD_TARGET[__init__]'
+  QD_CLASS[__init__]=1; unset 'QD_CLASS[__init__]'
+  QD_HAS_MOD[__init__]=1; unset 'QD_HAS_MOD[__init__]'
+  QD_REGRESSED[__init__]=1; unset 'QD_REGRESSED[__init__]'
+  local dmod dmetric dtarget dclass
+  while IFS=$'\x1f' read -r dmod dmetric dtarget dclass; do
+    if [ -z "$dmod" ] || [ -z "$dmetric" ]; then continue; fi
+    QD_TARGET["${dmod}|${dmetric}"]="$dtarget"
+    QD_CLASS["${dmod}|${dmetric}"]="$dclass"
+    QD_HAS_MOD[$dmod]=1
+    if [ "$dclass" = "regressed" ]; then
+      QD_REGRESSED[$dmod]="${QD_REGRESSED[$dmod]:-}${QD_REGRESSED[$dmod]:+, }${dmetric} (${dtarget})"
+    fi
+  done < <(quality_delta_rows "$qr_delta")
+
+  declare -A QUALITY_STATE
+  QUALITY_STATE[__init__]=1; unset 'QUALITY_STATE[__init__]'
+  local qr_floor_rank; qr_floor_rank="$(qr_severity_rank "$qr_floor")"
+
   for id in $active_ids; do
+    # ── Quality remediation items take every state on this loop from measured
+    # data, and take it FIRST. They cite no DR-### rule, map to no GM-### and
+    # render no screen, so every join below would run over an empty rule set and
+    # arrive at a misleading answer — most damagingly "NO BASELINE DATA", which
+    # reads as "somebody forgot to record a fixture" when the truth is that this
+    # kind of item is not verified by fixture comparison at all. ──────────────
+    if [ -n "${QR_IS_REM[$id]:-}" ]; then
+      local qrm="${QR_MOD[$id]:-${ITEM_MOD[$id]:-}}"
+
+      # GATE. Mechanically BLOCKED until every functional item in the module
+      # carries a declared BUILT: note in its own Status-notes block — the same
+      # narrow, declared trigger stub retirement and item splits use, and for
+      # the same reason: specclaw records no built state of its own, and reading
+      # "done last week" out of free text would be a guess. You cannot measure
+      # the health of code that does not exist yet.
+      local qr_unbuilt="" qr_funcs=0 qr_dep
+      for qr_dep in $(printf '%s' "${ITEM_DEPS[$id]:-}" | tr ',' ' '); do
+        [ -n "$qr_dep" ] || continue
+        [[ " ${active_ids} " == *" ${qr_dep} "* ]] || continue
+        qr_funcs=$((qr_funcs + 1))
+        printf '%s\n' "${FINAL_TAIL[$qr_dep]:-}" > "$workdir/qr-tail.tmp"
+        built_signal_of "$workdir/qr-tail.tmp" >/dev/null 2>&1 && continue
+        qr_unbuilt="${qr_unbuilt}${qr_unbuilt:+, }${qr_dep}"
+      done
+      rm -f "$workdir/qr-tail.tmp"
+      if [ "$qr_funcs" -eq 0 ]; then
+        GATE[$id]="BLOCKED — quality: awaiting functional items (none is planned for ${qrm} yet, so there is no rebuilt module to measure)"
+        GATE_RANK[$id]=3
+      elif [ -n "$qr_unbuilt" ]; then
+        GATE[$id]="BLOCKED — quality: awaiting functional items — no declared \`BUILT:\` note yet on ${qr_unbuilt}"
+        GATE_RANK[$id]=3
+      else
+        GATE[$id]="CLEAR"
+        GATE_RANK[$id]=0
+      fi
+
+      # VERIFICATION. Its own channel, deliberately not one of the four fixture
+      # states: those all answer "is there a recorded legacy output to compare
+      # against?", and for this item the honest answer is that the question does
+      # not apply. `/specclaw:bf-replay --item` refuses it by name.
+      VERIF[$id]="QUALITY-MEASURED — cites no DR-### rule and maps to no GM-### fixture. Acceptance is a measurement, not a recorded output: \`/specclaw:bf-quality --target <rebuilt tree>\` then \`/specclaw:bf-quality --compare\`. \`/specclaw:bf-replay --item ${id}\` refuses this item by design."
+      VERIF_RANK[$id]=1
+
+      # COMPLETION, computed from the delta and never asserted. Bash decides;
+      # the agent narrates what it decided.
+      if [ "${GATE_RANK[$id]}" -eq 3 ]; then
+        QUALITY_STATE[$id]="BLOCKED — nothing to measure yet; ${qrm}'s functional items come first."
+      elif [ ! -f "$qr_delta" ]; then
+        QUALITY_STATE[$id]="OPEN — no \`.specclaw/analysis/quality-delta.json\` exists, so the rebuilt ${qrm} has not been measured. Run \`/specclaw:bf-quality --target <rebuilt tree>\`, then \`/specclaw:bf-quality --compare\`."
+      elif [ -z "${QD_HAS_MOD[$qrm]:-}" ]; then
+        QUALITY_STATE[$id]="OPEN — \`quality-delta.json\` carries no entry for ${qrm}, so nothing about the rebuilt module has been compared. Re-measure the target with \`/specclaw:bf-quality --target\`."
+      else
+        local qr_check="${QR_METRICS[$id]:-}" qr_failing="" qr_dim qr_ts qr_cls
+        # No qualifying hotspot left to retire reduces the criterion to the
+        # other half of it — within thresholds on every dimension, no
+        # regression — which is checked across all four rather than none.
+        if [ -n "$qr_check" ]; then
+          qr_check="${qr_check//,/ }"
+        else
+          qr_check="$QR_DIMENSIONS"
+        fi
+        for qr_dim in $qr_check; do
+          qr_ts="${QD_TARGET["${qrm}|${qr_dim}"]:-}"
+          qr_cls="${QD_CLASS["${qrm}|${qr_dim}"]:-}"
+          if [ -z "$qr_cls" ]; then
+            qr_failing="${qr_failing}${qr_failing:+; }${qr_dim} (no entry in the delta)"
+          elif [ "$qr_cls" = "regressed" ]; then
+            qr_failing="${qr_failing}${qr_failing:+; }${qr_dim} regressed to ${qr_ts}"
+          elif [ "$qr_cls" = "NOT-COMPARABLE" ]; then
+            qr_failing="${qr_failing}${qr_failing:+; }${qr_dim} NOT-COMPARABLE (measured on only one side — an unmeasured dimension is never counted as retired)"
+          elif [ "$(qr_severity_rank "$qr_ts")" -ge "$qr_floor_rank" ]; then
+            qr_failing="${qr_failing}${qr_failing:+; }${qr_dim} still ${qr_ts} on the target, at or above the ${qr_floor} floor"
+          fi
+        done
+        if [ -n "${QD_REGRESSED[$qrm]:-}" ]; then
+          case "$qr_failing" in
+            *regressed*) ;;
+            *) qr_failing="${qr_failing}${qr_failing:+; }${qrm} regressed on ${QD_REGRESSED[$qrm]}" ;;
+          esac
+        fi
+        if [ -n "$qr_failing" ]; then
+          QUALITY_STATE[$id]="OPEN — ${qr_failing}. Per \`quality-delta.json\`${qr_delta_stamp:+ (${qr_delta_stamp})}."
+        else
+          QUALITY_STATE[$id]="DONE — every listed hotspot's dimension measures below the ${qr_floor} floor on the rebuilt ${qrm} and no dimension regressed, per \`quality-delta.json\`${qr_delta_stamp:+ (${qr_delta_stamp})}."
+        fi
+      fi
+      continue
+    fi
+
     local blocked_by="" open_qs="" cid
     for cid in $cq_ids; do
       cq_touches_item "${CQ_RULES[$cid]}" "${CQ_ITEMS[$cid]}" "$id" "${ITEM_RULES[$id]}" || continue
@@ -1828,6 +2347,15 @@ ${FINAL_BODY[$id]}
       entry="${entry}
 **UI fidelity:** ${UI_FIDELITY[$id]}"
     fi
+    # A THIRD AXIS, not a restatement of the two above. Gate answers "can this
+    # start?", Verification "how would it ever be checked?", and this one "has
+    # it been checked, and did it pass?" — a question neither of the others can
+    # carry, and the one thing a reader of a remediation item actually wants.
+    # Recomputed from the delta every run, so it clears by regeneration alone.
+    if [ -n "${QUALITY_STATE[$id]:-}" ]; then
+      entry="${entry}
+**Quality state:** ${QUALITY_STATE[$id]}"
+    fi
     if [ -n "${FINAL_TAIL[$id]}" ]; then
       entry="${entry}
 
@@ -1941,6 +2469,7 @@ ${body}"
 
   # ── Status header + counts ───────────────────────────────────────────────
   local n_clear=0 n_open=0 n_blocked=0 n_verifiable=0 n_pending=0 n_unverif=0 n_nobaseline=0 n_provisional=0
+  local n_qmeasured=0 n_qdone=0
   for id in $active_ids; do
     case "${GATE[$id]}" in
       CLEAR) n_clear=$((n_clear+1)) ;;
@@ -1952,7 +2481,9 @@ ${body}"
       PENDING\ CAPTURE*) n_pending=$((n_pending+1)) ;;
       UNVERIFIABLE*) n_unverif=$((n_unverif+1)) ;;
       NO\ BASELINE\ DATA*) n_nobaseline=$((n_nobaseline+1)) ;;
+      QUALITY-MEASURED*) n_qmeasured=$((n_qmeasured+1)) ;;
     esac
+    case "${QUALITY_STATE[$id]:-}" in DONE*) n_qdone=$((n_qdone+1)) ;; esac
     [ -n "${PROVISIONAL[$id]:-}" ] && n_provisional=$((n_provisional+1))
   done
   local recommended="None — every item is BLOCKED or no active items remain."
@@ -2115,6 +2646,14 @@ ${body}"
   local status_header
   # Built outside the here-doc: a trailing newline inside a $( ) is stripped
   # by command substitution, which would weld this line to the next one.
+  # Present only when this project has quality remediation items at all, so a
+  # backlog rendered without quality.json is unchanged down to the byte.
+  local qr_status_line=""
+  if [ "$n_qmeasured" -gt 0 ]; then
+    qr_status_line="
+**Quality remediation:** ${n_qmeasured} item(s) on the QUALITY-MEASURED channel, ${n_qdone} computed DONE from \`quality-delta.json\`. Severity floor: ${qr_floor} (\`config.yaml\` \`quality.remediation_severity_floor\`). These cite no DR-### and map to no GM-### — see each item's own **Quality state:** line.
+"
+  fi
   local scope_line=""
   if [ -n "$module_scope" ]; then
     scope_line="**Scope:** this run re-planned ${module_scope} only — every other module's items, coverage lines, and human-added status notes were preserved untouched.
@@ -2135,7 +2674,7 @@ ${ui_status_block}
 **Gate counts:** CLEAR: ${n_clear}, OPEN QUESTIONS: ${n_open}, BLOCKED: ${n_blocked} (of $(echo "$active_ids" | wc -w | tr -d ' ') active items; ${#STRIKE_REASON[@]} struck, ${#DEFER_REASON[@]} deferred)
 **Verification counts:** VERIFIABLE: ${n_verifiable}, PENDING CAPTURE: ${n_pending}, UNVERIFIABLE: ${n_unverif}, NO BASELINE DATA: ${n_nobaseline}
 **Provisional (pending a decision):** ${n_provisional} item(s) — independent of Gate/Verification; see each item's own marker
-
+${qr_status_line}
 **Recommended next item to propose:** ${recommended}"
 
   # ── Stub Retirement (CONTRACT.md (m.4)) ──────────────────────────────────
@@ -2387,15 +2926,26 @@ ${draft_coverage}"
   # module the snapshot never measured, unreadable JSON.
   local quality_json="$analysis_dir/quality.json"
   quality_suffix_for() {
-    local mid="$1"
+    local mid="$1" base="" below=""
     [ -f "$quality_json" ] || return 0
     command -v jq >/dev/null 2>&1 || return 0
-    jq -r --arg m "$mid" '
+    base="$(jq -r --arg m "$mid" '
       (.modules[]? | select(.module_id == $m)) as $mod
       | "; quality " + $mod.rollup_status
         + " (" + ([.quality_issues[]? | select(.module_id == $m and .status == "open")] | length | tostring)
         + " open QI)"
-    ' "$quality_json" 2>/dev/null || true
+    ' "$quality_json" 2>/dev/null || true)"
+    [ -n "$base" ] || return 0
+    # THE ADVISORY HALF of the severity floor. A hotspot below the floor is
+    # real and is reported here — it is simply not something the rebuild is
+    # held to, so it gets a count on this line instead of a backlog item.
+    # Suppressed entirely at zero, which is the state of every project whose
+    # floor and register_severity agree, so the line is unchanged for them.
+    below="$(quality_below_floor_count "$quality_json" "$qr_floor" "$mid")"
+    if [ "${below:-0}" -gt 0 ] 2>/dev/null; then
+      base="${base}; ${below} advisory QI below the ${qr_floor} remediation floor (no item generated)"
+    fi
+    printf '%s' "$base"
   }
 
   local rollup_lines="" rollup_any=false
@@ -2558,7 +3108,8 @@ cmd_module_status() {
   done
 
   # ── Backlog items per module: active / struck / deferred ─────────────────
-  declare -A MS_PLANNED MS_TOTAL ITEM_MODULE
+  declare -A MS_PLANNED MS_TOTAL ITEM_MODULE MS_QUALITY
+  MS_QUALITY[__init__]=1; unset 'MS_QUALITY[__init__]'
   local m unassigned_n=0
   for m in $mod_ids; do MS_PLANNED[$m]=0; MS_TOTAL[$m]=0; done
   if [ -f "$backlog_file" ]; then
@@ -2573,6 +3124,14 @@ cmd_module_status() {
         continue
       fi
       ITEM_MODULE[$(block_id "$f")]="$itemmod"
+      # A module's quality remediation item, read off the item's own declared
+      # type and computed **Quality state:** — never re-derived here. This view
+      # computes no verdict of its own; it reports the one rebuild-backlog.md
+      # already computed from quality-delta.json.
+      if grep -qE '^\*\*Item type:\*\* QUALITY-REMEDIATION' "$f"; then
+        MS_QUALITY[$itemmod]="$(printf '%s' "$(block_single_field "$f" "Quality state")" | awk '{print $1}')"
+        MS_QUALITY[$itemmod]="${MS_QUALITY[$itemmod]:-OPEN}"
+      fi
       status="active"
       grep -qE '^\*\*Status:\*\* Deferred' "$f" && status="deferred"
       [[ "$title" == STRUCK* ]] && status="struck"
@@ -2802,7 +3361,7 @@ cmd_module_status() {
   fi
 
   # ── Render ───────────────────────────────────────────────────────────────
-  local rows="" deps verdict_cell tainted_cell partial_cell
+  local rows="" deps verdict_cell tainted_cell partial_cell quality_cell
   for m in $mod_ids; do
     deps="${MS_DEPS[$m]:-}"
     [ -n "$deps" ] && deps="${deps//,/, }" || deps="none"
@@ -2830,14 +3389,24 @@ cmd_module_status() {
       partial_cell="0"
     fi
 
-    rows="${rows}| ${m} | ${MS_NAME[$m]} | ${deps} | ${MS_PLANNED[$m]}/${MS_TOTAL[$m]} | ${MS_CAPTURED[$m]}/${MS_DESIGNED[$m]} | ${verdict_cell} | ${tainted_cell} | ${partial_cell} | ${MS_QS[$m]} |
+    # A module carrying an unfinished quality remediation item is not a
+    # finished module, and this column is the only place that shows up as a
+    # per-module fact. "—" means no such item exists (the normal state of a
+    # project that has never run /specclaw:bf-quality), which is a different
+    # thing from one that exists and has not passed.
+    quality_cell="${MS_QUALITY[$m]:-—}"
+    case "$quality_cell" in
+      BLOCKED|OPEN) quality_cell="⚠ ${quality_cell}" ;;
+    esac
+
+    rows="${rows}| ${m} | ${MS_NAME[$m]} | ${deps} | ${MS_PLANNED[$m]}/${MS_TOTAL[$m]} | ${MS_CAPTURED[$m]}/${MS_DESIGNED[$m]} | ${verdict_cell} | ${tainted_cell} | ${partial_cell} | ${quality_cell} | ${MS_QS[$m]} |
 "
   done
-  [ -n "$rows" ] || rows="| — | _No active modules in module-map.md._ | — | — | — | — | — | — | — |
+  [ -n "$rows" ] || rows="| — | _No active modules in module-map.md._ | — | — | — | — | — | — | — | — |
 "
 
-  local table="| Module | Name | Depends on | Backlog items (planned/total) | Scenarios (captured/designed) | Latest replay verdict | Stub-tainted items | Partially built items | Open questions |
-|---|---|---|---|---|---|---|---|---|
+  local table="| Module | Name | Depends on | Backlog items (planned/total) | Scenarios (captured/designed) | Latest replay verdict | Stub-tainted items | Partially built items | Quality remediation | Open questions |
+|---|---|---|---|---|---|---|---|---|---|
 ${rows}"
 
   # ── Stubs In Effect By Module ────────────────────────────────────────────
@@ -2888,6 +3457,14 @@ ${ms_split_rows}"
   if [ "$total_partial" -gt 0 ]; then
     notes="${notes}
 - **A partially built item is not a built item.** ${total_partial} item(s) had part of their scope deliberately deferred under an \`IS-###\` split, and the remainder has not landed. A \`/specclaw:bf-replay --item\` run for one of those reports PARTIAL and is not that item's final acceptance. This is a different question from stub taint: taint asks whether what was measured was real, this asks whether the item is finished at all."
+  fi
+  local total_quality_open=0
+  for m in $mod_ids; do
+    case "${MS_QUALITY[$m]:-}" in BLOCKED|OPEN) total_quality_open=$(( total_quality_open + 1 )) ;; esac
+  done
+  if [ "$total_quality_open" -gt 0 ]; then
+    notes="${notes}
+- **A module with an open quality remediation item is not a done module.** ${total_quality_open} module(s) carry a \`QUALITY-REMEDIATION\` backlog item whose measured acceptance has not been met — either its functional items are not built yet (\`BLOCKED\`) or the rebuilt module has not measured within thresholds without regressing (\`OPEN\`). That verdict is computed in \`rebuild-backlog.md\` from \`.specclaw/analysis/quality-delta.json\`, never here, and it is cleared by re-measuring the target (\`/specclaw:bf-quality --target\`, then \`--compare\`) — never by editing either document."
   fi
   local total_tainted=0
   for m in $mod_ids; do total_tainted=$(( total_tainted + MS_TAINTED[$m] )); done
