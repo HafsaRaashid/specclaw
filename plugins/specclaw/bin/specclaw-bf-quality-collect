@@ -1443,24 +1443,206 @@ next_qi_num() {
   printf '%s' $((max + 1))
 }
 
-# prior.tsv: key <TAB> qi_id <TAB> first_seen <TAB> status
+# prior.tsv: key <TAB> qi_id <TAB> first_seen <TAB> status <TAB> value
+#            <TAB> superseded_by
+#
+# Value and Superseded by are read for the PD-03 migration, which is the only
+# thing that has ever needed them: when one legacy key collapsed several
+# hotspots, the recorded value is the only evidence in the document for which
+# physical hotspot each id was actually measuring, and superseded_by is what
+# makes a tombstone survive the next full rewrite.
 read_qi_registry() {
   local reg="$1" out="$2"
   : > "$out"
   [ -f "$reg" ] || return 0
   awk -v OFS='\t' '
     /^### QI-[0-9]+/ {
-      if (id != "") print key, id, first, status
+      if (id != "") print key, id, first, status, value, supby
       match($0, /QI-[0-9]+/); id = substr($0, RSTART, RLENGTH)
-      key = ""; first = ""; status = ""
+      key = ""; first = ""; status = ""; value = ""; supby = ""
       next
     }
     id == "" { next }
-    /^[[:space:]]*-[[:space:]]*\*\*Key:\*\*/        { sub(/^[^:]*:\*\*[[:space:]]*/, ""); key = $0; next }
-    /^[[:space:]]*-[[:space:]]*\*\*First seen:\*\*/ { sub(/^[^:]*:\*\*[[:space:]]*/, ""); first = $0; next }
-    /^[[:space:]]*-[[:space:]]*\*\*Status:\*\*/     { sub(/^[^:]*:\*\*[[:space:]]*/, ""); status = $0; next }
-    END { if (id != "") print key, id, first, status }
+    /^[[:space:]]*-[[:space:]]*\*\*Key:\*\*/           { sub(/^[^:]*:\*\*[[:space:]]*/, ""); key = $0; next }
+    /^[[:space:]]*-[[:space:]]*\*\*First seen:\*\*/    { sub(/^[^:]*:\*\*[[:space:]]*/, ""); first = $0; next }
+    /^[[:space:]]*-[[:space:]]*\*\*Status:\*\*/        { sub(/^[^:]*:\*\*[[:space:]]*/, ""); status = $0; next }
+    /^[[:space:]]*-[[:space:]]*\*\*Value:\*\*/         { sub(/^[^:]*:\*\*[[:space:]]*/, ""); value = $0; next }
+    /^[[:space:]]*-[[:space:]]*\*\*Superseded by:\*\*/ { sub(/^[^:]*:\*\*[[:space:]]*/, ""); supby = $0; next }
+    END { if (id != "") print key, id, first, status, value, supby }
   ' "$reg" | grep -v '^[[:space:]]*$' > "$out" || true
+}
+
+# The dated PD-03 migration records already in the registry, verbatim. The
+# document is rewritten in full every run, so a record that is not read back is
+# a record that survives exactly one run — and a migration nobody can find
+# afterwards is indistinguishable from ids that moved on their own.
+read_qi_migrations() {
+  local reg="$1"
+  [ -f "$reg" ] || return 0
+  awk '
+    /^## Migration record/ { inrec = 1; next }
+    /^## / { inrec = 0 }
+    # The section opens with the template comment explaining what it is. That
+    # comment belongs to the TEMPLATE and is re-emitted by the writer, so
+    # reading it back would duplicate the whole block on every run. Records
+    # start at the first ### heading; nothing before it is a record.
+    inrec && !started && /^### / { started = 1 }
+    inrec && started { buf = buf $0 "\n" }
+    END { sub(/\n+$/, "", buf); if (buf != "") print buf }
+  ' "$reg"
+}
+
+# ─── PD-03: the one-time registry migration ──────────────────────────────
+#
+# PD-01 changed the shape of the key, and a registry full of the old shape would
+# otherwise resolve every entry it holds and re-register every hotspot under a
+# fresh id — a mass renumbering, which is the one thing QI permanence exists to
+# prevent. So old keys are MAPPED, never churned.
+#
+#   old (4 fields, slot 0 not duplication-clone)   metric|file|function|module
+#   new (5 fields, slot 0 not duplication-clone)   metric|file|scope|module|start
+#   clone (5 fields, slot 0 duplication-clone)     unchanged, never migrated
+#
+# The two five-field shapes are told apart by slot 0, which is the metric in
+# both. A clone key deliberately carries no line number — editing code above a
+# clone moves it without changing it — so clones are outside this entirely.
+#
+# THREE CASES, and only the third involves any judgement:
+#
+#   one old key, one live hotspot     unambiguous. The id keeps its number and
+#                                     records the new key. The recorded value is
+#                                     NOT consulted: values move on every commit
+#                                     and requiring a match here would supersede
+#                                     healthy entries for having been remeasured.
+#
+#   one old key, no live hotspot      not migratable — nothing tells us the
+#                                     start line of a hotspot that is no longer
+#                                     there. The row keeps its old key and
+#                                     resolves normally. If it ever comes back,
+#                                     the migration runs again on that run and
+#                                     finds the row still waiting, so a
+#                                     resolve-then-return cycle still reopens
+#                                     under the original id.
+#
+#   one old key, several hotspots     the collision. Value-matching decides, and
+#   (or several old ids on one key)   it is the only evidence the document holds
+#                                     for which physical hotspot an id was
+#                                     measuring. Ids are walked lowest-first;
+#                                     each claims the one unclaimed hotspot
+#                                     carrying its recorded value. An id that
+#                                     matches nothing becomes a tombstone naming
+#                                     the survivor. A hotspot no id claimed is
+#                                     new and registers fresh.
+#
+# T3 — WHERE IT STOPS. If a recorded value matches two unclaimed hotspots, or if
+# no id in a collided group matches anything at all, there is nothing in the
+# registry that decides it. The run stops naming every id and value involved.
+# Picking one would silently move a permanent id onto code nobody checked, which
+# is worse than an operator having to look.
+#
+# Idempotence is structural rather than flagged: after a successful migration no
+# old-format key with a live hotspot remains, so the next run finds nothing to
+# do and writes no record.
+migrate_qi_registry() {
+  local prior_all="$1" live="$2" out_prior="$3" out_term="$4" out_rec="$5"
+  : > "$out_rec"
+
+  awk -F'\t' -v OFS='\t' -v PRIOR="$out_prior" -v TERM="$out_term" -v REC="$out_rec" '
+    function old_of(k,   n, a, fn) {
+      n = split(k, a, /[|]/)
+      if (n != 5 || a[1] == "duplication-clone") return ""
+      fn = (a[3] == "<anonymous>" || a[3] == "*global*") ? "" : a[3]
+      return a[1] "|" a[2] "|" fn "|" a[4]
+    }
+    function is_old(k,   n, a) {
+      n = split(k, a, /[|]/)
+      return (n == 4 && a[1] != "duplication-clone")
+    }
+    function numlike(v) { return (v ~ /^-?[0-9]+([.][0-9]+)?$/) }
+    function same_value(a, b) {
+      if (numlike(a) && numlike(b)) return ((a + 0) == (b + 0))
+      return (a == b)
+    }
+    # live.tsv first: newkey <TAB> value
+    NR == FNR {
+      ok = old_of($1)
+      if (ok == "") next
+      n = ++lc[ok]
+      lk[ok, n] = $1
+      lv[ok, n] = $2
+      next
+    }
+    # prior rows: key <TAB> id <TAB> first_seen <TAB> status <TAB> value <TAB> superseded_by
+    {
+      pn = ++prows
+      pkey[pn] = $1; pid[pn] = $2; pfirst[pn] = $3; pstat[pn] = $4; pval[pn] = $5; psup[pn] = $6
+      if (is_old($1)) { gn = ++gc[$1]; gi[$1, gn] = pn }
+    }
+    END {
+      changed = 0
+      for (pn = 1; pn <= prows; pn++) newkey[pn] = pkey[pn]
+
+      for (k in gc) {
+        ng = gc[k]; nl = (k in lc) ? lc[k] : 0
+        if (nl == 0) continue                      # not migratable; leave as it is
+        if (ng == 1 && nl == 1) {                  # unambiguous
+          pn = gi[k, 1]
+          newkey[pn] = lk[k, 1]
+          printf "- %s — key migrated: `%s` → `%s`\n", pid[pn], k, lk[k, 1] >> REC
+          changed = 1
+          continue
+        }
+        # the collision. Ids ascend already: read_qi_registry emits in document
+        # order and the writer sorts by id, so gi[k, *] is lowest-first.
+        for (i = 1; i <= nl; i++) claimed[i] = 0
+        survivor = ""
+        for (g = 1; g <= ng; g++) {
+          pn = gi[k, g]; hits = 0; hit = 0
+          for (i = 1; i <= nl; i++) {
+            if (!claimed[i] && same_value(pval[pn], lv[k, i])) { hits++; hit = i }
+          }
+          if (hits > 1) {
+            printf "  %s (recorded value %s) matches %d distinct hotspots under key %s\n", pid[pn], pval[pn], hits, k > "/dev/stderr"
+            fatal = 1
+            continue
+          }
+          if (hits == 1) {
+            claimed[hit] = 1
+            newkey[pn] = lk[k, hit]
+            if (survivor == "") survivor = pid[pn]
+            printf "- %s — key migrated: `%s` → `%s` (matched on recorded value %s)\n", pid[pn], k, lk[k, hit], pval[pn] >> REC
+            changed = 1
+          } else {
+            loser[pn] = 1
+          }
+        }
+        if (fatal) continue
+        if (survivor == "") {
+          printf "  key %s collapsed %d hotspots and no recorded value matches any of them\n", k, nl > "/dev/stderr"
+          for (g = 1; g <= ng; g++) { pn = gi[k, g]; printf "    %s recorded value %s\n", pid[pn], pval[pn] > "/dev/stderr" }
+          fatal = 1
+          continue
+        }
+        for (g = 1; g <= ng; g++) {
+          pn = gi[k, g]
+          if (!(pn in loser)) continue
+          pstat[pn] = "superseded-duplicate"; psup[pn] = survivor
+          printf "- %s — superseded-duplicate of %s (recorded value %s matched no hotspot under the new key)\n", pid[pn], survivor, pval[pn] >> REC
+          changed = 1
+        }
+      }
+
+      if (fatal) exit 3
+
+      for (pn = 1; pn <= prows; pn++) {
+        if (pstat[pn] == "superseded-duplicate")
+          print pkey[pn], pid[pn], pfirst[pn], pstat[pn], pval[pn], psup[pn] >> TERM
+        else
+          print newkey[pn], pid[pn], pfirst[pn], pstat[pn], pval[pn], psup[pn] >> PRIOR
+      }
+      exit (changed ? 0 : 1)
+    }
+  ' "$live" "$prior_all"
 }
 
 # ─── PD-02: the identity assertion, run before anything is written ──────────
@@ -1783,9 +1965,9 @@ def reason($cap; $ran; $onPath):
 | ( reduce ($cand | to_entries)[] as $e
       ( {n: $nextQi, out: []};
         ($P[$e.value.key]) as $known
-        | if $known then .out += [$e.value + {id: $known.id, first_seen: $known.first_seen, status: "open", excluded_by: null}]
+        | if $known then .out += [$e.value + {id: $known.id, first_seen: $known.first_seen, status: "open", excluded_by: null, superseded_by: null}]
           else .out += [$e.value + {id: ("QI-" + (.n | tostring | if length < 3 then ("00" + .)[-3:] else . end)),
-                                    first_seen: $at, status: "open", excluded_by: null}] | .n += 1
+                                    first_seen: $at, status: "open", excluded_by: null, superseded_by: null}] | .n += 1
           end )
     | .out ) as $openIssues
 # A hotspot that no longer exceeds its threshold is RESOLVED, never removed. Both
@@ -1845,11 +2027,39 @@ def reason($cap; $ran; $onPath):
                    else ($k[4] | tonumber) end),
            peer_file: (if $isClone then ($k[2] | blank_to_null) else null end),
            fragment_sha256: (if $isClone then ($k[4] | blank_to_null) else null end),
-           metric: $k[0], value: null, severity: null} ] ) as $resolved
+           metric: $k[0], value: null, severity: null, superseded_by: null} ] ) as $resolved
+
+# ── terminal tombstones (PD-03) ──────────────────────────────────────────
+#
+# A `superseded-duplicate` entry records that its id was, for some stretch of
+# this registry's history, pointing at a hotspot another id now owns. It is
+# carried through verbatim and is never re-judged: it is not matched against the
+# live set, never reopens, never resolves.
+#
+# Its key is the HISTORICAL one, in the old four-field shape, and is deliberately
+# left that way — that key is the fact the entry exists to record. It is also why
+# these are carried as a LIST rather than folded into $P: two tombstones from one
+# collision share a key, and a map would silently keep one of them.
+#
+# Value is preserved because it is the evidence the migration matched on, so a
+# reader can check the decision rather than take it.
+| ( $terminal[0] | map(
+      (.[0] | split("|")) as $k
+    | ($k[0] == "duplication-clone" and ($k | length) >= 5) as $isClone
+    | { id: .[1], key: .[0], first_seen: .[2], status: .[3],
+        value: (if ((.[4] // "") | test("^-?[0-9]+([.][0-9]+)?$")) then (.[4] | tonumber) else null end),
+        superseded_by: ((.[5] // "") | blank_to_null),
+        module_id: ($k[3] // "MOD-UNASSIGNED"),
+        file: ($k[1] | blank_to_null),
+        function: (if $isClone then null else ($k[2] | scope_to_function) end),
+        peer_file: (if $isClone then ($k[2] | blank_to_null) else null end),
+        fragment_sha256: (if $isClone then ($k[4] | blank_to_null) else null end),
+        scope: null, start: null,
+        metric: $k[0], severity: null, excluded_by: null } ) ) as $terminalIssues
 
 # One registry projection, named once, so quality_issues[] and the clone list's
 # qi_id back-reference cannot disagree about which id a clone holds.
-| ( ($openIssues + $resolved) | sort_by(.id) ) as $allIssues
+| ( ($openIssues + $resolved + $terminalIssues) | sort_by(.id) ) as $allIssues
 | ( [ $allIssues[] | select(.metric == "duplication-clone") | {key: .key, value: .id} ]
     | from_entries ) as $cloneQi
 
@@ -2122,8 +2332,17 @@ cmd_collect() {
 
   # ── prior QI registry, read BEFORE anything is written ─────────────────────
   local reg; reg="$(qi_registry_path "$specclaw_abs")"
-  read_qi_registry "$reg" "$W/prior_qi.tsv"
+  read_qi_registry "$reg" "$W/prior_qi_all.tsv"
   local next_qi; next_qi="$(next_qi_num "$reg")"
+  local qi_migrations; qi_migrations="$(read_qi_migrations "$reg")"
+
+  # A `superseded-duplicate` entry is TERMINAL and is carried, never re-judged.
+  # It is also the one entry type that may share a key with another, because the
+  # key it preserves is the historical one it was a duplicate under — so it must
+  # stay out of the prior MAP, whose from_entries would silently drop all but one
+  # of them. Two files, two shapes: a map for live matching, a list for carrying.
+  awk -F'\t' '$4 == "superseded-duplicate"' "$W/prior_qi_all.tsv" > "$W/terminal_qi.tsv" || true
+  awk -F'\t' '$4 != "superseded-duplicate"' "$W/prior_qi_all.tsv" > "$W/prior_qi.tsv" || true
 
   local generated_at; generated_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
@@ -2136,7 +2355,6 @@ cmd_collect() {
   tsv_json "$W/funcs.tsv"   > "$W/funcs.json"
   tsv_json "$W/dup.tsv"     > "$W/dup.json"
   tsv_json "$W/filemod.tsv" > "$W/filemod.json"
-  tsv_json "$W/prior_qi.tsv" > "$W/prior_qi.json"
   tsv_json "$W/excluded.tsv" > "$W/excluded.json"
   tsv_json "$W/clones.tsv"   > "$W/clones.json"
 
@@ -2148,7 +2366,7 @@ cmd_collect() {
   # than anything to do with quality.
   write_agg_jq > "$W/agg.jq"
 
-  # --slurpfile, NOT --argjson "$(cat …)", for the six per-file arrays. Those
+  # --slurpfile, NOT --argjson "$(cat …)", for the per-file arrays. Those
   # arrays grow one element per source file, so on a large repo the command
   # substitution put multiple megabytes onto argv and the whole run died with
   # "Argument list too long" (ARG_MAX) before jq ever started. --slurpfile reads
@@ -2156,32 +2374,99 @@ cmd_collect() {
   # stream in an array — each file here holds exactly one value (a top-level
   # array from tsv_json) — so every reference in agg.jq derefs $X[0]. Same idiom
   # the compare path already uses. The small fixed-size args stay on argv.
-  jq -n \
-    --argjson th "$thresholds" \
-    --slurpfile files    "$W/files.json" \
-    --slurpfile loc      "$W/loc.json" \
-    --slurpfile funcs    "$W/funcs.json" \
-    --slurpfile dup      "$W/dup.json" \
-    --slurpfile filemod  "$W/filemod.json" \
-    --slurpfile prior    "$W/prior_qi.json" \
-    --slurpfile excluded "$W/excluded.json" \
-    --slurpfile clones   "$W/clones.json" \
-    --argjson cloneCaps "$clone_caps" \
-    --argjson cloneCensus "$(printf '{"clones_found":%s,"clones_outside_scope":%s,"clones_in_scope":%s,"duplicated_lines_found":%s}' "$cl_found" "$cl_dropped" "$cl_inscope" "$cl_duplines")" \
-    --argjson exclCfg "$excl_effective_json" \
-    --arg exclHash "$excl_hash" \
-    --argjson exclTotal "$n_excluded" \
-    --argjson tools "$(printf '{"scc":%s,"lizard":%s,"jscpd":%s}' "$scc_ran" "$lizard_ran" "$jscpd_ran")" \
-    --argjson toolsOnPath "$(printf '{"scc":%s,"lizard":%s,"jscpd":%s}' "$scc_ok" "$lizard_ok" "$jscpd_ok")" \
-    --arg scope "$scope_label" \
-    --arg path "$display_path" \
-    --arg at "$generated_at" \
-    --arg mapStatus "$map_status" \
-    --argjson nextQi "$next_qi" \
-    --argjson enumerated "$n_enumerated" \
-    --argjson measured "$n_measured" \
-    --argjson ambiguous "$n_ambiguous" \
-    -f "$W/agg.jq" > "$W/quality.json"
+  #
+  # Named once and called twice: the PD-03 migration needs the live hotspot set
+  # BEFORE it can map an old key onto it, and the only honest source of that set
+  # is the same program that decides what a hotspot is. Duplicating twenty jq
+  # arguments to get it would be two definitions of one measurement.
+  _run_agg() {
+    jq -n \
+      --argjson th "$thresholds" \
+      --slurpfile files    "$W/files.json" \
+      --slurpfile loc      "$W/loc.json" \
+      --slurpfile funcs    "$W/funcs.json" \
+      --slurpfile dup      "$W/dup.json" \
+      --slurpfile filemod  "$W/filemod.json" \
+      --slurpfile prior    "$1" \
+      --slurpfile terminal "$2" \
+      --slurpfile excluded "$W/excluded.json" \
+      --slurpfile clones   "$W/clones.json" \
+      --argjson cloneCaps "$clone_caps" \
+      --argjson cloneCensus "$(printf '{"clones_found":%s,"clones_outside_scope":%s,"clones_in_scope":%s,"duplicated_lines_found":%s}' "$cl_found" "$cl_dropped" "$cl_inscope" "$cl_duplines")" \
+      --argjson exclCfg "$excl_effective_json" \
+      --arg exclHash "$excl_hash" \
+      --argjson exclTotal "$n_excluded" \
+      --argjson tools "$(printf '{"scc":%s,"lizard":%s,"jscpd":%s}' "$scc_ran" "$lizard_ran" "$jscpd_ran")" \
+      --argjson toolsOnPath "$(printf '{"scc":%s,"lizard":%s,"jscpd":%s}' "$scc_ok" "$lizard_ok" "$jscpd_ok")" \
+      --arg scope "$scope_label" \
+      --arg path "$display_path" \
+      --arg at "$generated_at" \
+      --arg mapStatus "$map_status" \
+      --argjson nextQi "$3" \
+      --argjson enumerated "$n_enumerated" \
+      --argjson measured "$n_measured" \
+      --argjson ambiguous "$n_ambiguous" \
+      -f "$W/agg.jq" > "$4"
+  }
+
+  # ── PD-03: migrate the registry onto the new key shape ───────────────────
+  #
+  # Legacy scope only, for the same reason the registry itself is legacy-only: a
+  # target run has no registry to migrate. Guarded on there being an old-format
+  # key at all, so the steady state costs nothing — no dry pass, no second jq.
+  local n_old_keys
+  n_old_keys="$(awk -F'\t' '{n = split($1, a, /[|]/); if (n == 4 && a[1] != "duplication-clone") c++} END {print c + 0}' "$W/prior_qi.tsv")"
+  if ! $is_target && [ "$n_old_keys" -gt 0 ]; then
+    printf '[]' > "$W/empty.json"
+    # The dry pass. Its ids are discarded — only the live keys and their measured
+    # values are read, which is exactly what the migration has to match against.
+    _run_agg "$W/empty.json" "$W/empty.json" 1 "$W/dry.json"
+    jq -r '
+      .quality_issues[]
+      | select(.status == "open") | select(.metric != "duplication-clone")
+      | [ .key, (if .value == null then "" else (.value | tostring) end) ] | @tsv
+    ' "$W/dry.json" > "$W/live_qi.tsv"
+
+    : > "$W/prior_qi_new.tsv"
+    cp "$W/terminal_qi.tsv" "$W/terminal_qi_new.tsv"
+    local mrc=0
+    migrate_qi_registry "$W/prior_qi.tsv" "$W/live_qi.tsv" \
+      "$W/prior_qi_new.tsv" "$W/terminal_qi_new.tsv" "$W/migration.txt" || mrc=$?
+
+    # T3. awk has already named the ids and values on stderr; this says what the
+    # operator is being asked to decide, and refuses to decide it for them.
+    if [ "$mrc" = "3" ]; then
+      die "QUALITY-MIGRATION-AMBIGUOUS: the recorded values in ${reg#"$project_root"/} do not decide which hotspot a colliding QI-### was measuring (details above).
+Nothing was written. Resolve it by hand in the registry — give each colliding entry the Value of the hotspot it belongs to — and re-run. Guessing here would move a permanent id onto code nobody checked."
+    fi
+
+    mv "$W/prior_qi_new.tsv" "$W/prior_qi.tsv"
+    mv "$W/terminal_qi_new.tsv" "$W/terminal_qi.tsv"
+
+    # mrc 0 = something moved, 1 = nothing did. A record is written only for the
+    # former, which is what makes a second run a genuine no-op rather than an
+    # append of identical paragraphs.
+    if [ "$mrc" = "0" ] && [ -s "$W/migration.txt" ]; then
+      local mig_new
+      mig_new="### ${generated_at}
+
+Identity keys gained a start line so that two hotspots in one file can no longer share one id. Exclusion config \`${excl_hash}\`.
+
+$(cat "$W/migration.txt")"
+      if [ -n "$qi_migrations" ]; then
+        qi_migrations="${mig_new}
+
+${qi_migrations}"
+      else
+        qi_migrations="$mig_new"
+      fi
+    fi
+  fi
+
+  tsv_json "$W/prior_qi.tsv"    > "$W/prior_qi.json"
+  tsv_json "$W/terminal_qi.tsv" > "$W/terminal_qi.json"
+
+  _run_agg "$W/prior_qi.json" "$W/terminal_qi.json" "$next_qi" "$W/quality.json"
 
   # PD-02. Before the archive rotation, before the copy, before the registry:
   # a run that cannot tell two hotspots apart writes nothing at all.
@@ -2217,7 +2502,7 @@ cmd_collect() {
   if $is_target; then
     echo "Target scope: no QI registered (QI ids name legacy hotspots only)." >&2
   else
-    write_qi_registry "$reg" "$W/quality.json" "$generated_at" "$display_path" "$project_root"
+    write_qi_registry "$reg" "$W/quality.json" "$generated_at" "$display_path" "$project_root" "$qi_migrations"
     new_count="$(jq -r --arg at "$generated_at" '[.quality_issues[] | select(.status == "open" and .first_seen == $at)] | length' "$W/quality.json")"
     open_count="$(jq -r '[.quality_issues[] | select(.status == "open")] | length' "$W/quality.json")"
     resolved_count="$(jq -r '[.quality_issues[] | select(.status == "resolved")] | length' "$W/quality.json")"
@@ -2242,7 +2527,7 @@ cmd_collect() {
 # plus one per newly-found hotspot. No id can be lost, so the id space only ever
 # grows. See templates/quality-issues.md for the full contract.
 write_qi_registry() {
-  local reg="$1" qjson="$2" at="$3" path="$4" project_root="$5"
+  local reg="$1" qjson="$2" at="$3" path="$4" project_root="$5" migrations="${6:-}"
   mkdir -p "$(dirname "$reg")"
   local tmp entries template_file
   tmp="$(mktemp)"
@@ -2255,6 +2540,10 @@ write_qi_registry() {
       + "- **Module:** " + .module_id + "\n"
       + "- **File:** " + (.file // "—") + "\n"
       + "- **Function:** " + (.function // "—") + "\n"
+      # The start line, which is now part of the key rather than decoration. A
+      # file with three unnamed hotspots renders three entries that a human can
+      # otherwise only tell apart by their Value — and Value moves.
+      + "- **Line:** " + (if .start == null then "—" else (.start | tostring) end) + "\n"
       + "- **Metric:** " + .metric + "\n"
       # Present only on a duplication-clone entry. Its File field names one side
       # of the pair and would read as the whole finding without this — a clone
@@ -2264,6 +2553,11 @@ write_qi_registry() {
       + "- **Value:** " + (if .value == null then "—" else (.value | tostring) end) + "\n"
       + "- **Severity:** " + (.severity // "—") + "\n"
       + "- **Status:** " + .status + "\n"
+      # Present ONLY on a superseded-duplicate entry. Without it the status is a
+      # dead end: the reader is told this id stopped meaning something and not
+      # what now means it.
+      + (if (.superseded_by // null) == null then ""
+         else "- **Superseded by:** " + .superseded_by + "\n" end)
       # Present ONLY on an excluded-by-scope entry, and it carries the hash of
       # the exclusion config that made the decision — so a reader who wonders
       # why a registered hotspot stopped being measured can identify the exact
@@ -2284,6 +2578,8 @@ write_qi_registry() {
   doc="$(substitute "$doc" '{{path}}' "$path")"
   doc="$(substitute "$doc" '{{date}}' "$at")"
   doc="$(substitute "$doc" '{{quality_issues}}' "$entries")"
+  [ -n "$migrations" ] || migrations="_No migration has been applied to this registry._"
+  doc="$(substitute "$doc" '{{migrations}}' "$migrations")"
   printf '%s\n' "$doc" > "$tmp"
 
   mv "$tmp" "$reg"
