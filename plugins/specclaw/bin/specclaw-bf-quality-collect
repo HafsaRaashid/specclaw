@@ -1761,6 +1761,39 @@ ${bad}
 Their measurement rows carried no start-line column (lizard --csv fields 10 and 11). Registering them would re-create the collision PD-01 fixes, so the run stops instead."
   fi
 
+  # 1b. A scope still wearing the measuring tool quotes. Nothing downstream is
+  #     harmed by a quoted scope — it keys and compares like any other string —
+  #     which is exactly why it went unnoticed for a release while `"Login"` and
+  #     `Login` named the same function and no longer met. It cannot recur while
+  #     the CSV parser unquotes, so this asserts that it still does, at the one
+  #     place that would otherwise notice nothing at all.
+  #
+  #     Tombstones are exempt for the same reason they are exempt from the
+  #     uniqueness check below: such an entry preserves the historical key it was
+  #     a duplicate under, verbatim, and one written while scopes were quoted is
+  #     recording a quoted scope accurately. Normalising it would falsify it, and
+  #     failing the run over it would strand a registry nobody can fix.
+  #
+  #     THE SURROUNDING PAIR, not a quote anywhere. This predicate is the same
+  #     one unquoted_of() migrates on, deliberately: an assertion that refuses
+  #     more than the migration can repair is a run that dies with nothing able
+  #     to clear it. A quote INSIDE a name is a name — the CSV parser honours ""
+  #     as an escaped quote, so `say "hi" ok` is what that function is called —
+  #     and it is only the wrapper that means the field was never unquoted.
+  bad="$(jq -r '
+    [ .quality_issues[]
+      | select(.status != "superseded-duplicate")
+      | select(.metric != "duplication-clone")
+      | select((.key | split("|") | length) >= 3)
+      | select((.key | split("|") | .[2]) | test("^\".*\"$"))
+      | "  " + .id + "  " + .key ]
+    | join("\n")' "$qjson" 2>/dev/null)"
+  if [ -n "$bad" ]; then
+    die "QI identity carries a quoted scope — the function name reached the key without being normalised:
+${bad}
+A scope is the bare function name. Quoted, it keys as a different hotspot from the same function measured by anything else, which silently splits one id into two. Nothing was written."
+  fi
+
   # 2. Two entries, one key. Names BOTH sides and their values, because the next
   #    question is always which one is which.
   bad="$(jq -r '

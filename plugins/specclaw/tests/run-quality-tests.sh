@@ -116,6 +116,9 @@
 #                                   seven columns survives a comma in long_name, in
 #                                   the function name and in the path; a row wider
 #                                   than eleven still yields the right start/end
+#  42  two hotspots, real rows    → two unnamed functions in one file, measured by
+#                                   rows of the real shape, register two ids with
+#                                   distinct keys and keep them on a re-run
 #
 # Plain bash + coreutils, plus jq for assertions (same as run-parser-tests.sh
 # and run-cs-body-parser-tests.sh). Run from anywhere:
@@ -3086,6 +3089,36 @@ assert_contains "41g the thirteen-column row reads start at 10, not at \$NF" \
   'complexity|src/Calc.cs|Wide|MOD-001|900' "$c41_keys"
 assert_contains "41h \"\" is one escaped quote, and the name keeps it" \
   'complexity|src/Calc.cs|say "hi" ok|MOD-001|1100' "$c41_keys"
+
+# ── Case 42 — two unnamed functions in one file, measured for real ────────────
+#
+# Case 32 asks this already, with rows that have no quotes and no commas. The
+# collision it guards against returned the moment the rows were real: both start
+# lines arrived empty, both keys ended in a blank slot, and the run stopped. So
+# it is asked again in the shape the tool actually emits.
+
+echo
+echo "--- Case 42: two unnamed functions, real rows, two ids that stay put ---"
+C42="$WORK/c42"; new_project "$C42"; module_map_one "$C42"
+S42="$WORK/c42-stub"
+stub_scc "$S42" '[{"Name":"C#","Files":[{"Location":"src/Calc.cs","Lines":80,"Code":70}]}]'
+stub_lizard "$S42" "$(liz_row_real 'src/Calc.cs' '' 34 200 10 210)
+$(liz_row_real 'src/Calc.cs' '' 30 180 300 480 '( int x , int y , int z )')"
+
+( cd "$C42" && PATH="$(clean_path "$S42")" bash "$QUALITY_BIN" collect .specclaw >/dev/null 2>&1 )
+C42_JSON="$C42/.specclaw/analysis/quality.json"
+
+c42_keys="$(jq -r '[.quality_issues[] | select(.metric == "complexity") | .key] | sort | join(" ")' "$C42_JSON" 2>/dev/null)"
+assert_eq_nonempty "42a two unnamed functions differ by start line and nothing else" \
+  'complexity|src/Calc.cs|<anonymous>|MOD-001|10 complexity|src/Calc.cs|<anonymous>|MOD-001|300' "$c42_keys"
+
+c42_dupes="$(jq -r '[.quality_issues[] | select(.status != "superseded-duplicate")] | group_by(.key) | map(select(length > 1)) | length' "$C42_JSON" 2>/dev/null)"
+assert_eq_nonempty "42b and no two hotspots share a key" "0" "$c42_dupes"
+
+c42_first="$(jq -r '[.quality_issues[] | .id + "=" + .key] | sort | join(" ")' "$C42_JSON" 2>/dev/null)"
+( cd "$C42" && PATH="$(clean_path "$S42")" bash "$QUALITY_BIN" collect .specclaw >/dev/null 2>&1 )
+c42_second="$(jq -r '[.quality_issues[] | .id + "=" + .key] | sort | join(" ")' "$C42_JSON" 2>/dev/null)"
+assert_eq_nonempty "42c and a re-run gives every one of them the same id" "$c42_first" "$c42_second"
 
 # ── Result ───────────────────────────────────────────────────────────────────
 

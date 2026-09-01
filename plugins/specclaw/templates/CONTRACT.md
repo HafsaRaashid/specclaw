@@ -233,7 +233,11 @@ for. `scope` and `start_line` are what make two hotspots in one file distinct:
 the measuring tool reports the short function name, so two overloads are one
 string and every unnamed function is reported under one name, and the
 four-field key that preceded this gave several hotspots one id and then deleted
-all but one of them on the following run. A renamed file yields a new `QI-NNN`
+all but one of them on the following run. `scope` is that name UNQUOTED — the
+tool emits it as a quoted CSV field, and a key carrying the quotes makes
+`"Login"` a different hotspot from the same `Login` measured by anything else;
+a registry written before that was fixed is migrated in place, keeping every id
+and `First seen` date. A renamed file yields a new `QI-NNN`
 plus a resolved old one: inferring the rename would carry an id, and its whole
 history, onto code nobody measured.
 
