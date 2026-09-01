@@ -174,6 +174,39 @@ GIT_DIR_BIN=""
 if command -v git >/dev/null 2>&1; then GIT_DIR_BIN=":$(dirname "$(command -v git)")"; fi
 clean_path() { printf '%s:%s%s:/usr/bin:/bin' "$1" "$JQ_DIR" "$GIT_DIR_BIN"; }
 
+# q_norm_identity — reads an artifact on stdin and removes what the QI-identity
+# change ADDED or RESHAPED, so the two neutrality diffs (21b, 23i) keep asking
+# the question they were written to ask.
+#
+# Both of those cases byte-compare this collector's output against an older one
+# fetched from origin/main. That comparison is about MEASUREMENTS: every status,
+# rollup, LOC, coverage row and QI id must be identical. It was never about the
+# artifact's field list, and a field that did not exist on the other side is not
+# a changed measurement — which is why both cases already strip `exclusions`,
+# `duplication_clones` and the clone threshold keys.
+#
+# Three blocks are new and are pure projections of fields still under
+# comparison. `scope`, `start` and `superseded_by` are likewise new per entry.
+# And `key` is deliberately reshaped: it gained a start line so that two
+# hotspots in one file stop sharing an id. So the key is normalised BACK to the
+# four-field form rather than deleted — a hotspot that moved to a different
+# file, metric or module still shows up as a difference, which is the failure
+# these cases exist to catch.
+q_norm_identity() {
+  jq -S '
+    def old_key:
+      (split("|")) as $k
+      | if $k[0] == "duplication-clone" then .
+        elif ($k | length) == 5 then
+          [ $k[0], $k[1],
+            (if $k[2] == "<anonymous>" or $k[2] == "*global*" then "" else $k[2] end),
+            $k[3] ] | join("|")
+        else . end;
+    del(.scan_funnel, .module_rollup_summary, .report_blocks)
+    | (.quality_issues // []) |= map(del(.scope, .start, .superseded_by) | .key |= old_key)
+  '
+}
+
 # ── Fixture + stub writers ──────────────────────────────────────────────────
 #
 # Fixtures are written by the tests themselves rather than committed, per
@@ -1879,7 +1912,8 @@ q_strip() {
          | del(.generated_at, .exclusions)
          | .files |= del(.enumerated, .measured, .excluded)
          | (.quality_issues // []) |= map(del(.excluded_by)
-             | if .first_seen == $ga then .first_seen = "<registered by this run>" else . end)' "$1"
+             | if .first_seen == $ga then .first_seen = "<registered by this run>" else . end)' "$1" \
+    | q_norm_identity
 }
 PRE21="$WORK/pre-quality-collect"
 C21B_JSON=""
@@ -2101,7 +2135,8 @@ q_strip_clones() {
          | del(.generated_at, .duplication_clones)
          | .thresholds |= del(.clone_qi_min_lines, .clone_function_min_overlap)
          | (.quality_issues // []) |= map(del(.peer_file, .fragment_sha256)
-             | if .first_seen == $ga then .first_seen = "<this run>" else . end)' "$1"
+             | if .first_seen == $ga then .first_seen = "<this run>" else . end)' "$1" \
+    | q_norm_identity
 }
 # The pre-change binary is written into the REAL bin/ directory, not $WORK, and
 # that placement is the whole point. The collector resolves its exclusion
