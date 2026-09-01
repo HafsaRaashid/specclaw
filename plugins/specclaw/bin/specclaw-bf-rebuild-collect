@@ -2017,7 +2017,7 @@ ${qr_ledger}}
   QD_REGRESSED[__init__]=1; unset 'QD_REGRESSED[__init__]'
   local dmod dmetric dtarget dclass
   while IFS=$'\x1f' read -r dmod dmetric dtarget dclass; do
-    [ -n "$dmod" ] && [ -n "$dmetric" ] || continue
+    if [ -z "$dmod" ] || [ -z "$dmetric" ]; then continue; fi
     QD_TARGET["${dmod}|${dmetric}"]="$dtarget"
     QD_CLASS["${dmod}|${dmetric}"]="$dclass"
     QD_HAS_MOD[$dmod]=1
