@@ -855,6 +855,12 @@ run_scc() {
 # start/end are APPENDED, never inserted: the aggregation program reads these
 # rows positionally as .[0]..[4], so a new column anywhere but the end would
 # silently reassign every metric it reads.
+#
+# `function` is NORMALISED here and nowhere else — unquoted by the CSV parser as
+# it reads the field, so every consumer downstream of this file sees the bare
+# name. It is part of a QI key, so the boundary the value enters on is the only
+# honest place to do that; a second unquoting further in would be a second
+# opinion about what the name is.
 run_lizard() {
   local project_root="$1" scope_arg="$2" files="$3" out="$4" dir_names="$5"
   : > "$out"
@@ -880,22 +886,80 @@ run_lizard() {
   #   1 nloc  2 ccn  3 tokens  4 params  5 length  6 location
   #   7 file  8 function  9 long_name  10 start_line  11 end_line
   #
-  # Fields 1-5 are numeric by contract. A row where they are not is a
-  # parse_error for that row, never a silently coerced zero — and it is exactly
-  # what a comma inside a path would produce, shifting every later field.
+  # SPLIT ON QUOTED FIELDS, NOT ON COMMAS. Columns 6-9 are quoted and three of
+  # them routinely CONTAIN commas, so `-F','` does not read this format — it
+  # reads a shifted one. lizard_ext/csvoutput.py builds each row as
   #
-  # 10 and 11 are read for the clone-to-function join and are treated as
-  # OPTIONAL: a row that reaches NF == 8 but no further is still a perfectly
-  # good complexity measurement, and losing it because a lizard build stopped
-  # emitting line numbers would trade a metric for a nicety. Such a row carries
-  # empty ranges and simply never matches a clone.
-  awk -F',' -v OFS='\t' '
-    NF < 8 { next }
-    ($1 ~ /^[0-9]+$/) && ($2 ~ /^[0-9]+$/) && ($4 ~ /^[0-9]+$/) && ($5 ~ /^[0-9]+$/) {
-      s = (NF >= 10 && $10 ~ /^[0-9]+$/) ? $10 : ""
-      e = (NF >= 11 && $11 ~ /^[0-9]+$/) ? $11 : ""
+  #   ",".join(str(field) for field in fields)
+  #
+  # with 6-9 wrapped in quotes and nothing escaped, because it pre-sanitises
+  # instead: `name.replace('"', "'")`. So a quote can never appear INSIDE a
+  # field, but a comma can, and does:
+  #
+  #   long_name  every parameter list of arity >= 2 — "Run( int a , int b )"
+  #   function   C++ operator, and templated names — "P::operator ,"
+  #   file       any path with a comma in it
+  #
+  # Under `-F','` a two-parameter function therefore shifted 10 and 11 off the
+  # end and both arrived EMPTY, which the optional-range branch below read as
+  # "this lizard build emits no line numbers" and passed on as a blank start —
+  # the one thing assert_qi_identity refuses to register. Real lizard against
+  # real code produced almost nothing but such rows, so the run did not degrade,
+  # it stopped. Worse than the loss, one shape mislabelled: a row ending
+  # `int b)",7` put the START line in the end field, past the e < s guard, which
+  # cannot fire while s is empty.
+  #
+  # Fields 1-5 are numeric by contract. A row where they are not is a
+  # parse_error for that row, never a silently coerced zero.
+  #
+  # 10 and 11 are read for the clone-to-function join and for QI identity, and
+  # are still treated as OPTIONAL: a row that reaches 8 fields but no further is
+  # a perfectly good complexity measurement, and losing it because a lizard
+  # build stopped emitting line numbers would trade a metric for a nicety. Such
+  # a row carries empty ranges and simply never matches a clone. What changed is
+  # that a blank range now means the columns are ABSENT, not merely misread.
+  #
+  # Read at FIXED indices, never $NF: csv_output ends with `fields.extend(...)`,
+  # so any -E extension carrying FUNCTION_INFO (lizardnd, lizardio, halstead and
+  # six more) appends its own columns AFTER end, and a row can legitimately
+  # arrive wider than eleven.
+  #
+  # csv_split also UNQUOTES, which is where the function name loses the quotes
+  # it used to carry all the way into a QI key. One normalisation, at the
+  # boundary the value enters on. It honours "" as an escaped quote even though
+  # this producer cannot emit one, so the parser is a CSV parser and not a
+  # transcription of one tool's current habits.
+  #
+  # POSIX awk only — no FPAT, no gensub. This is the only awk in the collector
+  # and gawk is not otherwise required, so requiring it here would be a new
+  # dependency for a job substr can do. No `delete` either: indices above nf are
+  # never read, so a wider previous row cannot leak into a narrower one.
+  awk -v OFS='\t' '
+    function csv_split(line, out,   n, i, c, nx, cur, inq) {
+      n = 1; cur = ""; inq = 0
+      for (i = 1; i <= length(line); i++) {
+        c = substr(line, i, 1)
+        if (inq) {
+          if (c == "\"") {
+            nx = substr(line, i + 1, 1)
+            if (nx == "\"") { cur = cur "\""; i++ } else { inq = 0 }
+          } else { cur = cur c }
+        } else if (c == "\"") { inq = 1 }
+        else if (c == ",") { out[n++] = cur; cur = "" }
+        else { cur = cur c }
+      }
+      out[n] = cur
+      return n
+    }
+    {
+      nf = csv_split($0, f)
+      if (nf < 8) next
+      if (f[1] !~ /^[0-9]+$/ || f[2] !~ /^[0-9]+$/) next
+      if (f[4] !~ /^[0-9]+$/ || f[5] !~ /^[0-9]+$/) next
+      s = (nf >= 10 && f[10] ~ /^[0-9]+$/) ? f[10] : ""
+      e = (nf >= 11 && f[11] ~ /^[0-9]+$/) ? f[11] : ""
       if (s != "" && e != "" && (e + 0) < (s + 0)) { s = ""; e = "" }
-      print $7, $8, $2, $5, $4, s, e
+      print f[7], f[8], f[2], f[5], f[4], s, e
     }
   ' "$raw" > "$raw.rows" || true
   cut -f1 "$raw.rows" | norm_paths > "$raw.p"
@@ -1387,23 +1451,17 @@ process_clones() {
         split(line, p, "\t")
         if (p[6] !~ /^[0-9]+$/ || p[7] !~ /^[0-9]+$/) continue
         i = ++fcount[p[1]]
-        nm = p[2]
-        # lizard --csv QUOTES its function field, and funcs.tsv carries the
-        # quotes through verbatim. Stripped here, for clone entries only.
-        #
-        # Deliberately NOT fixed in run_lizard, though that is where it comes
-        # from: the function name is part of the identity key of a complexity
-        # hotspot, so unquoting it there would re-key every existing complexity
-        # and function-length hotspot on any project running real lizard — a
-        # mass resolve-and-re-register of ids that are supposed to be permanent.
-        # That is a change with its own migration question, not something a
-        # clone feature should carry in quietly. Clone keys are new, so they can
-        # start out clean.
+        # Taken as it stands. run_lizard used to hand this field over with
+        # lizard quotes still on it and the strip happened here, for clone
+        # entries only — deferred on the grounds that unquoting at the source
+        # would re-key every complexity hotspot on any project running real
+        # lizard, which is a migration question and not something a clone
+        # feature should carry in quietly. That migration is now written, so the
+        # name arrives normalised and this reads it rather than repairing it.
         #
         # No apostrophes anywhere in this awk program: it is single-quoted in
         # the shell, and one would end the program mid-comment.
-        sub(/^"/, "", nm); sub(/"$/, "", nm)
-        fnm[p[1], i] = nm; fstart[p[1], i] = p[6] + 0; fend[p[1], i] = p[7] + 0
+        fnm[p[1], i] = p[2]; fstart[p[1], i] = p[6] + 0; fend[p[1], i] = p[7] + 0
       }
     }
     {
@@ -1682,6 +1740,12 @@ assert_qi_identity() {
   #    start-line columns are optional (a build that stops emitting them still
   #    measures complexity fine), so this is reachable — and a key ending in an
   #    empty slot is exactly the collapse PD-01 removes, reintroduced quietly.
+  #
+  #    The message says the row carried no start line, NOT that lizard emitted
+  #    none. It said the latter for one release while the real cause was this
+  #    collector splitting lizard's CSV on commas and shifting the column off
+  #    the end, and it sent the reader to the wrong tool. State the observation;
+  #    the cause is whatever the next person finds.
   bad="$(jq -r '
     [ .quality_issues[]
       | select(.status == "open")
@@ -1694,7 +1758,7 @@ assert_qi_identity() {
   if [ -n "$bad" ]; then
     die "QI identity is incomplete — these hotspots have no start line, so their keys cannot be told apart:
 ${bad}
-The measuring tool emitted no start-line column for them (lizard --csv fields 10 and 11). Registering them would re-create the collision PD-01 fixes, so the run stops instead."
+Their measurement rows carried no start-line column (lizard --csv fields 10 and 11). Registering them would re-create the collision PD-01 fixes, so the run stops instead."
   fi
 
   # 2. Two entries, one key. Names BOTH sides and their values, because the next

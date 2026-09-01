@@ -111,6 +111,11 @@
 #                                   claim is gone from the template
 #  40  anomaly rule               → the agent is told to observe and stop, and the
 #                                   template carries the section to put it in
+#  41  real lizard --csv          → the shape the tool actually emits: quoted fields
+#                                   whose contents carry commas. Every one of the
+#                                   seven columns survives a comma in long_name, in
+#                                   the function name and in the path; a row wider
+#                                   than eleven still yields the right start/end
 #
 # Plain bash + coreutils, plus jq for assertions (same as run-parser-tests.sh
 # and run-cs-body-parser-tests.sh). Run from anywhere:
@@ -285,10 +290,38 @@ JSCPDSTUB
 
 # A lizard CSV row. Columns, in lizard's own order:
 #   nloc,ccn,tokens,params,length,location,file,function,long_name,start,end
+#
+# NOT the shape the real tool emits — see liz_row_real. This one quotes nothing
+# and gives every function an empty parameter list, so no field contains a comma
+# and no field is quoted. Most cases here are about classification, the registry
+# or the join and do not care; the ones that are about PARSING use the faithful
+# helper, because those two properties are precisely what a parser gets wrong.
 liz_row() {
   local file="$1" func="$2" ccn="$3" length="$4"
   printf '%s,%s,100,2,%s,%s@1-1@%s,%s,%s,%s(),1,1\n' \
     "$length" "$ccn" "$length" "$func" "$file" "$file" "$func" "$func"
+}
+
+# liz_row_real <file> <func> <ccn> <length> <start> <end> [params_text]
+#
+# A row in the shape lizard_ext/csvoutput.py actually produces: columns 6-9
+# wrapped in double quotes, and a long_name holding a real parameter list, which
+# means commas INSIDE a quoted field. That is the whole difference, and it is the
+# difference the collector once got wrong — it split on commas, so start and end
+# shifted off the end of every function taking two or more arguments and arrived
+# empty, which the identity assertion refused to register. A suite written
+# entirely in liz_row could not see it: no commas, nothing to shift.
+#
+# params_text defaults to a two-parameter list, so the default row is one the
+# naive parser would have mangled. Pass it explicitly to place a comma somewhere
+# else, or pass an empty string for a genuinely parameterless function.
+liz_row_real() {
+  local file="$1" func="$2" ccn="$3" length="$4" start="$5" end="$6"
+  local params="${7-( int a , int b )}"
+  printf '%s,%s,100,2,%s,"%s@%s-%s@%s","%s","%s","%s%s",%s,%s\n' \
+    "$length" "$ccn" "$length" \
+    "$func" "$start" "$end" "$file" "$file" "$func" "$func" "$params" \
+    "$start" "$end"
 }
 
 # ── Case 1 — polyglot coverage, and NOT-MEASURED for the unsupported language ──
@@ -2965,6 +2998,94 @@ done
 
 # And the agent must actually be pointed at the section, not merely told a rule.
 assert_contains "40f the agent is told which token carries the observations" "{{anomalies}}" "$a40"
+
+# ── Case 41 — the CSV shape the real tool emits ──────────────────────────────
+#
+# Every case above this one feeds the collector rows with no quotes and no
+# commas, and the collector parsed those perfectly while being unable to read
+# lizard at all: it split on commas, so a quoted field containing one shifted
+# every later column. This case is the row zoo that catches that — one row per
+# way a comma gets inside a quoted field, plus the shapes that are not eleven
+# columns wide.
+#
+# The seven extracted fields are asserted through what the artifact exposes:
+# file, function and start line via the key, ccn and length via the rollup
+# maxima. params is column 4, parsed and carried but surfaced nowhere — and it
+# sits BETWEEN ccn (2) and length (5), so a split that puts those two on the
+# right values cannot have put column 4 on the wrong one.
+
+echo
+echo "--- Case 41: real lizard --csv rows, commas and quotes and all ---"
+C41="$WORK/c41"; new_project "$C41"; module_map_one "$C41"
+mkdir -p "$C41/src/sub,dir"
+printf 'public class B { }\n' > "$C41/src/sub,dir/B.cs"
+S41="$WORK/c41-stub"
+stub_scc "$S41" '[{"Name":"C#","Files":[{"Location":"src/Calc.cs","Lines":80,"Code":70},
+ {"Location":"src/sub,dir/B.cs","Lines":80,"Code":70}]}]'
+
+# Row by row, and what each one is here to break:
+#   Run            commas in long_name — the common case, every function of
+#                  arity >= 2, which is what made this a total failure and not
+#                  an edge case
+#   P::operator ,  a comma in the FUNCTION name, which shifts the identity field
+#                  itself and not merely the line numbers
+#   sub,dir/B.cs   a comma in the PATH
+#   Solo           no comma anywhere: the control, and the only shape the old
+#                  parser could read
+#   Tiny           eight columns, no line numbers at all — the documented
+#                  tolerance, still measured, below the registering severity
+#   Wide           THIRTEEN columns: csv_output appends a column per -E extension
+#                  carrying FUNCTION_INFO, so start and end are read at 10 and 11
+#                  and never at $NF
+#   say "hi" ok    "" as an escaped quote. The producer sanitises a quote to an
+#                  apostrophe and cannot emit this, so it proves the parser is a
+#                  CSV reader rather than a transcription of one tool's habits.
+stub_lizard "$S41" "$(liz_row_real 'src/Calc.cs' 'Run' 34 200 10 210 '( int a , int b , int c )')
+$(liz_row_real 'src/Calc.cs' 'P::operator ,' 25 150 300 450)
+$(liz_row_real 'src/sub,dir/B.cs' 'Calc' 30 180 5 185)
+$(liz_row_real 'src/Calc.cs' 'Solo' 22 130 600 720 '')
+30,5,900,2,30,Tiny@800-830@src/Calc.cs,src/Calc.cs,Tiny
+140,21,100,2,140,\"Wide@900-1040@src/Calc.cs\",\"src/Calc.cs\",\"Wide\",\"Wide( int a , int b )\",900,1040,7,3
+125,24,100,2,125,\"say \"\"hi\"\" ok@1100-1225@src/Calc.cs\",\"src/Calc.cs\",\"say \"\"hi\"\" ok\",\"say \"\"hi\"\" ok( int a , int b )\",1100,1225"
+
+c41_err="$( cd "$C41" && PATH="$(clean_path "$S41")" bash "$QUALITY_BIN" collect .specclaw 2>&1 >/dev/null )"
+c41_exit=$?
+C41_JSON="$C41/.specclaw/analysis/quality.json"
+
+assert_eq "41a the run completes" "0" "$c41_exit"
+
+# Joined on ";" rather than a space or a newline: two of these scopes CONTAIN a
+# space, and jq here emits CRLF, of which command substitution eats only the
+# final one — so a multi-line expected value would be compared against interior
+# carriage returns and fail on a correct artifact.
+c41_keys="$(jq -r '[.quality_issues[] | select(.metric == "complexity") | .key] | sort | join(";")' "$C41_JSON" 2>/dev/null)"
+assert_eq_nonempty "41b every registering row keys on its own start line, whatever its columns contained" \
+  'complexity|src/Calc.cs|P::operator ,|MOD-001|300;complexity|src/Calc.cs|Run|MOD-001|10;complexity|src/Calc.cs|Solo|MOD-001|600;complexity|src/Calc.cs|Wide|MOD-001|900;complexity|src/Calc.cs|say "hi" ok|MOD-001|1100;complexity|src/sub,dir/B.cs|Calc|MOD-UNASSIGNED|5' \
+  "$c41_keys"
+
+# Columns 2 and 5 landed where they belong. Under the comma split they did too —
+# they sit before the first quoted field — which is exactly why the failure was
+# invisible in the numbers and visible only in the identity.
+c41_ccn="$(jq -r '[.modules[] | select(.module_id == "MOD-001") | .complexity.max] | first' "$C41_JSON" 2>/dev/null)"
+assert_eq_nonempty "41c the ccn column is read, not a neighbour of it" "34" "$c41_ccn"
+c41_len="$(jq -r '[.modules[] | select(.module_id == "MOD-001") | .function_length.max] | first' "$C41_JSON" 2>/dev/null)"
+assert_eq_nonempty "41d and the length column too" "200" "$c41_len"
+
+# The eight-column row: measured (it is in the mean) and not registered (it is
+# under the severity floor). Losing it would have been a metric traded for a fix.
+c41_tiny="$(jq -r '[.quality_issues[] | select(.key | test("Tiny"))] | length' "$C41_JSON" 2>/dev/null)"
+assert_eq_nonempty "41e a row with no line numbers is still measured, and still not registered" "0" "$c41_tiny"
+c41_fn="$(jq -r '[.modules[] | select(.module_id == "MOD-001") | .complexity.mean] | first' "$C41_JSON" 2>/dev/null)"
+if [[ -n "$c41_fn" && "$c41_fn" != "null" ]]; then
+  pass "41f and it is inside the rollup it was measured for"
+else
+  fail "41f and it is inside the rollup it was measured for (mean was '$c41_fn')"
+fi
+
+assert_contains "41g the thirteen-column row reads start at 10, not at \$NF" \
+  'complexity|src/Calc.cs|Wide|MOD-001|900' "$c41_keys"
+assert_contains "41h \"\" is one escaped quote, and the name keeps it" \
+  'complexity|src/Calc.cs|say "hi" ok|MOD-001|1100' "$c41_keys"
 
 # ── Result ───────────────────────────────────────────────────────────────────
 
