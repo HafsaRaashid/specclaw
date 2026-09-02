@@ -65,8 +65,11 @@
 #                                   keeps its id and is NEVER marked resolved; its
 #                                   rebuild item records a dated scope change, not a
 #                                   retirement, and is not renumbered
-#  21  scoping is neutral         → every category off measures exactly what the
-#                                   pre-change collector measured
+#  21  scoping is neutral         → with the old hardcoded filter reproduced, the
+#                                   three fixture files split into the two measured
+#                                   source files, named, and the one pipeline-owned
+#                                   file excluded; and no measured value drifts
+#                                   from the collector at origin/main
 #  22  tests as a bucket          → test code measured into MOD-TESTS, absent from
 #                                   every production module rollup, registering no QI
 #  23  clone capture              → a known duplicated block is preserved with both
@@ -1924,9 +1927,14 @@ quality:
     data_and_lockfiles: false
 CFG
 S21="$WORK/c21-stub"
+# Both source files are sized over the file-length threshold, so both leave their
+# NAME in the artifact. The artifact reports the measured set as a count and
+# never as a list of paths — quality_issues[].file is the only place a measured
+# path appears at all — so a file that silently left the scan would move a number
+# and nothing else. Giving each one a finding is what lets 21c name them.
 stub_scc "$S21" '[{"Name":"C#","Files":[
  {"Location":"src/A.cs","Lines":1400,"Code":1300},
- {"Location":"src/B.cs","Lines":40,"Code":30}]}]'
+ {"Location":"src/B.cs","Lines":1400,"Code":1300}]}]'
 stub_lizard "$S21" "$(liz_row 'src/A.cs' 'Run' 34 150)"
 
 ( cd "$C21" && PATH="$(clean_path "$S21")" bash "$QUALITY_BIN" collect .specclaw ) >/dev/null 2>&1
@@ -1937,15 +1945,22 @@ assert_eq_nonempty "21a only the pipeline's own config file is out of scope" "2/
 assert_eq_nonempty "21a2 and it is the pipeline_owned category that accounts for it" \
   "1" "$(census_of "$C21_JSON" pipeline_owned)"
 
-# The measurement itself, against the collector as it was before scan scoping.
+# The measurement itself, against the collector at origin/main — a DRIFT GUARD:
+# whatever this branch changes, it must not change a measured value.
+#
+# It was written to compare against the collector as it was before scan scoping,
+# and it no longer can. That commit merged, so origin/main is now on the far side
+# of the change this was contrasting with, and the artifact has since gained
+# duplication_clones, scan_funnel and report_blocks — a whole-artifact diff
+# against a binary from before all that cannot pass whatever the collector does.
+# Against origin/main it still says something true and worth failing on, so it
+# keeps that baseline under an accurate name. The scope-parity claim it used to
+# carry moved to 21c, which needs no binary; see the note there.
 #
 # Stripped: generated_at (a timestamp), the whole exclusions block and
-# excluded_by (fields that did not exist), and files.enumerated / .measured /
-# .excluded. That last group is a RENAME, not a changed measurement: the old
-# `enumerated` counted files after its hardcoded filter, which is what
-# `measured` counts now. 21c asserts that equivalence directly rather than
-# hiding it, and everything else — every status, rollup, LOC, coverage row and
-# QI id — must be byte-identical.
+# excluded_by, and files.enumerated / .measured / .excluded — the counts 21c owns
+# outright. Everything else — every status, rollup, LOC, coverage row and QI id —
+# must be byte-identical.
 #
 # `first_seen` is NORMALISED rather than deleted, and only where it equals its
 # own snapshot's generated_at. On a first run against an empty registry that is
@@ -1972,26 +1987,65 @@ if git -C "$SCRIPT_DIR" show "origin/main:plugins/specclaw/bin/specclaw-bf-quali
 fi
 if [[ -n "$C21B_JSON" && -s "$C21B_JSON" ]]; then
   if diff <(q_strip "$C21B_JSON") <(q_strip "$C21_JSON") >/dev/null 2>&1; then
-    pass "21b every measured value is identical to the pre-change collector's"
+    pass "21b every measured value is identical to the collector at origin/main"
   else
-    fail "21b every measured value is identical to the pre-change collector's"
+    fail "21b every measured value is identical to the collector at origin/main"
     diff <(q_strip "$C21B_JSON") <(q_strip "$C21_JSON") | head -20
   fi
-  c21_pre_enum="$(jq -r '.files.enumerated' "$C21B_JSON")"
-  assert_eq_nonempty "21c the set of files measured is the same size as before the rename" \
-    "$c21_pre_enum" "$(jq -r '.files.measured' "$C21_JSON")"
 else
-  echo "NOTE: 21b/21c pre-change binary not retrievable (origin/main absent, e.g. a shallow clone) — skipping the comparison."
-  PASS=$((PASS + 2))
+  echo "NOTE: 21b pre-change binary not retrievable (origin/main absent, e.g. a shallow clone) — skipping the comparison."
+  PASS=$((PASS + 1))
 fi
+
+# 21c — THE SCOPE PARTITION, ASSERTED FROM THE FIXTURE AND NOT FROM A BINARY.
+#
+# This read the baseline collector's files.enumerated and compared it against
+# this run's files.measured, on the reasoning that the old `enumerated` counted
+# files after the hardcoded filter, which is what `measured` counts now. That
+# equivalence was true and the assertion was sound. What broke it is where the
+# baseline comes from, twice over, and neither has anything to do with the
+# collector:
+#
+#   - `origin/main` is a MOVING reference. The scan-scoping commit merged into
+#     it, so the binary the case fetches to represent "before" is now an "after".
+#     Its artifact even carries an exclusions block, which the comment above
+#     lists among the fields that did not exist.
+#   - it is written to $WORK and run from there, so SCRIPT_DIR/../lib does not
+#     resolve, excl_defaults falls back to /dev/null, and it excludes NOTHING.
+#     The same binary run from the plugin's own bin/ reports 2 measured and 1
+#     excluded, identical to this one.
+#
+# So the value it supplied was neither the old scope nor the new one, and the
+# assertion failed on a collector that is measuring exactly what it should.
+#
+# Pinning the baseline to the real pre-scan-scoping commit does restore this
+# comparison, and breaks 21b instead: the artifact has since gained
+# duplication_clones, scan_funnel and report_blocks, none of which q_strip
+# normalises, so a whole-artifact diff against a binary that old cannot pass.
+# The two assertions cannot share one baseline any more.
+#
+# 21b keeps the moving baseline, where it is a drift guard and is meaningful.
+# 21c stops needing a baseline at all: the fixture puts three files in the tree,
+# and the contract is which side of the scope line each one lands on. That is
+# checkable here, it cannot rot when main moves, and it runs on a shallow clone.
+#
+# SIZE AND MEMBERSHIP, in one string. A count alone passes while the wrong two
+# files are measured; the names are what catches a silent swap. The excluded one
+# is `.specclaw/config.yaml` and cannot be named from the artifact — no list of
+# excluded paths is published, only per-category counts — so it is pinned by
+# category in 21a2 instead, and by being the file the other two are not.
+c21_scope_set="$(jq -r '"\(.files.enumerated)/\(.files.measured)/\(.files.excluded) "
+                        + ([.quality_issues[] | .file] | unique | sort | join(","))' "$C21_JSON")"
+assert_eq_nonempty "21c the reproduced scope measures exactly src/A.cs and src/B.cs, excluding the one pipeline-owned file" \
+  "3/2/1 src/A.cs,src/B.cs" "$c21_scope_set"
 
 # Standing on its own, without the old binary: the scan measured both source
 # files and classified them exactly as the thresholds say.
 c21_self="$(jq -r '"\(.files.measured)/\(.files.classified)/\(.files.sized)"' "$C21_JSON")"
 assert_eq_nonempty "21d both source files were measured, classified and sized" "2/2/2" "$c21_self"
 c21_hot="$(jq -r '[.quality_issues[] | select(.status == "open") | .metric] | sort | join(",")' "$C21_JSON")"
-assert_eq_nonempty "21e and the hotspots are exactly the three the thresholds define" \
-  "complexity,file_length,function_length" "$c21_hot"
+assert_eq_nonempty "21e and the hotspots are exactly the four the thresholds define" \
+  "complexity,file_length,file_length,function_length" "$c21_hot"
 
 # ── Case 22 — tests as a separately-reported bucket ──────────────────────────
 #
