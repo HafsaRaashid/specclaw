@@ -9,6 +9,8 @@
 #   - the version/status compatibility guard in `resolve`
 #   - seam-layer re-verification in `compare`
 #   - three-way divergence classification and the verdict order (j.3)
+#   - ARG_MAX: that no large payload (a selection, a result set, one
+#     fixture's captured output) is ever handed to jq through argv
 #
 # Every one of these is bash/jq computing a fact from declared data — exactly
 # the code where a silent regression turns "we checked and it was fine" into
@@ -867,6 +869,234 @@ done
 # otherwise the two assertions above would pass on any constant.
 assert_eq "the two J cases really do produce different verdicts" "PASS FAIL" \
   "$(run_scope "$I" BL-020 j-x1 "$A_MATCH" | sed 's/.*|//') $(run_scope "$I" BL-020 j-x2 "$A_DIVERGE" | sed 's/.*|//')"
+
+# ─────────────────────────────────────────────────────────────────────────────
+echo "== ARG_MAX: large payloads travel by file, never through argv =="
+#
+# THE DEFECT THIS PINS. resolve, compare and render used to hand whole fixture
+# selections, whole result sets, and whole captured outputs to jq through
+# --argjson — that is, through the command line. Windows caps a command line at
+# ~32,767 characters, so `/specclaw:bf-replay --all` against a 48-fixture
+# baseline died with `jq: Argument list too long` (exit 126) inside `resolve`,
+# before a single fixture was mapped or replayed. A `--module` run survived only
+# because its selection happened to be small, which made a transport bug look
+# like a manifest bug.
+#
+# Two independent scales trigger it and both are covered here: MANY fixtures
+# (the selection, the result set, the merged rows) and ONE FAT fixture (its
+# captured output and its diffs — enough on its own, with no other fixtures
+# involved, because a golden master of a list or a report is easily 50 KB).
+#
+# These tests are only worth their runtime if the payload they build is
+# genuinely over the limit, so each one ASSERTS ITS OWN PAYLOAD SIZE first.
+# Without that guard a future change that slimmed the fixture shape would leave
+# this section green while testing nothing at all.
+
+PAYLOAD_MIN=50000   # comfortably above the ~32,767-character Windows limit
+
+# A manifest of $2 realistic fixtures under $1, hashes and all. Padded through
+# real fixture fields — seam, input, normalized_fields_resolved — rather than
+# filler keys, so the payload is the shape resolve actually carries.
+seed_bulk() {
+  local root="$1" n="$2" i=0 entries="" id bl dr fx h
+  rm -rf "$root"
+  mkdir -p "$root/.specclaw/baseline/fixtures" "$root/.specclaw/analysis"
+  { echo "# Rebuild Backlog: Bulk"; echo; echo "## Backlog"; echo;
+    echo "## MOD-001 — Ledger"; echo; } > "$root/.specclaw/analysis/rebuild-backlog.md"
+  { echo "# Domain Model"; echo; } > "$root/.specclaw/analysis/domain-model.md"
+
+  while [ "$i" -lt "$n" ]; do
+    i=$((i + 1))
+    id="$(printf 'GM-%03d' "$i")"
+    bl="$(printf 'BL-%03d' "$i")"
+    dr="$(printf 'DR-%03d' "$i")"
+    fx="$root/.specclaw/baseline/fixtures/${id}.json"
+    cat > "$fx" <<EOF
+{"scenario_id":"${id}","captured_at":"2026-08-01T00:00:00Z","anchor_date":"2026-08-01",
+ "legacy_commit_sha":"deadbeefdeadbeefdeadbeefdeadbeefdeadbeef","runtime_version":"net8.0",
+ "normalized_fields":["output.result.entry_id"],
+ "input":{"entry":{"id":"E-${i}","period":"2026-08","lines":[{"account":"1000","amount":${i}0},{"account":"2000","amount":-${i}0}]}},
+ "output":{"outcome":"OK","error_code":null,"threw":false,
+           "result":{"entry_id":"E-${i}","posted":true,"amount":${i}0,
+                     "currency":"USD","posted_by":"ledger-service",
+                     "reference":"REF-${i}-2026-08-CLOSING"}}}
+EOF
+    h="sha256:$(sha256sum "$fx" | awk '{print $1}')"
+    { echo "### ${bl} — Ledger behaviour ${i}"; echo;
+      echo "- **Module:** MOD-001";
+      echo "- **Acceptance basis (domain-model.md):**";
+      echo "  - ${dr}: ledger rule ${i} holds.";
+      echo "- **Depends on:** None"; echo; } >> "$root/.specclaw/analysis/rebuild-backlog.md"
+    echo "- ${dr}: ledger rule ${i} holds." >> "$root/.specclaw/analysis/domain-model.md"
+    [ -n "$entries" ] && entries="${entries},"
+    entries="${entries}
+    {\"scenario_id\":\"${id}\",\"seam\":\"LedgerService.PostEntry(entryId, period, actor)\",
+     \"seam_layer\":\"service\",\"business_rules_pinned\":\"${dr}\",
+     \"verifies_backlog_item\":\"${bl}\",\"module_ids\":[\"MOD-001\",\"MOD-002\"],
+     \"fixture_path\":\".specclaw/baseline/fixtures/${id}.json\",\"content_hash\":\"${h}\",
+     \"scenario_content_hash\":\"sha256:0000000000000000000000000000000000000000000000000000000000000000\",
+     \"status\":\"VERIFIABLE\",\"provisional_ref\":\"\",\"captured_at\":\"2026-08-01T00:00:00Z\",
+     \"anchor_date\":\"2026-08-01\",\"legacy_commit_sha\":\"deadbeefdeadbeefdeadbeefdeadbeefdeadbeef\",
+     \"runtime_version\":\"net8.0\",\"outcome\":\"OK\",\"error_code\":null,\"threw\":false,
+     \"normalized_fields\":[\"output.result.entry_id\"],
+     \"normalized_fields_resolved\":[{\"field\":\"output.result.entry_id\",\"matches\":1,
+       \"resolved\":\"output.result.entry_id\"}]}"
+  done
+
+  cat > "$root/.specclaw/baseline/manifest.json" <<EOF
+{"manifest_schema":3,"plugin_version":"$(jq -r '.version' "$PLUGIN_ROOT/.claude-plugin/plugin.json")",
+ "recorded_at":"2026-08-01T00:00:00Z","fixtures":[${entries}
+  ]}
+EOF
+}
+
+# Fills a run directory from a selection: everything REPLAYABLE, and every
+# fixture named in $3 answering differently so it diverges ("ALL" for all of
+# them). FOUR fields change per divergence, because it is the diffs that make a
+# result set large and a one-diff row would not reproduce what broke. The
+# normalized field (entry_id) is deliberately left alone — changing it would be
+# normalized away and change the classification under test.
+seed_bulk_run() {
+  local root="$1" rd="$2" diverge="${3:-}" f id
+  # NEVER rm -rf the run dir here: resolve has already written selection.json
+  # into it, and that file is this function's own input.
+  mkdir -p "$rd/actual"
+  rm -f "$rd"/actual/*.json
+  printf '{"stack":"t","build_command":null,"test_command":"true","results_dir":"actual","evidence_exclusions":[]}' \
+    > "$rd/run-config.json"
+  jq -c '[ .fixtures[] | {scenario_id: .scenario_id, verdict: "REPLAYABLE",
+           test_file: ("tests/" + .scenario_id + "Tests.cs"),
+           legacy_seam_layer: .seam_layer, replay_seam_layer: .seam_layer} ]' \
+    "$rd/selection.json" > "$rd/mapping.json"
+  for f in "$root"/.specclaw/baseline/fixtures/*.json; do
+    id="$(basename "$f" .json)"
+    if [ "$diverge" = "ALL" ] || case " $diverge " in *" $id "*) true ;; *) false ;; esac; then
+      jq -c '{output: (.output
+                | .result.amount = 424242
+                | .result.posted = false
+                | .result.currency = "EUR"
+                | .result.reference = "REF-REBUILT-DIFFERENTLY")}' \
+        "$f" > "$rd/actual/$id.json"
+    else
+      jq -c '{output: .output}' "$f" > "$rd/actual/$id.json"
+    fi
+  done
+}
+
+# ── T-ARGMAX-01 — resolve --all above the Windows argv limit ────────────────
+BULK="$WORK/argmax-bulk"
+seed_bulk "$BULK" 70
+BULK_SEL="$BULK/.specclaw/replay/run-A/selection.json"
+
+bulk_payload="$(jq '.fixtures' "$BULK/.specclaw/baseline/manifest.json" | wc -c | tr -d ' \r')"
+assert_eq "T-ARGMAX-01: the selection payload really exceeds the argv limit (${bulk_payload} bytes)" \
+  "yes" "$([ "$bulk_payload" -ge "$PAYLOAD_MIN" ] && echo yes || echo no)"
+
+out="$(bash "$REPLAY_BIN" resolve "$BULK/.specclaw" --all "$BULK_SEL" 2>&1)"; rc=$?
+assert_eq "T-ARGMAX-01: resolve --all survives a payload no command line could carry" "0" "$rc"
+assert_eq "T-ARGMAX-01: and writes selection.json" "yes" \
+  "$([ -f "$BULK_SEL" ] && echo yes || echo no)"
+assert_eq "T-ARGMAX-01: selected_count is every fixture in the manifest" "70" \
+  "$(jq -r '.selected_count' "$BULK_SEL" 2>/dev/null | tr -d '\r')"
+assert_eq "T-ARGMAX-01: every fixture id survived the transport, none duplicated" "70" \
+  "$(jq -r '[.fixtures[].scenario_id] | unique | length' "$BULK_SEL" 2>/dev/null | tr -d '\r')"
+assert_eq "T-ARGMAX-01: the first and last fixtures are both present and in order" "GM-001 GM-070" \
+  "$(jq -r '[.fixtures[0].scenario_id, .fixtures[-1].scenario_id] | join(" ")' "$BULK_SEL" 2>/dev/null | tr -d '\r')"
+assert_contains "T-ARGMAX-01: and it reports the full count to the operator" "$out" "Selected 70 fixture(s)"
+# The joins that ride the same payload still ran. A transport that quietly
+# yielded null would leave these empty while every exit code stayed the same —
+# a silent regression is exactly what this pair is here to catch.
+assert_eq "T-ARGMAX-01: per-fixture BL attribution survived the payload move" "70" \
+  "$(jq -r '[.fixtures[] | select((.bl_items_resolved // []) | length > 0)] | length' "$BULK_SEL" 2>/dev/null | tr -d '\r')"
+assert_eq "T-ARGMAX-01: module totals were computed over the whole manifest" "70" \
+  "$(jq -r '.module_totals["MOD-001"]' "$BULK_SEL" 2>/dev/null | tr -d '\r')"
+
+# Captured NOW, not after finalize: `finalize --keep` removes the working run
+# directory, selection.json included, once the evidence package is written.
+BULK_TOP_KEYS="$(jq -r '[keys[]] | sort | join(" ")' "$BULK_SEL" 2>/dev/null | tr -d '\r')"
+BULK_FX_KEYS="$(jq -r '[.fixtures[0] | keys_unsorted[]] | join(",")' "$BULK_SEL" 2>/dev/null | tr -d '\r')"
+
+# ── T-ARGMAX-02a — compare, render and finalize over the same selection ────
+BULK_RD="$BULK/.specclaw/replay/run-A"
+seed_bulk_run "$BULK" "$BULK_RD" ALL
+
+out="$(bash "$REPLAY_BIN" compare "$BULK/.specclaw" "$BULK_RD" 2>&1)"; rc=$?
+assert_eq "T-ARGMAX-02a: compare survives a result set no command line could carry" "0" "$rc"
+assert_eq "T-ARGMAX-02a: and records one row per fixture" "70" \
+  "$(jq -r '.results | length' "$BULK_RD/compare.json" 2>/dev/null | tr -d '\r')"
+results_payload="$(jq '.results' "$BULK_RD/compare.json" 2>/dev/null | wc -c | tr -d ' \r')"
+assert_eq "T-ARGMAX-02a: the result set really exceeds the argv limit (${results_payload} bytes)" \
+  "yes" "$([ "$results_payload" -ge "$PAYLOAD_MIN" ] && echo yes || echo no)"
+assert_eq "T-ARGMAX-02a: every row is still classified, none lost in transport" "70" \
+  "$(jq -r '[.results[] | select(.divergence_class=="behavioural")] | length' "$BULK_RD/compare.json" 2>/dev/null | tr -d '\r')"
+assert_eq "T-ARGMAX-02a: and each row carries all four of its diffs" "280" \
+  "$(jq -r '[.results[] | (.diffs // [])[]] | length' "$BULK_RD/compare.json" 2>/dev/null | tr -d '\r')"
+
+out="$(bash "$REPLAY_BIN" render "$BULK/.specclaw" --all "$BULK_RD" 2>&1)"; rc=$?
+assert_eq "T-ARGMAX-02a: render reaches a verdict over the same rows" "1" "$rc"
+assert_contains "T-ARGMAX-02a: and it is the FAIL those divergences earn" "$out" "Overall verdict: FAIL"
+assert_eq "T-ARGMAX-02a: the report was written" "yes" \
+  "$([ -f "$BULK/.specclaw/replay/report-A.md" ] && echo yes || echo no)"
+assert_eq "T-ARGMAX-02a: with a module rollup computed from the merged rows" "yes" \
+  "$(grep -qF '| MOD-001 |' "$BULK/.specclaw/replay/report-A.md" && echo yes || echo no)"
+
+out="$(bash "$REPLAY_BIN" finalize "$BULK/.specclaw" --all "$BULK_RD" --keep 2>&1)"; rc=$?
+assert_eq "T-ARGMAX-02a: finalize writes the evidence package" "0" "$rc"
+assert_eq "T-ARGMAX-02a: run-metadata records the full selection" "70" \
+  "$(jq -r '.selected_count' "$BULK/.specclaw/replay/evidence/run-A/run-metadata.json" 2>/dev/null | tr -d '\r')"
+
+# ── T-ARGMAX-02b — ONE fat fixture, no bulk involved ───────────────────────
+# compute_diffs received a fixture's whole captured output through argv, so a
+# single large golden master killed `compare` on a two-fixture project. That is
+# a different failure from the one above, at a different scale, and it needs
+# its own test: no amount of shrinking the fixture COUNT would have found it.
+FAT="$WORK/argmax-fat"
+seed_bulk "$FAT" 2
+FAT_FX="$FAT/.specclaw/baseline/fixtures/GM-001.json"
+jq -c '.output.result.lines = [ range(0; 260)
+        | {line_no: ., sku: ("SKU-" + (. | tostring)),
+           description: ("Ledger posting line " + (. | tostring) + " for period 2026-08"),
+           account: "1000", qty: 3, unit_price: 12.5, tax_code: "VAT-STD", amount: 37.5} ]' \
+  "$FAT_FX" > "$FAT/fat.tmp" && mv "$FAT/fat.tmp" "$FAT_FX"
+fat_hash="sha256:$(sha256sum "$FAT_FX" | awk '{print $1}')"
+jq --arg h "$fat_hash" '(.fixtures[] | select(.scenario_id=="GM-001") | .content_hash) = $h' \
+  "$FAT/.specclaw/baseline/manifest.json" > "$FAT/m.tmp" \
+  && mv "$FAT/m.tmp" "$FAT/.specclaw/baseline/manifest.json"
+
+fat_payload="$(jq '.output' "$FAT_FX" | wc -c | tr -d ' \r')"
+assert_eq "T-ARGMAX-02b: one fixture's captured output alone exceeds the argv limit (${fat_payload} bytes)" \
+  "yes" "$([ "$fat_payload" -ge "$PAYLOAD_MIN" ] && echo yes || echo no)"
+
+FAT_RD="$FAT/.specclaw/replay/run-F"
+out="$(bash "$REPLAY_BIN" resolve "$FAT/.specclaw" --all "$FAT_RD/selection.json" 2>&1)"; rc=$?
+assert_eq "T-ARGMAX-02b: resolve accepts the fat baseline" "0" "$rc"
+seed_bulk_run "$FAT" "$FAT_RD" "GM-001"
+out="$(bash "$REPLAY_BIN" compare "$FAT/.specclaw" "$FAT_RD" 2>&1)"; rc=$?
+assert_eq "T-ARGMAX-02b: compare survives a single fat fixture" "0" "$rc"
+assert_eq "T-ARGMAX-02b: the fat fixture is classified, not skipped" "behavioural" \
+  "$(jq -r '.results[] | select(.scenario_id=="GM-001") | .divergence_class' "$FAT_RD/compare.json" 2>/dev/null | tr -d '\r')"
+assert_eq "T-ARGMAX-02b: and its diffs were actually computed" "yes" \
+  "$(jq -r 'if ([.results[] | select(.scenario_id=="GM-001") | (.diffs // [])[]] | length) > 0 then "yes" else "no" end' "$FAT_RD/compare.json" 2>/dev/null | tr -d '\r')"
+assert_eq "T-ARGMAX-02b: the clean fixture beside it still matches" "MATCH" \
+  "$(jq -r '.results[] | select(.scenario_id=="GM-002") | .verdict' "$FAT_RD/compare.json" 2>/dev/null | tr -d '\r')"
+
+# ── T-ARGMAX-03 — a small selection is unchanged ───────────────────────────
+# The transport change must be invisible at every scale, not just the one that
+# used to break: a module run's selection is small, went through argv happily,
+# and must still come out in exactly the shape and order it always did.
+MOD_SEL="$BULK/.specclaw/replay/run-M/selection.json"
+out="$(bash "$REPLAY_BIN" resolve "$BULK/.specclaw" MOD-001 "$MOD_SEL" 2>&1)"; rc=$?
+assert_eq "T-ARGMAX-03: a small module selection still resolves" "0" "$rc"
+assert_eq "T-ARGMAX-03: with the selection keys the format has always carried" \
+  "bl_item dr_rules_covered fixtures item_split legacy_commit_sha legacy_commit_shas manifest_plugin_version manifest_schema module module_totals retirement_candidates selected_count stubs_in_effect target target_kind" \
+  "$(jq -r '[keys[]] | sort | join(" ")' "$MOD_SEL" 2>/dev/null | tr -d '\r')"
+assert_eq "T-ARGMAX-03: identical to what the >50KB run produced" \
+  "$BULK_TOP_KEYS" "$(jq -r '[keys[]] | sort | join(" ")' "$MOD_SEL" 2>/dev/null | tr -d '\r')"
+assert_eq "T-ARGMAX-03: and identical key ORDER inside a fixture entry" \
+  "$BULK_FX_KEYS" \
+  "$(jq -r '[.fixtures[0] | keys_unsorted[]] | join(",")' "$MOD_SEL" 2>/dev/null | tr -d '\r')"
+assert_eq "T-ARGMAX-03: MOD-001 still selects every fixture tagged with it" "70" \
+  "$(jq -r '.selected_count' "$MOD_SEL" 2>/dev/null | tr -d '\r')"
 
 # ─────────────────────────────────────────────────────────────────────────────
 echo
