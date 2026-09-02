@@ -111,6 +111,19 @@
 #                                   claim is gone from the template
 #  40  anomaly rule               → the agent is told to observe and stop, and the
 #                                   template carries the section to put it in
+#  41  real lizard --csv          → the shape the tool actually emits: quoted fields
+#                                   whose contents carry commas. Every one of the
+#                                   seven columns survives a comma in long_name, in
+#                                   the function name and in the path; a row wider
+#                                   than eleven still yields the right start/end
+#  42  two hotspots, real rows    → two unnamed functions in one file, measured by
+#                                   rows of the real shape, register two ids with
+#                                   distinct keys and keep them on a re-run
+#  43  scope normalisation        → the function name reaches the key unquoted, and a
+#                                   registry written while it did not is migrated in
+#                                   place: same id, same first seen, no renumbering,
+#                                   idempotent, and a quoted scope in the artifact
+#                                   stops the run
 #
 # Plain bash + coreutils, plus jq for assertions (same as run-parser-tests.sh
 # and run-cs-body-parser-tests.sh). Run from anywhere:
@@ -285,10 +298,38 @@ JSCPDSTUB
 
 # A lizard CSV row. Columns, in lizard's own order:
 #   nloc,ccn,tokens,params,length,location,file,function,long_name,start,end
+#
+# NOT the shape the real tool emits — see liz_row_real. This one quotes nothing
+# and gives every function an empty parameter list, so no field contains a comma
+# and no field is quoted. Most cases here are about classification, the registry
+# or the join and do not care; the ones that are about PARSING use the faithful
+# helper, because those two properties are precisely what a parser gets wrong.
 liz_row() {
   local file="$1" func="$2" ccn="$3" length="$4"
   printf '%s,%s,100,2,%s,%s@1-1@%s,%s,%s,%s(),1,1\n' \
     "$length" "$ccn" "$length" "$func" "$file" "$file" "$func" "$func"
+}
+
+# liz_row_real <file> <func> <ccn> <length> <start> <end> [params_text]
+#
+# A row in the shape lizard_ext/csvoutput.py actually produces: columns 6-9
+# wrapped in double quotes, and a long_name holding a real parameter list, which
+# means commas INSIDE a quoted field. That is the whole difference, and it is the
+# difference the collector once got wrong — it split on commas, so start and end
+# shifted off the end of every function taking two or more arguments and arrived
+# empty, which the identity assertion refused to register. A suite written
+# entirely in liz_row could not see it: no commas, nothing to shift.
+#
+# params_text defaults to a two-parameter list, so the default row is one the
+# naive parser would have mangled. Pass it explicitly to place a comma somewhere
+# else, or pass an empty string for a genuinely parameterless function.
+liz_row_real() {
+  local file="$1" func="$2" ccn="$3" length="$4" start="$5" end="$6"
+  local params="${7-( int a , int b )}"
+  printf '%s,%s,100,2,%s,"%s@%s-%s@%s","%s","%s","%s%s",%s,%s\n' \
+    "$length" "$ccn" "$length" \
+    "$func" "$start" "$end" "$file" "$file" "$func" "$func" "$params" \
+    "$start" "$end"
 }
 
 # ── Case 1 — polyglot coverage, and NOT-MEASURED for the unsupported language ──
@@ -2965,6 +3006,217 @@ done
 
 # And the agent must actually be pointed at the section, not merely told a rule.
 assert_contains "40f the agent is told which token carries the observations" "{{anomalies}}" "$a40"
+
+# ── Case 41 — the CSV shape the real tool emits ──────────────────────────────
+#
+# Every case above this one feeds the collector rows with no quotes and no
+# commas, and the collector parsed those perfectly while being unable to read
+# lizard at all: it split on commas, so a quoted field containing one shifted
+# every later column. This case is the row zoo that catches that — one row per
+# way a comma gets inside a quoted field, plus the shapes that are not eleven
+# columns wide.
+#
+# The seven extracted fields are asserted through what the artifact exposes:
+# file, function and start line via the key, ccn and length via the rollup
+# maxima. params is column 4, parsed and carried but surfaced nowhere — and it
+# sits BETWEEN ccn (2) and length (5), so a split that puts those two on the
+# right values cannot have put column 4 on the wrong one.
+
+echo
+echo "--- Case 41: real lizard --csv rows, commas and quotes and all ---"
+C41="$WORK/c41"; new_project "$C41"; module_map_one "$C41"
+mkdir -p "$C41/src/sub,dir"
+printf 'public class B { }\n' > "$C41/src/sub,dir/B.cs"
+S41="$WORK/c41-stub"
+stub_scc "$S41" '[{"Name":"C#","Files":[{"Location":"src/Calc.cs","Lines":80,"Code":70},
+ {"Location":"src/sub,dir/B.cs","Lines":80,"Code":70}]}]'
+
+# Row by row, and what each one is here to break:
+#   Run            commas in long_name — the common case, every function of
+#                  arity >= 2, which is what made this a total failure and not
+#                  an edge case
+#   P::operator ,  a comma in the FUNCTION name, which shifts the identity field
+#                  itself and not merely the line numbers
+#   sub,dir/B.cs   a comma in the PATH
+#   Solo           no comma anywhere: the control, and the only shape the old
+#                  parser could read
+#   Tiny           eight columns, no line numbers at all — the documented
+#                  tolerance, still measured, below the registering severity
+#   Wide           THIRTEEN columns: csv_output appends a column per -E extension
+#                  carrying FUNCTION_INFO, so start and end are read at 10 and 11
+#                  and never at $NF
+#   say "hi" ok    "" as an escaped quote. The producer sanitises a quote to an
+#                  apostrophe and cannot emit this, so it proves the parser is a
+#                  CSV reader rather than a transcription of one tool's habits.
+stub_lizard "$S41" "$(liz_row_real 'src/Calc.cs' 'Run' 34 200 10 210 '( int a , int b , int c )')
+$(liz_row_real 'src/Calc.cs' 'P::operator ,' 25 150 300 450)
+$(liz_row_real 'src/sub,dir/B.cs' 'Calc' 30 180 5 185)
+$(liz_row_real 'src/Calc.cs' 'Solo' 22 130 600 720 '')
+30,5,900,2,30,Tiny@800-830@src/Calc.cs,src/Calc.cs,Tiny
+140,21,100,2,140,\"Wide@900-1040@src/Calc.cs\",\"src/Calc.cs\",\"Wide\",\"Wide( int a , int b )\",900,1040,7,3
+125,24,100,2,125,\"say \"\"hi\"\" ok@1100-1225@src/Calc.cs\",\"src/Calc.cs\",\"say \"\"hi\"\" ok\",\"say \"\"hi\"\" ok( int a , int b )\",1100,1225"
+
+c41_err="$( cd "$C41" && PATH="$(clean_path "$S41")" bash "$QUALITY_BIN" collect .specclaw 2>&1 >/dev/null )"
+c41_exit=$?
+C41_JSON="$C41/.specclaw/analysis/quality.json"
+
+assert_eq "41a the run completes" "0" "$c41_exit"
+
+# Joined on ";" rather than a space or a newline: two of these scopes CONTAIN a
+# space, and jq here emits CRLF, of which command substitution eats only the
+# final one — so a multi-line expected value would be compared against interior
+# carriage returns and fail on a correct artifact.
+c41_keys="$(jq -r '[.quality_issues[] | select(.metric == "complexity") | .key] | sort | join(";")' "$C41_JSON" 2>/dev/null)"
+assert_eq_nonempty "41b every registering row keys on its own start line, whatever its columns contained" \
+  'complexity|src/Calc.cs|P::operator ,|MOD-001|300;complexity|src/Calc.cs|Run|MOD-001|10;complexity|src/Calc.cs|Solo|MOD-001|600;complexity|src/Calc.cs|Wide|MOD-001|900;complexity|src/Calc.cs|say "hi" ok|MOD-001|1100;complexity|src/sub,dir/B.cs|Calc|MOD-UNASSIGNED|5' \
+  "$c41_keys"
+
+# Columns 2 and 5 landed where they belong. Under the comma split they did too —
+# they sit before the first quoted field — which is exactly why the failure was
+# invisible in the numbers and visible only in the identity.
+c41_ccn="$(jq -r '[.modules[] | select(.module_id == "MOD-001") | .complexity.max] | first' "$C41_JSON" 2>/dev/null)"
+assert_eq_nonempty "41c the ccn column is read, not a neighbour of it" "34" "$c41_ccn"
+c41_len="$(jq -r '[.modules[] | select(.module_id == "MOD-001") | .function_length.max] | first' "$C41_JSON" 2>/dev/null)"
+assert_eq_nonempty "41d and the length column too" "200" "$c41_len"
+
+# The eight-column row: measured (it is in the mean) and not registered (it is
+# under the severity floor). Losing it would have been a metric traded for a fix.
+c41_tiny="$(jq -r '[.quality_issues[] | select(.key | test("Tiny"))] | length' "$C41_JSON" 2>/dev/null)"
+assert_eq_nonempty "41e a row with no line numbers is still measured, and still not registered" "0" "$c41_tiny"
+c41_fn="$(jq -r '[.modules[] | select(.module_id == "MOD-001") | .complexity.mean] | first' "$C41_JSON" 2>/dev/null)"
+if [[ -n "$c41_fn" && "$c41_fn" != "null" ]]; then
+  pass "41f and it is inside the rollup it was measured for"
+else
+  fail "41f and it is inside the rollup it was measured for (mean was '$c41_fn')"
+fi
+
+assert_contains "41g the thirteen-column row reads start at 10, not at \$NF" \
+  'complexity|src/Calc.cs|Wide|MOD-001|900' "$c41_keys"
+assert_contains "41h \"\" is one escaped quote, and the name keeps it" \
+  'complexity|src/Calc.cs|say "hi" ok|MOD-001|1100' "$c41_keys"
+
+# ── Case 42 — two unnamed functions in one file, measured for real ────────────
+#
+# Case 32 asks this already, with rows that have no quotes and no commas. The
+# collision it guards against returned the moment the rows were real: both start
+# lines arrived empty, both keys ended in a blank slot, and the run stopped. So
+# it is asked again in the shape the tool actually emits.
+
+echo
+echo "--- Case 42: two unnamed functions, real rows, two ids that stay put ---"
+C42="$WORK/c42"; new_project "$C42"; module_map_one "$C42"
+S42="$WORK/c42-stub"
+stub_scc "$S42" '[{"Name":"C#","Files":[{"Location":"src/Calc.cs","Lines":80,"Code":70}]}]'
+stub_lizard "$S42" "$(liz_row_real 'src/Calc.cs' '' 34 200 10 210)
+$(liz_row_real 'src/Calc.cs' '' 30 180 300 480 '( int x , int y , int z )')"
+
+( cd "$C42" && PATH="$(clean_path "$S42")" bash "$QUALITY_BIN" collect .specclaw >/dev/null 2>&1 )
+C42_JSON="$C42/.specclaw/analysis/quality.json"
+
+c42_keys="$(jq -r '[.quality_issues[] | select(.metric == "complexity") | .key] | sort | join(" ")' "$C42_JSON" 2>/dev/null)"
+assert_eq_nonempty "42a two unnamed functions differ by start line and nothing else" \
+  'complexity|src/Calc.cs|<anonymous>|MOD-001|10 complexity|src/Calc.cs|<anonymous>|MOD-001|300' "$c42_keys"
+
+c42_dupes="$(jq -r '[.quality_issues[] | select(.status != "superseded-duplicate")] | group_by(.key) | map(select(length > 1)) | length' "$C42_JSON" 2>/dev/null)"
+assert_eq_nonempty "42b and no two hotspots share a key" "0" "$c42_dupes"
+
+c42_first="$(jq -r '[.quality_issues[] | .id + "=" + .key] | sort | join(" ")' "$C42_JSON" 2>/dev/null)"
+( cd "$C42" && PATH="$(clean_path "$S42")" bash "$QUALITY_BIN" collect .specclaw >/dev/null 2>&1 )
+c42_second="$(jq -r '[.quality_issues[] | .id + "=" + .key] | sort | join(" ")' "$C42_JSON" 2>/dev/null)"
+assert_eq_nonempty "42c and a re-run gives every one of them the same id" "$c42_first" "$c42_second"
+
+# ── Case 43 — the scope loses its quotes, and the registry comes with it ──────
+#
+# lizard --csv quotes the function name. run_lizard passed the quotes through,
+# so `"Login"` went into the key and every registry written in that period holds
+# a quoted scope. Normalising at the parser makes the live key `Login` and the
+# stored one unreachable — which resolves the entry and re-registers the hotspot
+# under a fresh number, the one thing a permanent id exists to prevent. So the
+# stored key is migrated instead, and this asks whether it is.
+
+echo
+echo "--- Case 43: the scope is normalised, and old ids follow it ---"
+C43="$WORK/c43"; new_project "$C43"; module_map_one "$C43"
+S43="$WORK/c43-stub"
+stub_scc "$S43" '[{"Name":"C#","Files":[{"Location":"src/Calc.cs","Lines":80,"Code":70}]}]'
+stub_lizard "$S43" "$(liz_row_real 'src/Calc.cs' 'Login' 34 200 42 242)"
+
+# A registry from that period: five-field keys, correct in every slot but one.
+cat > "$C43/.specclaw/analysis/quality-issues.md" <<'C43REG'
+# Quality Issues: Fixture
+
+**Path measured:** .
+**Last updated:** 2026-08-01T00:00:00Z
+
+### QI-007
+
+- **Key:** complexity|src/Calc.cs|"Login"|MOD-001|42
+- **Value:** 34
+- **Status:** open
+- **First seen:** 2026-08-01T00:00:00Z
+
+### QI-008
+
+- **Key:** function_length|src/Calc.cs|"Login"|MOD-001|42
+- **Value:** 200
+- **Status:** open
+- **First seen:** 2026-08-01T00:00:00Z
+C43REG
+
+( cd "$C43" && PATH="$(clean_path "$S43")" bash "$QUALITY_BIN" collect .specclaw >/dev/null 2>&1 )
+C43_JSON="$C43/.specclaw/analysis/quality.json"
+C43_REG="$C43/.specclaw/analysis/quality-issues.md"
+
+c43_map="$(jq -r '[.quality_issues[] | "\(.id)=\(.key)"] | sort | join(" ")' "$C43_JSON" 2>/dev/null)"
+assert_eq_nonempty "43a the id stays on its hotspot and the key loses its quotes" \
+  'QI-007=complexity|src/Calc.cs|Login|MOD-001|42 QI-008=function_length|src/Calc.cs|Login|MOD-001|42' \
+  "$c43_map"
+
+assert_eq "43b nothing was renumbered — no third id exists" "2" \
+  "$(grep -c '^### QI-' "$C43_REG")"
+
+c43_first="$(jq -r '[.quality_issues[] | .first_seen] | unique | join(",")' "$C43_JSON" 2>/dev/null)"
+assert_eq_nonempty "43c and both keep the date they were first seen" "2026-08-01T00:00:00Z" "$c43_first"
+
+assert_contains "43d the registry records what it did, in both directions" \
+  'scope normalised: `complexity|src/Calc.cs|"Login"|MOD-001|42` → `complexity|src/Calc.cs|Login|MOD-001|42`' \
+  "$(cat "$C43_REG")"
+
+# Document order, not the order awk happens to walk a map: two machines
+# migrating one registry should write the same paragraph.
+c43_order="$(grep -c 'scope normalised' "$C43_REG")"
+assert_eq "43e one line per migrated entry" "2" "$c43_order"
+c43_seq="$(grep 'scope normalised' "$C43_REG" | sed 's/^- \(QI-[0-9]*\).*/\1/' | tr '\n' ' ')"
+assert_eq_nonempty "43f written in the order the registry holds them" "QI-007 QI-008 " "$c43_seq"
+
+# Idempotence, byte for byte but for the timestamps.
+cp "$C43_REG" "$WORK/c43-reg-after1.md"
+( cd "$C43" && PATH="$(clean_path "$S43")" bash "$QUALITY_BIN" collect .specclaw >/dev/null 2>&1 )
+c43_before="$(sed -e 's/^- \*\*Last checked:.*/T/' -e 's/^\*\*Last updated:.*/T/' "$WORK/c43-reg-after1.md")"
+c43_after="$(sed -e 's/^- \*\*Last checked:.*/T/' -e 's/^\*\*Last updated:.*/T/' "$C43_REG")"
+assert_eq_nonempty "43g a second run migrates nothing and appends no second record" "$c43_before" "$c43_after"
+
+# The tripwire. A quoted scope reaching the artifact means the parser stopped
+# normalising, and nothing else in the pipeline would notice: a quoted scope
+# keys and compares like any other string, which is how it survived a release.
+C43B="$WORK/c43b"; new_project "$C43B"; module_map_one "$C43B"
+S43B="$WORK/c43b-stub"
+stub_scc "$S43B" '[{"Name":"C#","Files":[{"Location":"src/Calc.cs","Lines":80,"Code":70}]}]'
+# Doubly quoted at the source, so one unquoting still leaves a wrapped name —
+# which is what a parser that had stopped normalising would hand over.
+stub_lizard "$S43B" '200,34,100,2,200,"Login@42-242@src/Calc.cs","src/Calc.cs","""Login""","""Login""( int a , int b )",42,242'
+
+c43b_err="$( cd "$C43B" && PATH="$(clean_path "$S43B")" bash "$QUALITY_BIN" collect .specclaw 2>&1 >/dev/null )"
+c43b_exit=$?
+assert_eq "43h a scope that still wears its quotes stops the run" "1" "$c43b_exit"
+assert_contains "43i and says which id and key" "QI-001" "$c43b_err"
+assert_contains "43j naming the fault, not a symptom of it" "quoted scope" "$c43b_err"
+
+if [[ -f "$C43B/.specclaw/analysis/quality.json" ]]; then
+  fail "43k nothing is written when the scope cannot be trusted"
+else
+  pass "43k nothing is written when the scope cannot be trusted"
+fi
 
 # ── Result ───────────────────────────────────────────────────────────────────
 

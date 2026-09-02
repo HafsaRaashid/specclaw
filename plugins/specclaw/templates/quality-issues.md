@@ -64,6 +64,16 @@
     start_line  the function's first line; 1 for a file-level metric, whose span
                 is the file; 0 for a module-level one, which has no line
 
+  The scope is the BARE function name. The measuring tool emits it wrapped in
+  double quotes, as a CSV field, and for one release those quotes reached the key
+  — so `"Login"` and `Login` named the same function and never met. A registry
+  written in that period is migrated in place: the entry keeps its id and its
+  first-seen date and the key is respelled, which is recorded below under
+  Migrations. Nothing is renumbered, because unquoting a scope is a rename and
+  not a re-identification — same metric, same file, same start line, same
+  hotspot. The collector now refuses to write a key whose scope still carries the
+  wrapping quotes.
+
   The key held four fields until an identity collision made it hold five. The
   measuring tool reports the SHORT function name, so two overloads are one
   string; every unnamed function is reported under one name; and some parsers

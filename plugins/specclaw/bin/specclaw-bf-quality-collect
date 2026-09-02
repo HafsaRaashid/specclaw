@@ -855,6 +855,12 @@ run_scc() {
 # start/end are APPENDED, never inserted: the aggregation program reads these
 # rows positionally as .[0]..[4], so a new column anywhere but the end would
 # silently reassign every metric it reads.
+#
+# `function` is NORMALISED here and nowhere else — unquoted by the CSV parser as
+# it reads the field, so every consumer downstream of this file sees the bare
+# name. It is part of a QI key, so the boundary the value enters on is the only
+# honest place to do that; a second unquoting further in would be a second
+# opinion about what the name is.
 run_lizard() {
   local project_root="$1" scope_arg="$2" files="$3" out="$4" dir_names="$5"
   : > "$out"
@@ -880,22 +886,80 @@ run_lizard() {
   #   1 nloc  2 ccn  3 tokens  4 params  5 length  6 location
   #   7 file  8 function  9 long_name  10 start_line  11 end_line
   #
-  # Fields 1-5 are numeric by contract. A row where they are not is a
-  # parse_error for that row, never a silently coerced zero — and it is exactly
-  # what a comma inside a path would produce, shifting every later field.
+  # SPLIT ON QUOTED FIELDS, NOT ON COMMAS. Columns 6-9 are quoted and three of
+  # them routinely CONTAIN commas, so `-F','` does not read this format — it
+  # reads a shifted one. lizard_ext/csvoutput.py builds each row as
   #
-  # 10 and 11 are read for the clone-to-function join and are treated as
-  # OPTIONAL: a row that reaches NF == 8 but no further is still a perfectly
-  # good complexity measurement, and losing it because a lizard build stopped
-  # emitting line numbers would trade a metric for a nicety. Such a row carries
-  # empty ranges and simply never matches a clone.
-  awk -F',' -v OFS='\t' '
-    NF < 8 { next }
-    ($1 ~ /^[0-9]+$/) && ($2 ~ /^[0-9]+$/) && ($4 ~ /^[0-9]+$/) && ($5 ~ /^[0-9]+$/) {
-      s = (NF >= 10 && $10 ~ /^[0-9]+$/) ? $10 : ""
-      e = (NF >= 11 && $11 ~ /^[0-9]+$/) ? $11 : ""
+  #   ",".join(str(field) for field in fields)
+  #
+  # with 6-9 wrapped in quotes and nothing escaped, because it pre-sanitises
+  # instead: `name.replace('"', "'")`. So a quote can never appear INSIDE a
+  # field, but a comma can, and does:
+  #
+  #   long_name  every parameter list of arity >= 2 — "Run( int a , int b )"
+  #   function   C++ operator, and templated names — "P::operator ,"
+  #   file       any path with a comma in it
+  #
+  # Under `-F','` a two-parameter function therefore shifted 10 and 11 off the
+  # end and both arrived EMPTY, which the optional-range branch below read as
+  # "this lizard build emits no line numbers" and passed on as a blank start —
+  # the one thing assert_qi_identity refuses to register. Real lizard against
+  # real code produced almost nothing but such rows, so the run did not degrade,
+  # it stopped. Worse than the loss, one shape mislabelled: a row ending
+  # `int b)",7` put the START line in the end field, past the e < s guard, which
+  # cannot fire while s is empty.
+  #
+  # Fields 1-5 are numeric by contract. A row where they are not is a
+  # parse_error for that row, never a silently coerced zero.
+  #
+  # 10 and 11 are read for the clone-to-function join and for QI identity, and
+  # are still treated as OPTIONAL: a row that reaches 8 fields but no further is
+  # a perfectly good complexity measurement, and losing it because a lizard
+  # build stopped emitting line numbers would trade a metric for a nicety. Such
+  # a row carries empty ranges and simply never matches a clone. What changed is
+  # that a blank range now means the columns are ABSENT, not merely misread.
+  #
+  # Read at FIXED indices, never $NF: csv_output ends with `fields.extend(...)`,
+  # so any -E extension carrying FUNCTION_INFO (lizardnd, lizardio, halstead and
+  # six more) appends its own columns AFTER end, and a row can legitimately
+  # arrive wider than eleven.
+  #
+  # csv_split also UNQUOTES, which is where the function name loses the quotes
+  # it used to carry all the way into a QI key. One normalisation, at the
+  # boundary the value enters on. It honours "" as an escaped quote even though
+  # this producer cannot emit one, so the parser is a CSV parser and not a
+  # transcription of one tool's current habits.
+  #
+  # POSIX awk only — no FPAT, no gensub. This is the only awk in the collector
+  # and gawk is not otherwise required, so requiring it here would be a new
+  # dependency for a job substr can do. No `delete` either: indices above nf are
+  # never read, so a wider previous row cannot leak into a narrower one.
+  awk -v OFS='\t' '
+    function csv_split(line, out,   n, i, c, nx, cur, inq) {
+      n = 1; cur = ""; inq = 0
+      for (i = 1; i <= length(line); i++) {
+        c = substr(line, i, 1)
+        if (inq) {
+          if (c == "\"") {
+            nx = substr(line, i + 1, 1)
+            if (nx == "\"") { cur = cur "\""; i++ } else { inq = 0 }
+          } else { cur = cur c }
+        } else if (c == "\"") { inq = 1 }
+        else if (c == ",") { out[n++] = cur; cur = "" }
+        else { cur = cur c }
+      }
+      out[n] = cur
+      return n
+    }
+    {
+      nf = csv_split($0, f)
+      if (nf < 8) next
+      if (f[1] !~ /^[0-9]+$/ || f[2] !~ /^[0-9]+$/) next
+      if (f[4] !~ /^[0-9]+$/ || f[5] !~ /^[0-9]+$/) next
+      s = (nf >= 10 && f[10] ~ /^[0-9]+$/) ? f[10] : ""
+      e = (nf >= 11 && f[11] ~ /^[0-9]+$/) ? f[11] : ""
       if (s != "" && e != "" && (e + 0) < (s + 0)) { s = ""; e = "" }
-      print $7, $8, $2, $5, $4, s, e
+      print f[7], f[8], f[2], f[5], f[4], s, e
     }
   ' "$raw" > "$raw.rows" || true
   cut -f1 "$raw.rows" | norm_paths > "$raw.p"
@@ -1387,23 +1451,17 @@ process_clones() {
         split(line, p, "\t")
         if (p[6] !~ /^[0-9]+$/ || p[7] !~ /^[0-9]+$/) continue
         i = ++fcount[p[1]]
-        nm = p[2]
-        # lizard --csv QUOTES its function field, and funcs.tsv carries the
-        # quotes through verbatim. Stripped here, for clone entries only.
-        #
-        # Deliberately NOT fixed in run_lizard, though that is where it comes
-        # from: the function name is part of the identity key of a complexity
-        # hotspot, so unquoting it there would re-key every existing complexity
-        # and function-length hotspot on any project running real lizard — a
-        # mass resolve-and-re-register of ids that are supposed to be permanent.
-        # That is a change with its own migration question, not something a
-        # clone feature should carry in quietly. Clone keys are new, so they can
-        # start out clean.
+        # Taken as it stands. run_lizard used to hand this field over with
+        # lizard quotes still on it and the strip happened here, for clone
+        # entries only — deferred on the grounds that unquoting at the source
+        # would re-key every complexity hotspot on any project running real
+        # lizard, which is a migration question and not something a clone
+        # feature should carry in quietly. That migration is now written, so the
+        # name arrives normalised and this reads it rather than repairing it.
         #
         # No apostrophes anywhere in this awk program: it is single-quoted in
         # the shell, and one would end the program mid-comment.
-        sub(/^"/, "", nm); sub(/"$/, "", nm)
-        fnm[p[1], i] = nm; fstart[p[1], i] = p[6] + 0; fend[p[1], i] = p[7] + 0
+        fnm[p[1], i] = p[2]; fstart[p[1], i] = p[6] + 0; fend[p[1], i] = p[7] + 0
       }
     }
     {
@@ -1507,7 +1565,28 @@ read_qi_migrations() {
 # both. A clone key deliberately carries no line number — editing code above a
 # clone moves it without changing it — so clones are outside this entirely.
 #
-# THREE CASES, and only the third involves any judgement:
+# A FOURTH SHAPE, and the reason this function was extended rather than retired:
+# a five-field key whose scope slot still carries the quotes lizard --csv put
+# around the function name, as in
+#
+#   complexity|src/Calc.cs|"Login"|MOD-001|42
+#
+# run_lizard read that field with a comma split and passed the quotes straight
+# through, so every registry written while that was true holds quoted scopes.
+# Normalising at the parser makes the live key `...|Login|...` and the stored one
+# unreachable, which would resolve the entry and re-register the hotspot under a
+# fresh number — the mass renumbering this whole function exists to prevent.
+#
+# So it is migrated, and it is the one case with nothing to decide. Unquoting a
+# scope is a RENAME, not a re-identification: same metric, same file, same start
+# line, same physical hotspot, spelled without the quotes. No live hotspot has
+# to be found for it, which is why it runs unconditionally — an entry whose
+# hotspot is currently gone is renamed anyway and resolves under the new
+# spelling exactly as it would have under the old, so a resolve-then-return
+# cycle still reopens on the original id. The only refusal is two stored keys
+# normalising onto one, which no collector ever wrote and a hand-edit could.
+#
+# THREE CASES for the four-field shape, and only the third involves judgement:
 #
 #   one old key, one live hotspot     unambiguous. The id keeps its number and
 #                                     records the new key. The recorded value is
@@ -1558,6 +1637,28 @@ migrate_qi_registry() {
       n = split(k, a, /[|]/)
       return (n == 4 && a[1] != "duplication-clone")
     }
+    # The same normalisation the CSV parser applies to the field on the way in,
+    # applied here to the value a registry recorded before it did. Both sides of
+    # every comparison are normalised or neither is; a key that differs only by
+    # quoting is the same key, and treating it as a different one loses an id.
+    #
+    # "" is honoured as an escaped quote for the sake of being a CSV reader,
+    # though the producer sanitises a quote to an apostrophe and cannot emit one.
+    function unq(s,   t) {
+      t = s
+      if (t ~ /^".*"$/) { t = substr(t, 2, length(t) - 2); gsub(/""/, "\"", t) }
+      return t
+    }
+    # The normalised form of a five-field key whose scope is quoted, or "" when
+    # there is nothing to normalise. Slot 5 is untouched: the start line is what
+    # already tells the hotspots apart and this changes only how one is spelled.
+    function unquoted_of(k,   n, a, s) {
+      n = split(k, a, /[|]/)
+      if (n != 5 || a[1] == "duplication-clone") return ""
+      s = unq(a[3])
+      if (s == a[3]) return ""
+      return a[1] "|" a[2] "|" s "|" a[4] "|" a[5]
+    }
     function numlike(v) { return (v ~ /^-?[0-9]+([.][0-9]+)?$/) }
     function same_value(a, b) {
       if (numlike(a) && numlike(b)) return ((a + 0) == (b + 0))
@@ -1577,10 +1678,41 @@ migrate_qi_registry() {
       pn = ++prows
       pkey[pn] = $1; pid[pn] = $2; pfirst[pn] = $3; pstat[pn] = $4; pval[pn] = $5; psup[pn] = $6
       if (is_old($1)) { gn = ++gc[$1]; gi[$1, gn] = pn }
+      else {
+        uk = unquoted_of($1)
+        if (uk != "") { qn = ++qc[uk]; qx[uk, qn] = pn }
+      }
     }
     END {
       changed = 0
       for (pn = 1; pn <= prows; pn++) newkey[pn] = pkey[pn]
+
+      # The rename. No live set is consulted and no value is matched, because
+      # neither is evidence of anything here — the key already names one hotspot
+      # and keeps naming it.
+      #
+      # Refuse first, rename second, so a registry holding one bad group does not
+      # get half-migrated before the run stops.
+      for (k in qc) {
+        if (qc[k] <= 1) continue
+        printf "  %d entries normalise onto the one key %s\n", qc[k], k > "/dev/stderr"
+        for (g = 1; g <= qc[k]; g++) {
+          pn = qx[k, g]
+          printf "    %s key %s (recorded value %s)\n", pid[pn], pkey[pn], pval[pn] > "/dev/stderr"
+        }
+        fatal = 1
+      }
+      # Walked in DOCUMENT order, not by iterating the group map: `for (k in arr)`
+      # visits in whatever order awk feels like, and this loop writes lines into a
+      # file somebody keeps. Two machines migrating one registry should produce
+      # the same paragraph, so the order comes from the registry itself.
+      for (pn = 1; pn <= prows; pn++) {
+        uk = unquoted_of(pkey[pn])
+        if (uk == "" || qc[uk] > 1) continue
+        newkey[pn] = uk
+        printf "- %s — scope normalised: `%s` → `%s`\n", pid[pn], pkey[pn], uk >> REC
+        changed = 1
+      }
 
       for (k in gc) {
         ng = gc[k]; nl = (k in lc) ? lc[k] : 0
@@ -1682,6 +1814,12 @@ assert_qi_identity() {
   #    start-line columns are optional (a build that stops emitting them still
   #    measures complexity fine), so this is reachable — and a key ending in an
   #    empty slot is exactly the collapse PD-01 removes, reintroduced quietly.
+  #
+  #    The message says the row carried no start line, NOT that lizard emitted
+  #    none. It said the latter for one release while the real cause was this
+  #    collector splitting lizard's CSV on commas and shifting the column off
+  #    the end, and it sent the reader to the wrong tool. State the observation;
+  #    the cause is whatever the next person finds.
   bad="$(jq -r '
     [ .quality_issues[]
       | select(.status == "open")
@@ -1694,7 +1832,40 @@ assert_qi_identity() {
   if [ -n "$bad" ]; then
     die "QI identity is incomplete — these hotspots have no start line, so their keys cannot be told apart:
 ${bad}
-The measuring tool emitted no start-line column for them (lizard --csv fields 10 and 11). Registering them would re-create the collision PD-01 fixes, so the run stops instead."
+Their measurement rows carried no start-line column (lizard --csv fields 10 and 11). Registering them would re-create the collision PD-01 fixes, so the run stops instead."
+  fi
+
+  # 1b. A scope still wearing the measuring tool quotes. Nothing downstream is
+  #     harmed by a quoted scope — it keys and compares like any other string —
+  #     which is exactly why it went unnoticed for a release while `"Login"` and
+  #     `Login` named the same function and no longer met. It cannot recur while
+  #     the CSV parser unquotes, so this asserts that it still does, at the one
+  #     place that would otherwise notice nothing at all.
+  #
+  #     Tombstones are exempt for the same reason they are exempt from the
+  #     uniqueness check below: such an entry preserves the historical key it was
+  #     a duplicate under, verbatim, and one written while scopes were quoted is
+  #     recording a quoted scope accurately. Normalising it would falsify it, and
+  #     failing the run over it would strand a registry nobody can fix.
+  #
+  #     THE SURROUNDING PAIR, not a quote anywhere. This predicate is the same
+  #     one unquoted_of() migrates on, deliberately: an assertion that refuses
+  #     more than the migration can repair is a run that dies with nothing able
+  #     to clear it. A quote INSIDE a name is a name — the CSV parser honours ""
+  #     as an escaped quote, so `say "hi" ok` is what that function is called —
+  #     and it is only the wrapper that means the field was never unquoted.
+  bad="$(jq -r '
+    [ .quality_issues[]
+      | select(.status != "superseded-duplicate")
+      | select(.metric != "duplication-clone")
+      | select((.key | split("|") | length) >= 3)
+      | select((.key | split("|") | .[2]) | test("^\".*\"$"))
+      | "  " + .id + "  " + .key ]
+    | join("\n")' "$qjson" 2>/dev/null)"
+  if [ -n "$bad" ]; then
+    die "QI identity carries a quoted scope — the function name reached the key without being normalised:
+${bad}
+A scope is the bare function name. Quoted, it keys as a different hotspot from the same function measured by anything else, which silently splits one id into two. Nothing was written."
   fi
 
   # 2. Two entries, one key. Names BOTH sides and their values, because the next
@@ -2510,10 +2681,19 @@ cmd_collect() {
   # ── PD-03: migrate the registry onto the new key shape ───────────────────
   #
   # Legacy scope only, for the same reason the registry itself is legacy-only: a
-  # target run has no registry to migrate. Guarded on there being an old-format
+  # target run has no registry to migrate. Guarded on there being a migratable
   # key at all, so the steady state costs nothing — no dry pass, no second jq.
+  #
+  # BOTH shapes are counted, or the guard hides the migration it gates: a
+  # registry whose keys are all five-field but quoted has no four-field key left
+  # to trip the old count, and would have sailed past into a renumbering.
   local n_old_keys
-  n_old_keys="$(awk -F'\t' '{n = split($1, a, /[|]/); if (n == 4 && a[1] != "duplication-clone") c++} END {print c + 0}' "$W/prior_qi.tsv")"
+  n_old_keys="$(awk -F'\t' '
+    { n = split($1, a, /[|]/)
+      if (a[1] == "duplication-clone") next
+      if (n == 4) { c++; next }
+      if (n == 5 && a[3] ~ /^".*"$/) c++ }
+    END {print c + 0}' "$W/prior_qi.tsv")"
   if ! $is_target && [ "$n_old_keys" -gt 0 ]; then
     printf '[]' > "$W/empty.json"
     # The dry pass. Its ids are discarded — only the live keys and their measured
@@ -2548,7 +2728,7 @@ Nothing was written. Resolve it by hand in the registry — give each colliding 
       local mig_new
       mig_new="### ${generated_at}
 
-Identity keys gained a start line so that two hotspots in one file can no longer share one id. Exclusion config \`${excl_hash}\`.
+Identity keys gained a start line so that two hotspots in one file can no longer share one id, and a scope is now spelled without the quotes the measuring tool put around it. Every id below kept its number and its first-seen date. Exclusion config \`${excl_hash}\`.
 
 $(cat "$W/migration.txt")"
       if [ -n "$qi_migrations" ]; then
