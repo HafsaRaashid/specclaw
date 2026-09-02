@@ -956,6 +956,36 @@ run_lizard() {
       if (nf < 8) next
       if (f[1] !~ /^[0-9]+$/ || f[2] !~ /^[0-9]+$/) next
       if (f[4] !~ /^[0-9]+$/ || f[5] !~ /^[0-9]+$/) next
+      # THE FILE-SCOPE PSEUDO-FUNCTION IS NOT A FUNCTION. lizard reports the code
+      # outside every function as one more row, and names it *global*:
+      #
+      #   self.global_pseudo_function = FunctionInfo("*global*", filename, 0)
+      #
+      # — its own words, in lizard.py, and the 0 is the start line by
+      # construction. It is emitted for C#, Python and the Go-like readers among
+      # others, its length is the WHOLE FILE span, and one file can carry several
+      # of these rows, byte for byte identical.
+      #
+      # Three things go wrong if it is taken as a function, and all three did:
+      #
+      #   - it registers a function_length hotspot claiming a 214-line function
+      #     that does not exist. The file is already measured by file_length,
+      #     from the file-length tool, so nothing is lost by dropping it.
+      #   - several identical rows produce several identical QI keys — same
+      #     scope, same start line 0 — and the run stops on the uniqueness
+      #     assertion. That is the assertion working: the rows really are
+      #     indistinguishable, because they are the same non-function.
+      #   - it is the collector own *global* sentinel, character for character.
+      #     The scope slot is meant to say "this metric has no function", and a
+      #     value arriving from the tool that spells that exactly is not
+      #     distinguishable from the collector saying it.
+      #
+      # Dropped HERE, at the boundary, so no consumer has to know: not the
+      # rollups, which would otherwise take a whole-file span as their longest
+      # function, and not the clone join, which would otherwise attach the name
+      # *global* to any clone in the file, since a 0-to-end span overlaps
+      # everything.
+      if (f[8] == "*global*") next
       s = (nf >= 10 && f[10] ~ /^[0-9]+$/) ? f[10] : ""
       e = (nf >= 11 && f[11] ~ /^[0-9]+$/) ? f[11] : ""
       if (s != "" && e != "" && (e + 0) < (s + 0)) { s = ""; e = "" }
@@ -1866,6 +1896,34 @@ Their measurement rows carried no start-line column (lizard --csv fields 10 and 
     die "QI identity carries a quoted scope — the function name reached the key without being normalised:
 ${bad}
 A scope is the bare function name. Quoted, it keys as a different hotspot from the same function measured by anything else, which silently splits one id into two. Nothing was written."
+  fi
+
+  # 1c. A per-function metric whose scope is the file-scope sentinel. *global*
+  #     means "this metric has no function" and belongs to file_length and
+  #     duplication; a complexity or function_length hotspot wearing it is a
+  #     measurement of something that is not a function.
+  #
+  #     It is reachable exactly one way: lizard names its file-scope pseudo-row
+  #     *global* too, and run_lizard drops those rows. So this asserts the drop
+  #     still happens — the failure it guards produced a run that stopped on the
+  #     uniqueness check below with several identical keys, which named the
+  #     collision accurately and said nothing about where it came from.
+  #
+  #     OPEN only. A registry written before those rows were dropped holds
+  #     entries with exactly this shape; they are no longer live, so they arrive
+  #     here as `resolved` and carry their historical key verbatim. Failing the
+  #     run over them would strand every registry that ever recorded one.
+  bad="$(jq -r '
+    [ .quality_issues[]
+      | select(.status == "open")
+      | select(.metric == "complexity" or .metric == "function_length")
+      | select(.scope == "*global*")
+      | "  " + .id + "  " + .metric + "  " + (.file // "—") + "  value=" + (.value | tostring) ]
+    | join("\n")' "$qjson" 2>/dev/null)"
+  if [ -n "$bad" ]; then
+    die "QI identity names a function that is not one — these hotspots are scoped *global*, which is the file-scope sentinel:
+${bad}
+lizard reports the code outside every function as a row it names *global*, spanning the whole file and starting at line 0; run_lizard drops those rows because they are not functions and several of them per file are identical. One reached the registry, so the drop is not happening. Nothing was written."
   fi
 
   # 2. Two entries, one key. Names BOTH sides and their values, because the next

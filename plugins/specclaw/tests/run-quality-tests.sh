@@ -124,6 +124,12 @@
 #                                   place: same id, same first seen, no renumbering,
 #                                   idempotent, and a quoted scope in the artifact
 #                                   stops the run
+#  44  the file-scope pseudo-row   → lizard names the code outside every function
+#                                   *global*, spans the whole file, starts at line 0
+#                                   and can emit it several times per file. It is not
+#                                   a function: it registers nothing, it does not
+#                                   inflate a rollup, and several of them no longer
+#                                   collide. The file-level sentinel still works.
 #
 # Plain bash + coreutils, plus jq for assertions (same as run-parser-tests.sh
 # and run-cs-body-parser-tests.sh). Run from anywhere:
@@ -3217,6 +3223,83 @@ if [[ -f "$C43B/.specclaw/analysis/quality.json" ]]; then
 else
   pass "43k nothing is written when the scope cannot be trusted"
 fi
+
+# ── Case 44 — lizard's file-scope pseudo-function is not a function ──────────
+#
+# lizard reports the code outside every function as one more row and names it
+# *global*:
+#
+#   self.global_pseudo_function = FunctionInfo("*global*", filename, 0)
+#
+# — lizard.py, and the 0 is the start line by construction. Its length is the
+# whole file span, and one file can carry SEVERAL of these rows, byte for byte
+# identical. On a real C# controller lizard emitted three.
+#
+# Taken as a function it did three things, and this case pins all three:
+# registered a function_length hotspot for a 214-line function that does not
+# exist; took the whole-file span as the module's longest function; and, being
+# character-for-character the collector's own *global* sentinel with a start
+# line of 0, produced several identical keys and stopped the run on the
+# uniqueness assertion. The assertion was right — the rows really are
+# indistinguishable, because they are the same non-function.
+
+echo
+echo "--- Case 44: the *global* pseudo-row registers nothing and collides with nothing ---"
+C44="$WORK/c44"; new_project "$C44"; module_map_one "$C44"
+S44="$WORK/c44-stub"
+# 2000 lines, so the file itself is a HIGH file_length hotspot — that is the
+# LEGITIMATE user of the *global* sentinel, and it must be unaffected.
+stub_scc "$S44" '[{"Name":"C#","Files":[{"Location":"src/Calc.cs","Lines":2000,"Code":1800}]}]'
+# One real function, then the pseudo-row three times over, exactly as the tool
+# emits it: same span, same start line 0, byte for byte identical.
+stub_lizard "$S44" "$(liz_row_real 'src/Calc.cs' 'Run' 30 200 10 210)
+$(liz_row_real 'src/Calc.cs' '*global*' 1 500 0 499 '')
+$(liz_row_real 'src/Calc.cs' '*global*' 1 500 0 499 '')
+$(liz_row_real 'src/Calc.cs' '*global*' 1 500 0 499 '')"
+
+c44_err="$( cd "$C44" && PATH="$(clean_path "$S44")" bash "$QUALITY_BIN" collect .specclaw 2>&1 >/dev/null )"
+c44_exit=$?
+C44_JSON="$C44/.specclaw/analysis/quality.json"
+
+assert_eq "44a three identical pseudo-rows no longer stop the run" "0" "$c44_exit"
+if [[ "$c44_err" == *"QI identity collision"* ]]; then
+  fail "44b and nothing collides"
+else
+  pass "44b and nothing collides"
+fi
+
+c44_keys="$(jq -r '[.quality_issues[] | .key] | sort | join(";")' "$C44_JSON" 2>/dev/null)"
+assert_eq_nonempty "44c the real function registers, the pseudo-row does not, the file still does" \
+  'complexity|src/Calc.cs|Run|MOD-001|10;file_length|src/Calc.cs|*global*|MOD-001|1;function_length|src/Calc.cs|Run|MOD-001|10' \
+  "$c44_keys"
+
+# The one that would have been silently wrong even with a single pseudo-row and
+# no collision at all: a 500-line "function" nobody wrote, and a rollup that
+# reports it as the module's longest.
+c44_fl="$(jq -r '[.quality_issues[] | select(.metric == "function_length") | .value] | join(",")' "$C44_JSON" 2>/dev/null)"
+assert_eq_nonempty "44d no function_length hotspot claims the whole-file span" "200" "$c44_fl"
+c44_max="$(jq -r '[.modules[] | select(.module_id == "MOD-001") | "\(.function_length.max)/\(.complexity.max)"] | first' "$C44_JSON" 2>/dev/null)"
+assert_eq_nonempty "44e and the rollup maxima come from the real function" "200/30" "$c44_max"
+
+# The sentinel keeps its job. *global* is how a file- or module-level metric says
+# it has no function, and dropping the tool rows must not touch that.
+c44_glob="$(jq -r '[.quality_issues[] | select(.scope == "*global*") | .metric] | sort | join(",")' "$C44_JSON" 2>/dev/null)"
+assert_eq_nonempty "44f *global* survives where it means what it says" "file_length" "$c44_glob"
+
+# Single pseudo-row, no collision available: the old failure that the uniqueness
+# assertion could never have caught, because one of anything is unique.
+C44B="$WORK/c44b"; new_project "$C44B"; module_map_one "$C44B"
+S44B="$WORK/c44b-stub"
+stub_scc "$S44B" '[{"Name":"C#","Files":[{"Location":"src/Calc.cs","Lines":80,"Code":70}]}]'
+stub_lizard "$S44B" "$(liz_row_real 'src/Calc.cs' 'Run' 4 20 10 30)
+$(liz_row_real 'src/Calc.cs' '*global*' 1 500 0 499 '')"
+
+( cd "$C44B" && PATH="$(clean_path "$S44B")" bash "$QUALITY_BIN" collect .specclaw >/dev/null 2>&1 )
+C44B_JSON="$C44B/.specclaw/analysis/quality.json"
+c44b_n="$(jq -r '[.quality_issues[] | select(.metric == "function_length")] | length' "$C44B_JSON" 2>/dev/null)"
+assert_eq_nonempty "44g one pseudo-row registers no hotspot either — uniqueness could never have caught it" "0" "$c44b_n"
+c44b_max="$(jq -r '[.modules[] | select(.module_id == "MOD-001") | .function_length.max] | first' "$C44B_JSON" 2>/dev/null)"
+assert_eq_nonempty "44h and the module's longest function is the one that exists" "20" "$c44b_max"
 
 # ── Result ───────────────────────────────────────────────────────────────────
 
