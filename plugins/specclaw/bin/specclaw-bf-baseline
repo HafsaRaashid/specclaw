@@ -928,12 +928,24 @@ cmd_record() {
         # The library and the program must be ONE jq argument (they are
         # concatenated below, no space) — passed as two, jq reads the second
         # as a filename and every check silently reads back null.
+        # The output itself goes through a FILE, never --argjson. A golden
+        # master of a list, a report, or a paged response is easily tens of
+        # KB, and Windows caps a command line at ~32,767 characters — passed
+        # through argv, a fat but perfectly valid fixture made this jq die
+        # with "Argument list too long", and `record` then reported the
+        # fixture as missing outcome/threw/error_code and told the operator to
+        # re-capture it. A false finding is worse than a crash: the crash at
+        # least announced itself. `|| true` keeps a write failure flowing into
+        # the same "could not be analysed" handler below instead of aborting
+        # the whole record under `set -e`.
         local facts
+        jq -c '.output // null' "$fixture_path" > "$workdir/fixture-output.json" 2>/dev/null || true
         if ! facts="$(jq -n \
-              --argjson out "$(jq -c '.output // null' "$fixture_path")" \
+              --slurpfile out_in "$workdir/fixture-output.json" \
               --argjson norm "$normalized_fields" \
               "$GM_PATHS_JQ"'
-          {
+          ($out_in[0]) as $out
+          | {
             has_outcome:    gm_has_leaf($out; "outcome"),
             has_threw:      gm_has_leaf($out; "threw"),
             has_error_code: gm_has_leaf($out; "error_code"),

@@ -11,6 +11,8 @@
 #   - three-way divergence classification and the verdict order (j.3)
 #   - ARG_MAX: that no large payload (a selection, a result set, one
 #     fixture's captured output) is ever handed to jq through argv
+#   - that an absent fact (a domain model naming no rule) renders as the
+#     absence it is, rather than crashing or reading as full coverage
 #
 # Every one of these is bash/jq computing a fact from declared data — exactly
 # the code where a silent regression turns "we checked and it was fine" into
@@ -1098,6 +1100,89 @@ assert_eq "T-ARGMAX-03: and identical key ORDER inside a fixture entry" \
 assert_eq "T-ARGMAX-03: MOD-001 still selects every fixture tagged with it" "70" \
   "$(jq -r '.selected_count' "$MOD_SEL" 2>/dev/null | tr -d '\r')"
 
+# ── T-ARGMAX-04 — bf-baseline record over one fat golden master ────────────
+# The SAME defect, in the command that WRITES the manifest everything else
+# reads. `record` analysed each fixture's captured output through --argjson, so
+# a fat but perfectly valid golden master made its jq die with "Argument list
+# too long" — and because record catches that failure and carries on
+# collecting, it then reported the fixture as missing outcome/threw/error_code
+# and told the operator to re-capture it. That false finding is the reason this
+# test asserts the DERIVED FACTS and not just the exit code: a transport that
+# silently analysed `null` would exit 0 here and still be wrong about every
+# fixture.
+FATREC="$WORK/argmax-fatrec"
+seed_baseline "$FATREC"
+FATREC_FX="$FATREC/.specclaw/baseline/fixtures/GM-001.json"
+jq -c '.output.result.lines = [ range(0; 300)
+        | {line_no: ., sku: ("SKU-" + (. | tostring)),
+           description: ("Invoice line " + (. | tostring) + " for period 2026-08"),
+           account: "1000", qty: 3, unit_price: 12.5, tax_code: "VAT-STD", amount: 37.5} ]' \
+  "$FATREC_FX" > "$FATREC/fat.tmp" && mv "$FATREC/fat.tmp" "$FATREC_FX"
+
+fatrec_payload="$(jq -c '.output' "$FATREC_FX" | wc -c | tr -d ' \r')"
+assert_eq "T-ARGMAX-04: the fixture's compact output exceeds the argv limit (${fatrec_payload} bytes)" \
+  "yes" "$([ "$fatrec_payload" -ge 32767 ] && echo yes || echo no)"
+
+out="$(bash "$BASELINE_BIN" record "$FATREC/.specclaw" 2>&1)"; rc=$?
+assert_eq "T-ARGMAX-04: record survives a fat golden master" "0" "$rc"
+assert_eq "T-ARGMAX-04: and writes the manifest" "yes" \
+  "$([ -f "$FATREC/.specclaw/baseline/manifest.json" ] && echo yes || echo no)"
+# The false finding this defect produced, named exactly so it cannot come back.
+assert_eq "T-ARGMAX-04: it does NOT report a valid fixture as predating the error contract" "0" \
+  "$(printf '%s' "$out" | grep -c 'predates the semantic error contract' | tr -d ' \r')"
+assert_eq "T-ARGMAX-04: nor claims the output could not be analysed" "0" \
+  "$(printf '%s' "$out" | grep -c 'could not be analysed' | tr -d ' \r')"
+# The analysis genuinely ran: a transport degrading to null would leave all of
+# these empty, false, or unresolved while still exiting 0.
+assert_eq "T-ARGMAX-04: the outcome was read off the fat output" "OK" \
+  "$(jq -r '.fixtures[0].outcome' "$FATREC/.specclaw/baseline/manifest.json" 2>/dev/null | tr -d '\r')"
+assert_eq "T-ARGMAX-04: threw was read as a real false, not a null" "false" \
+  "$(jq -r '.fixtures[0].threw' "$FATREC/.specclaw/baseline/manifest.json" 2>/dev/null | tr -d '\r')"
+assert_eq "T-ARGMAX-04: and the normalized path resolved against it" "1" \
+  "$(jq -r '.fixtures[0].normalized_fields_resolved[0].matches' "$FATREC/.specclaw/baseline/manifest.json" 2>/dev/null | tr -d '\r')"
+
+# ─────────────────────────────────────────────────────────────────────────────
+echo "== render: a document that names no DR rule is an absence, not a crash =="
+#
+# `all_dr=$(grep -oE 'DR-[0-9]{3}' … | sort -u)` under `set -e`: grep exits 1
+# when it matches nothing, which killed render AFTER compare had run, BEFORE
+# any report was written, with zero bytes of output and exit 1 — and exit 1 is
+# this command's FAIL code, so a domain model nobody had filled in read on its
+# face as a failed replay.
+#
+# The second assertion is the one that matters most. An empty domain model must
+# not render as "every documented business rule is covered": zero rules
+# documented is not full coverage, and reporting a vacuous truth as evidence is
+# the failure mode this whole pipeline exists to avoid.
+DRLESS="$WORK/render-drless"
+seed_bulk "$DRLESS" 3
+DRLESS_RD="$DRLESS/.specclaw/replay/run-D"
+bash "$REPLAY_BIN" resolve "$DRLESS/.specclaw" --all "$DRLESS_RD/selection.json" >/dev/null 2>&1
+seed_bulk_run "$DRLESS" "$DRLESS_RD"
+bash "$REPLAY_BIN" compare "$DRLESS/.specclaw" "$DRLESS_RD" >/dev/null 2>&1
+# The document exists and was never filled in — the state that used to crash.
+printf '# Domain Model\n\n_Not yet written._\n' > "$DRLESS/.specclaw/analysis/domain-model.md"
+
+out="$(bash "$REPLAY_BIN" render "$DRLESS/.specclaw" --all "$DRLESS_RD" 2>&1)"; rc=$?
+assert_eq "render reaches a verdict instead of dying on the empty document" "0" "$rc"
+assert_contains "and it is the PASS a clean run earns" "$out" "Overall verdict: PASS"
+assert_eq "the report was written" "yes" \
+  "$([ -f "$DRLESS/.specclaw/replay/report-D.md" ] && echo yes || echo no)"
+assert_eq "the report states the absence rather than claiming full coverage" "1" \
+  "$(grep -c 'documents no DR-### rule' "$DRLESS/.specclaw/replay/report-D.md" | tr -d ' \r')"
+assert_eq "and never says every rule is covered when none are documented" "0" \
+  "$(grep -c 'every documented business rule is covered' "$DRLESS/.specclaw/replay/report-D.md" | tr -d ' \r')"
+
+# The populated case is untouched: a real domain model still yields the real
+# covered/uncovered split, so the guard above did not flatten the feature.
+printf '# Domain Model\n\n- DR-001: r.\n- DR-002: r.\n- DR-999: never covered.\n' \
+  > "$DRLESS/.specclaw/analysis/domain-model.md"
+out="$(bash "$REPLAY_BIN" render "$DRLESS/.specclaw" --all "$DRLESS_RD" 2>&1)"; rc=$?
+assert_eq "a populated domain model still renders" "0" "$rc"
+assert_eq "and still lists the rule no fixture covers" "1" \
+  "$(grep -c '^- DR-999$' "$DRLESS/.specclaw/replay/report-D.md" | tr -d ' \r')"
+assert_eq "while not listing one that is covered" "0" \
+  "$(grep -c '^- DR-001$' "$DRLESS/.specclaw/replay/report-D.md" | tr -d ' \r')"
 # ─────────────────────────────────────────────────────────────────────────────
 echo
 echo "Passed: ${PASS}   Failed: ${FAIL}"

@@ -2008,17 +2008,30 @@ specclaw-bf-rebuild-collect split-update .specclaw ${sp_id} \\
   local dr_uncovered_list
   if [ -f "$domain_model" ]; then
     local all_dr dr_uncovered_lines=()
-    all_dr=$(grep -oE 'DR-[0-9]{3}' "$domain_model" | sort -u)
-    while IFS= read -r dr; do
-      [ -z "$dr" ] && continue
-      if ! jq -e --arg dr "$dr" 'index($dr) != null' <<< "$dr_covered" >/dev/null 2>&1; then
-        dr_uncovered_lines+=("- ${dr}")
-      fi
-    done <<< "$all_dr"
-    if [ "${#dr_uncovered_lines[@]}" -eq 0 ]; then
-      dr_uncovered_list="_None — every documented business rule is covered by at least one replayable fixture in this run._"
+    # `|| true` is load-bearing: grep exits 1 when it matches nothing, and
+    # under `set -e` that killed render here — after compare had already run,
+    # before any report was written, with no message and exit 1. Exit 1 is
+    # this command's FAIL code, so a missing document read on its face as a
+    # failed replay.
+    all_dr=$(grep -oE 'DR-[0-9]{3}' "$domain_model" | sort -u || true)
+    if [ -z "$all_dr" ]; then
+      # The document exists but names no rule. That is NOT the same claim as
+      # "every rule is covered", and saying so would turn an empty domain
+      # model into a coverage guarantee — a vacuous truth reported as
+      # evidence. It is stated as the absence it is.
+      dr_uncovered_list="_domain-model.md documents no DR-### rule, so this run's coverage has nothing to be measured against. This is not a statement that coverage is complete._"
     else
-      dr_uncovered_list=$(printf '%s\n' "${dr_uncovered_lines[@]}")
+      while IFS= read -r dr; do
+        [ -z "$dr" ] && continue
+        if ! jq -e --arg dr "$dr" 'index($dr) != null' <<< "$dr_covered" >/dev/null 2>&1; then
+          dr_uncovered_lines+=("- ${dr}")
+        fi
+      done <<< "$all_dr"
+      if [ "${#dr_uncovered_lines[@]}" -eq 0 ]; then
+        dr_uncovered_list="_None — every documented business rule is covered by at least one replayable fixture in this run._"
+      else
+        dr_uncovered_list=$(printf '%s\n' "${dr_uncovered_lines[@]}")
+      fi
     fi
   else
     dr_uncovered_list="_domain-model.md not found — cannot compute uncovered DR rules._"
