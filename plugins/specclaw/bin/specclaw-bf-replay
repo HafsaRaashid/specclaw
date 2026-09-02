@@ -8,6 +8,40 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PLUGIN_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
+# ─── Large-payload transport ─────────────────────────────────────────────────
+# A command line is not a data channel. Windows caps one at ~32,767 characters
+# and POSIX has its own ARG_MAX, so a jq invocation handed a whole fixture
+# selection through --argjson dies with E2BIG (exit 126, "Argument list too
+# long") before jq reads a byte: a 48-fixture manifest compacts to ~38 KB, and
+# what actually reaches argv is jq's own PRETTY-printed output, three to four
+# times that again. So every payload here that grows with fixture count,
+# selection size, backlog size, stub-registry size, or one fixture's captured
+# output travels by FILE (--slurpfile) or by stdin. Only fixed-size scalars
+# still ride argv.
+#
+# The read side keeps one convention: `--slurpfile <name>_in "$(sc_payload …)"`
+# plus a single `($<name>_in[0]) as $<name>` binding at the top of the program.
+# Every existing reference inside the jq query therefore stays byte-identical,
+# and a transport change cannot quietly become a query change.
+#
+# SC_TMPDIR is created HERE, eagerly, in the main shell — never lazily inside
+# sc_payload. sc_payload is called from inside "$( … )", and a subshell that
+# created the directory would also fire the EXIT trap that removes it, deleting
+# the payload before jq ever opened it.
+SC_TMPDIR="$(mktemp -d)"
+trap 'rm -rf "$SC_TMPDIR"' EXIT
+
+# Writes $2 into a slot file under this run's private temp dir and echoes the
+# path. One file per slot name, rewritten in place, so a payload recomputed in
+# a loop reuses one file instead of leaking one per iteration. Slot names must
+# be distinct WITHIN a single jq invocation; across invocations they are free
+# to repeat, because bash finishes every substitution before jq is exec'd.
+sc_payload() {
+  local slot="$1" value="$2"
+  printf '%s' "$value" > "${SC_TMPDIR}/${slot}.json"
+  printf '%s' "${SC_TMPDIR}/${slot}.json"
+}
+
 # ─── Helpers ──────────────────────────────────────────────────────────────────
 
 usage() {
@@ -807,8 +841,9 @@ ${joined}"
   # left and silently disable taint, which is the very failure mode this whole
   # change exists to fix. Attribution feeds taint and coverage reporting only;
   # it can never move a verdict or a selection.
-  selected_fixtures="$(jq --argjson drmap "$dr_map" '
-    [ .[] | . as $fx
+  selected_fixtures="$(jq --slurpfile drmap_in "$(sc_payload drmap "$dr_map")" '
+    ($drmap_in[0]) as $drmap
+    | [ .[] | . as $fx
       | ((.business_rules_pinned // "") | [scan("DR-[0-9]{3}")]) as $pinned
       | ([ $drmap | to_entries[]
            | select(.value | any(. as $d | $pinned | index($d)))
@@ -840,8 +875,9 @@ ${joined}"
 
   # Joins on `bl_items_resolved` (above), ANY-of: a fixture verifying either of
   # two items is tainted by a stub either of them consumed.
-  selected_fixtures="$(jq --argjson stubs "$stubs_active" '
-    [ .[] | . as $fx
+  selected_fixtures="$(jq --slurpfile stubs_in "$(sc_payload stubs "$stubs_active")" '
+    ($stubs_in[0]) as $stubs
+    | [ .[] | . as $fx
       | ($fx.bl_items_resolved // []) as $bls
       | $fx + { stub_refs:
           [ $stubs[] | select(.consumed_by | any(. as $c | $bls | index($c))) | .id ] } ]
@@ -851,8 +887,9 @@ ${joined}"
   # A stub faking a module nobody in this selection consumes is irrelevant to
   # this report and naming it would pad the honesty signal into noise.
   local stubs_in_effect retirement_candidates
-  stubs_in_effect="$(jq --argjson sel "$selected_fixtures" '
-    [ .[] as $s
+  stubs_in_effect="$(jq --slurpfile sel_in "$(sc_payload sel "$selected_fixtures")" '
+    ($sel_in[0]) as $sel
+    | [ .[] as $s
       | ([ $sel[] | select((.stub_refs // []) | index($s.id)) | .scenario_id ]) as $hits
       | select(($hits | length) > 0)
       | {id: $s.id, summary: $s.summary, substitutes: $s.substitutes,
@@ -865,8 +902,12 @@ ${joined}"
   # with a registry edit by hand.
   local selected_bls
   selected_bls="$(jq '[ .[] | (.bl_items_resolved // [])[] ] | unique' <<< "$selected_fixtures")"
-  retirement_candidates="$(jq --argjson all "$stubs_all" --argjson bls "$selected_bls" -n '
-    [ $all[] | select(.status == "RETIRING")
+  retirement_candidates="$(jq -n \
+    --slurpfile all_in "$(sc_payload stubs_all "$stubs_all")" \
+    --slurpfile bls_in "$(sc_payload bls "$selected_bls")" '
+    ($all_in[0]) as $all
+    | ($bls_in[0]) as $bls
+    | [ $all[] | select(.status == "RETIRING")
       | . as $s | select([ $s.consumed_by[] | select(. as $b | $bls | index($b)) ] | length > 0)
       | {id: $s.id, summary: $s.summary, substitutes: $s.substitutes,
          strategy: $s.strategy,
@@ -911,8 +952,10 @@ ${joined}"
   if [ -n "$bl_id" ]; then
     local splits_all
     splits_all="$(splits_json "$specclaw_dir_abs/analysis/item-splits.md")"
-    item_split_json="$(jq -c --arg bl "$bl_id" --argjson sel "$selected_fixtures" '
-      [ .[] | select(.item == $bl)
+    item_split_json="$(jq -c --arg bl "$bl_id" \
+      --slurpfile sel_in "$(sc_payload item_split_sel "$selected_fixtures")" '
+      ($sel_in[0]) as $sel
+      | [ .[] | select(.item == $bl)
             | select(.status == "ACTIVE" or .status == "READY-TO-RESUME") ] as $open
       | if ($open | length) == 0 then null
         else ($open[0]) as $s
@@ -946,17 +989,24 @@ ${joined}"
     --arg bl "$bl_id" \
     --arg module "$module_id" \
     --arg kind "$kind" \
-    --argjson fixtures "$selected_fixtures" \
-    --argjson dr_rules "$dr_rules_json" \
-    --argjson legacy_shas "$legacy_shas_json" \
-    --argjson module_totals "$module_totals_json" \
+    --slurpfile fixtures_in "$(sc_payload fixtures "$selected_fixtures")" \
+    --slurpfile dr_rules_in "$(sc_payload dr_rules "$dr_rules_json")" \
+    --slurpfile legacy_shas_in "$(sc_payload legacy_shas "$legacy_shas_json")" \
+    --slurpfile module_totals_in "$(sc_payload module_totals "$module_totals_json")" \
     --argjson count "$count" \
     --argjson manifest_schema "$manifest_schema" \
     --arg manifest_plugin_version "${manifest_plugin_version:-unknown}" \
-    --argjson stubs_in_effect "$stubs_in_effect" \
-    --argjson retirement_candidates "$retirement_candidates" \
-    --argjson item_split "$item_split_json" \
-    '{
+    --slurpfile stubs_in_effect_in "$(sc_payload stubs_effect "$stubs_in_effect")" \
+    --slurpfile retirement_candidates_in "$(sc_payload retirement "$retirement_candidates")" \
+    --slurpfile item_split_in "$(sc_payload item_split "$item_split_json")" \
+    '($fixtures_in[0]) as $fixtures
+    | ($dr_rules_in[0]) as $dr_rules
+    | ($legacy_shas_in[0]) as $legacy_shas
+    | ($module_totals_in[0]) as $module_totals
+    | ($stubs_in_effect_in[0]) as $stubs_in_effect
+    | ($retirement_candidates_in[0]) as $retirement_candidates
+    | ($item_split_in[0]) as $item_split
+    | {
       target: $target,
       target_kind: $kind,
       bl_item: (if $bl == "" then null else $bl end),
@@ -1159,11 +1209,13 @@ cmd_run_tests() {
 compute_diffs() {
   local expected_json="$1" actual_json="$2" normalized_json="$3"
   jq -n \
-    --argjson expected "$expected_json" \
-    --argjson actual "$actual_json" \
+    --slurpfile expected_in "$(sc_payload expected "$expected_json")" \
+    --slurpfile actual_in "$(sc_payload actual "$actual_json")" \
     --argjson normalized "$normalized_json" \
     "$GM_PATHS_JQ"'
-      gm_diffs($expected; $actual; $normalized) as $d
+      ($expected_in[0]) as $expected
+      | ($actual_in[0]) as $actual
+      | gm_diffs($expected; $actual; $normalized) as $d
       | { diffs: $d,
           divergence_class: gm_divergence_class($d),
           normalization_warnings:
@@ -1279,7 +1331,9 @@ cmd_compare() {
     results="$(jq \
       --arg sid "$sid" --arg status "$fixture_status" --arg layer "$legacy_layer" \
       --argjson st "$stub_refs" \
-      --argjson a "$analysis" '. + [
+      --slurpfile a_in "$(sc_payload analysis "$analysis")" '
+      ($a_in[0]) as $a
+      | . + [
         (if ($a.diffs | length) == 0
          then {scenario_id: $sid, verdict: "MATCH", fixture_status: $status, stub_refs: $st, seam_layer: $layer}
          else {scenario_id: $sid, verdict: "DIVERGES", fixture_status: $status, stub_refs: $st, seam_layer: $layer,
@@ -1293,8 +1347,9 @@ cmd_compare() {
   local this_version
   this_version="$(plugin_version_of_this_run)"
 
-  jq -n --argjson results "$results" --arg pv "$this_version" '
-    {
+  jq -n --slurpfile results_in "$(sc_payload results "$results")" --arg pv "$this_version" '
+    ($results_in[0]) as $results
+    | {
       compare_schema: 2,
       plugin_version: $pv,
       results: $results,
@@ -1401,7 +1456,8 @@ cmd_sanction_check() {
       }]' <<< "$verified")"
   done < <(jq -c '.[]' "$sanction_file")
 
-  jq -n --argjson sanctions "$verified" '{sanctions: $sanctions}' > "$run_dir/sanction-verified.json"
+  jq -n --slurpfile sanctions_in "$(sc_payload sanctions "$verified")" \
+    '($sanctions_in[0]) as $sanctions | {sanctions: $sanctions}' > "$run_dir/sanction-verified.json"
 
   local sanctioned_n unsanctioned_n
   sanctioned_n=$(jq '[.sanctions[] | select(.sanctioned==true)] | length' "$run_dir/sanction-verified.json")
@@ -1506,8 +1562,9 @@ compute_verdict_summary() {
     merged=$(jq '[ .results[] | if .divergence_class == "behavioural" then . + {sanctioned:false} else . end ]' "$compare_file")
   fi
 
-  jq -n --argjson merged "$merged" --argjson selected "$selected_count" '
-    def exercised: (.verdict=="MATCH" or .verdict=="DIVERGES" or .verdict=="ERROR");
+  jq -n --slurpfile merged_in "$(sc_payload verdict_merged "$merged")" --argjson selected "$selected_count" '
+    ($merged_in[0]) as $merged
+    | def exercised: (.verdict=="MATCH" or .verdict=="DIVERGES" or .verdict=="ERROR");
     {
       match: ([$merged[] | select(.verdict=="MATCH")] | length),
       sanctioned: ([$merged[] | select(.divergence_class=="behavioural" and .sanctioned==true)] | length),
@@ -1763,8 +1820,9 @@ cmd_render() {
     sp_prior="$(jq -r '.replay_evidence // "not yet replayed"' <<< "$item_split" | tr -d '\r')"
     # Count only fixtures this run actually EXERCISED, the same filter taint
     # uses: a deferred-scope fixture that never ran says nothing either way.
-    sp_def_n="$(jq --argjson sp "$item_split" '
-      [ .[] | select(.verdict=="MATCH" or .verdict=="DIVERGES" or .verdict=="ERROR")
+    sp_def_n="$(jq --slurpfile sp_in "$(sc_payload render_split "$item_split")" '
+      ($sp_in[0]) as $sp
+      | [ .[] | select(.verdict=="MATCH" or .verdict=="DIVERGES" or .verdict=="ERROR")
             | select((.scenario_id) as $id | $sp.fixtures_covering_deferred | index($id)) ] | length' <<< "$merged")"
     local sp_exercised
     sp_exercised="$(jq '[ .[] | select(.verdict=="MATCH" or .verdict=="DIVERGES" or .verdict=="ERROR") ] | length' <<< "$merged")"
@@ -1904,8 +1962,9 @@ specclaw-bf-rebuild-collect split-update .specclaw ${sp_id} \\
   # same thing to a reader: this run is not yet citable as final proof, and a
   # named human (not another run) is what clears it.
   local open_decisions_blocking_pass
-  open_decisions_blocking_pass=$(jq -r --argjson merged "$merged" '
-    def exercised: (.verdict=="MATCH" or .verdict=="DIVERGES" or .verdict=="ERROR");
+  open_decisions_blocking_pass=$(jq -r --slurpfile merged_in "$(sc_payload render_merged "$merged")" '
+    ($merged_in[0]) as $merged
+    | def exercised: (.verdict=="MATCH" or .verdict=="DIVERGES" or .verdict=="ERROR");
     . as $sel
     | [ ($merged[] | select(exercised and .fixture_status=="PROVISIONAL")
           | . as $row
@@ -1939,8 +1998,9 @@ specclaw-bf-rebuild-collect split-update .specclaw ${sp_id} \\
 
   local replayable_sids dr_covered
   replayable_sids=$(jq '[.[] | select(.verdict=="MATCH" or .verdict=="DIVERGES" or .verdict=="ERROR") | .scenario_id]' <<< "$merged")
-  dr_covered=$(jq --argjson sids "$replayable_sids" '
-    [ .fixtures[] | select(.scenario_id as $s | $sids | index($s)) | .business_rules_pinned ]
+  dr_covered=$(jq --slurpfile sids_in "$(sc_payload replayable_sids "$replayable_sids")" '
+    ($sids_in[0]) as $sids
+    | [ .fixtures[] | select(.scenario_id as $s | $sids | index($s)) | .business_rules_pinned ]
     | join(" ") | [scan("DR-[0-9]{3}")] | unique
   ' "$selection")
 
@@ -1981,8 +2041,9 @@ specclaw-bf-rebuild-collect split-update .specclaw ${sp_id} \\
   # None of this touches the overall verdict or the exit code: it is a
   # reporting view over the same computed rows.
   local module_rollup
-  module_rollup=$(jq -r --argjson merged "$merged" '
-    def exercised: (.verdict=="MATCH" or .verdict=="DIVERGES" or .verdict=="ERROR");
+  module_rollup=$(jq -r --slurpfile merged_in "$(sc_payload rollup_merged "$merged")" '
+    ($merged_in[0]) as $merged
+    | def exercised: (.verdict=="MATCH" or .verdict=="DIVERGES" or .verdict=="ERROR");
     ([ .fixtures[] | (.module_ids // [])[] ] | unique) as $mods
     | if ($mods | length) == 0 then
         "_No module metadata in the manifest for this run — per-module rollups are unavailable. Re-run `/specclaw:bf-baseline --record` against scenarios that declare their modules to enable them._"
@@ -2287,13 +2348,17 @@ cmd_finalize() {
     --arg stack "$stack" \
     --argjson selected_count "$selected_count" \
     --argjson counts "$counts" \
-    --argjson stubs_in_effect "$stubs_effect" \
-    --argjson stub_tainted_items "$tainted_items" \
-    --argjson bl_items_covered "$covered_items" \
+    --slurpfile stubs_in_effect_in "$(sc_payload fin_stubs "$stubs_effect")" \
+    --slurpfile stub_tainted_items_in "$(sc_payload fin_tainted "$tainted_items")" \
+    --slurpfile bl_items_covered_in "$(sc_payload fin_covered "$covered_items")" \
     --argjson stub_tainted "$stub_tainted_flag" \
-    --argjson item_split "$item_split_meta" \
+    --slurpfile item_split_in "$(sc_payload fin_split "$item_split_meta")" \
     --argjson not_final_acceptance "$not_final" \
-    '{
+    '($stubs_in_effect_in[0]) as $stubs_in_effect
+    | ($stub_tainted_items_in[0]) as $stub_tainted_items
+    | ($bl_items_covered_in[0]) as $bl_items_covered
+    | ($item_split_in[0]) as $item_split
+    | {
       run_id: $run_id,
       target: $target,
       bl_item: $bl_item,
