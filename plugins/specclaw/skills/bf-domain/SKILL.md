@@ -38,3 +38,15 @@ Analyze an existing codebase's business domain and user-facing functionality, wr
    Say why the confirmation matters, in one sentence: `/specclaw:bf-rebuild-plan` sequences the migration from these boundaries, `/specclaw:bf-baseline` tags scenarios by them, and `/specclaw:bf-replay --module` accepts work by them, so a boundary nobody checked becomes the shape of the whole rebuild. Nothing is blocked by a `PROPOSED` map — every downstream command runs and reports that the map is unconfirmed — so present this as a review request, not a gate.
 
    If the agent raised any pending question this run, also mention that `/specclaw:bf-clarify` will type and number it (a contested boundary becomes a `DECISION` or `SCOPE` question with a permanent `CQ-###`), so the user knows where that conversation happens rather than answering it in chat where nothing records it.
+
+7. **Show what comes next:**
+   ```bash
+   specclaw-bf-status .specclaw --next
+   ```
+   Render its output **verbatim**, after the summary and the confirmation request above — never instead of them. Read-only, writes nothing, costs a second.
+
+   An unconfirmed map surfaces there as a **Next action**, because confirming it is an edit only a human can make. That is a review request, exactly as step 6 states, and never a gate: every downstream command runs against a `PROPOSED` map and reports that it is unconfirmed.
+
+   **Only if this run completed.** Step 1 says to surface `collect`'s stderr and stop; that means stop. A run that did not finish must never print a next step, which would read as though the phase advanced when it did not.
+
+   **Never work the next step out yourself.** `specclaw-bf-status` owns the lifecycle ordering for every `bf-*` command — which phase follows which, which open items are human work, and which command clears them. A next phase decided here would be a second copy of that ordering, diverging the moment either side changes.

@@ -111,6 +111,28 @@ Fully deterministic — no agent involved. Run this after a human has actually e
 
    **Also relay the module picture.** `record` extracts each fixture's `module_ids` from its scenario's own declared `Modules` field and writes them into the manifest — that is what `/specclaw:bf-replay --module` joins on. Report how many fixtures are tagged, how many are **shared across modules** (those are the cross-module flows, and they count toward every module they touch), and how many carry no module at all. **Surface any module-consistency WARN verbatim**: it means a scenario's module (from the map's rule ownership) disagrees with the module its own backlog item is filed under, one of those two documents is wrong, and neither `record` nor you should decide which. The manifest is still valid and was written — this is a reconciliation task, not a failure.
 
+## Show what comes next — after any mode
+
+Once the mode's own summary is delivered, and only then:
+
+```bash
+specclaw-bf-status .specclaw --next
+```
+
+Render its output **verbatim**, after that summary — never instead of it. Read-only, writes nothing, costs a second. It runs after **all three modes**, unchanged, because it reads `seams.md`, `scenarios.md`, `error-map.md`, `harness/` and `manifest.json` rather than the invocation.
+
+Each mode leaves the workstream in a state the guidance names precisely, and every one of them turns on the boundary this command is built around — **capture is a human action**:
+
+- **After Mode A**, the design exists but no harness does: a `Next command` of `--harness`.
+- **After Mode B**, the harness exists but no fixtures are captured: a `Next action` — a human runs the generated harness against the legacy app — with `--record` as what follows.
+- **After Mode C**, any scenario still missing a fixture stays a `Next action` naming the count. A `record` that refused (it writes no manifest at all if any fixture fails validation) surfaces as an action to read that output, rather than as capture simply not having been run.
+
+Do not let the guidance stand in for **Mode A's step 6**: it asks the human to confirm the recommended seam before a harness is generated, and that confirmation is still required in its own words, in the same turn.
+
+**Only if this run completed.** Every mode has steps that say to surface stderr and stop — Mode A's `collect` and `merge-scenarios`, Mode B's `harness-collect`, Mode C's `record`. A run that did not finish must never print a next step, which would read as though the baseline had advanced when it did not.
+
+**Never work the next step out yourself.** `specclaw-bf-status` owns the lifecycle ordering for every `bf-*` command — which phase follows which, which open items are human work, and which command clears them. A next phase decided here would be a second copy of that ordering, diverging the moment either side changes.
+
 ## What this command does not do
 
 `/specclaw:bf-baseline` never fabricates a scenario for a state the legacy app cannot actually reach — those are listed under "No Legacy Behaviour Exists" instead, not dressed up as capturable golden masters. It never claims a seam is deterministic without an explicit audit, and it never silently drops a documented business rule from the Rule Coverage Check. It never runs the legacy app, never runs the generated harness, and never writes a fixture file itself in any mode — those are always a human's action, and `--record` treats "no fixtures yet" as a normal, reportable state rather than an error.

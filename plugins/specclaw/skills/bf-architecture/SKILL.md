@@ -29,3 +29,13 @@ Analyze an existing codebase's architecture and write `.specclaw/analysis/archit
 4. The agent writes `.specclaw/analysis/architecture.md` itself, per its own Output section — this skill does not write the file.
 
 5. **Present a short summary** to the user: the path analyzed, which C4 levels were written, and any component the agent flagged "L4 not warranted for this component."
+
+6. **Show what comes next:**
+   ```bash
+   specclaw-bf-status .specclaw --next
+   ```
+   Render its output **verbatim**, after the summary above — never instead of it. Read-only, writes nothing, costs a second.
+
+   **Only if this run completed.** Step 1 says to surface `collect`'s stderr and stop; that means stop. A run that did not finish must never print a next step, which would read as though the phase advanced when it did not.
+
+   **Never work the next step out yourself.** `specclaw-bf-status` owns the lifecycle ordering for every `bf-*` command — which phase follows which, which open items are human work, and which command clears them. A next phase decided here would be a second copy of that ordering, diverging the moment either side changes.
