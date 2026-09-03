@@ -46,13 +46,61 @@
 
   ── IDENTITY IS THE KEY FIELD, NEVER THE VALUE ───────────────────────────
 
-  Key is the tuple  metric|file|function|module  — empty for the levels a
-  metric does not have (a file-length hotspot has no function; a duplication
-  hotspot has neither file nor function). It is what makes a hotspot the same
-  hotspot across runs. The measured Value is explicitly NOT part of identity:
-  values move on every commit, and keying on one would mint a fresh id every
-  run and make two reports months apart incomparable — which is the only thing
-  a permanent id is for.
+  Key is the tuple
+
+    metric | file | scope | module | start_line
+
+  and it is what makes a hotspot the same hotspot across runs. The measured
+  Value is explicitly NOT part of identity: values move on every commit, and
+  keying on one would mint a fresh id every run and make two reports months
+  apart incomparable — which is the only thing a permanent id is for.
+
+  NO SLOT IS EVER EMPTY, and that is the whole of what scope and start_line buy:
+
+    scope       the function name where the measuring tool gives one,
+                <anonymous> where it measured a function it could not name,
+                *global* where the metric has no function at all (a file-length
+                hotspot, a module-level duplication percentage)
+    start_line  the function's first line; 1 for a file-level metric, whose span
+                is the file; 0 for a module-level one, which has no line
+
+  The scope is the BARE function name. The measuring tool emits it wrapped in
+  double quotes, as a CSV field, and for one release those quotes reached the key
+  — so `"Login"` and `Login` named the same function and never met. A registry
+  written in that period is migrated in place: the entry keeps its id and its
+  first-seen date and the key is respelled, which is recorded below under
+  Migrations. Nothing is renumbered, because unquoting a scope is a rename and
+  not a re-identification — same metric, same file, same start line, same
+  hotspot. The collector now refuses to write a key whose scope still carries the
+  wrapping quotes.
+
+  The key held four fields until an identity collision made it hold five. The
+  measuring tool reports the SHORT function name, so two overloads are one
+  string; every unnamed function is reported under one name; and some parsers
+  report the name empty. Any two of those in a file produced one key for two
+  hotspots — and because the prior registry is read into a map, the second run
+  gave every colliding hotspot the same id and DELETED the others. Three
+  over-length functions in one file registered QI-001/002/003 and came back on
+  the next run as three copies of QI-003. The start line is what physically
+  separates them, and the collector now refuses to write a set in which two
+  entries share a key at all.
+
+  A `duplication-clone` entry carries FIVE fields instead of four, because a
+  clone is a relationship and no single location identifies it:
+
+    duplication-clone|fileA|fileB|module|sha256:<hash of the fragment>
+
+  Slot 2 holds the PEER FILE, not a function — a clone entry always reports
+  Function as —, and names its other side in Clone peer instead. The two sides
+  are put in a canonical order (smaller path, then smaller start line) before
+  the key is built, because the detector reports first/second in scan order and
+  an unordered pair would flip between runs and mint a new id each time.
+
+  The hash is of the fragment with whitespace normalised, not of the raw text:
+  clone detection works on a token stream, so re-indenting a block leaves the
+  same clone, and hashing raw text would retire a hotspot nobody touched. Line
+  numbers are deliberately absent from the key for the same reason — editing
+  code ABOVE a clone shifts it down without changing it at all.
 
   A RENAMED FILE therefore yields a new QI-### plus a resolved old one. That is
   the intended behaviour and not a defect: inferring the rename would carry an
@@ -60,14 +108,56 @@
 
   ── STATUS ───────────────────────────────────────────────────────────────
 
-    open      the hotspot exceeded its threshold in the most recent run
-    resolved  it did not
+    open                  the hotspot exceeded its threshold in the most recent
+                          run
+    resolved              it did not
+    excluded-by-scope     it was not measured: the file it names is outside the
+                          configured scan scope
+    superseded-duplicate  TERMINAL. This id was one of several sharing a single
+                          key before the key gained its start line, and another
+                          id now owns the hotspot it was pointing at
 
   `resolved` is not deletion and is not absolution. The entry stays here
   forever, because "this used to be a hotspot" is itself a finding — it is how
   anyone can later tell a module that was cleaned up from one that was never
   bad. A resolved entry that exceeds its threshold again flips back to `open`
   under its ORIGINAL id, with its original First seen date intact.
+
+  `excluded-by-scope` IS NOT `resolved`, and the distinction is the reason it
+  exists as a third status rather than being folded into the second. `resolved`
+  says the code was measured and came back under its threshold. This says the
+  code was not measured at all — the scan scope changed and stopped looking. In
+  the first case someone did something; in the second, nobody did, and the
+  module only LOOKS better. Recording that as `resolved` would be the most
+  flattering lie this registry could tell, and the reader least able to catch it
+  is the one most likely to be shown it.
+
+  Such an entry keeps its id and its original First seen date, gains an
+  **Excluded by scope:** line naming the category and the exclusion config hash
+  that produced the decision, and leaves the open-hotspot rollups — because it
+  is not open. It generates no rebuild remediation item, and a module's existing
+  item records its departure as a dated `⊘ Scope change` line rather than as a
+  retirement, for exactly the same reason.
+
+  A file brought back into scope — the category switched off, or the path added
+  to `include_overrides` — is measured again on the next run and its entry flips
+  back to `open` or `resolved` on the evidence, under its original id.
+
+  `superseded-duplicate` is the one TERMINAL status: such an entry is carried
+  forward verbatim on every later run and is never re-judged. It does not reopen
+  and it does not resolve, because there is nothing left to measure it against —
+  the hotspot it was pointing at is now owned, by name, by the id in its
+  **Superseded by:** field.
+
+  It is also the one entry type that may share a Key with another entry, and
+  deliberately so. The key it carries is the HISTORICAL four-field one it was a
+  duplicate under; that key is the fact the entry exists to record, and
+  rewriting it to force uniqueness would falsify the only thing it says. Every
+  other entry's key is unique, and the collector fails the run if it is not.
+
+  Nothing is deleted here either. An id that stopped meaning what it used to
+  mean is a fact about this registry's history, and a reader who finds QI-026
+  cited in an old report is entitled to find out what happened to it.
 
   ── WHICH SEVERITIES GET REGISTERED ──────────────────────────────────────
 
@@ -81,14 +171,24 @@
 
   ### QI-###
 
-  - **Key:** <metric|file|function|module — the identity tuple>
+  - **Key:** <metric|file|scope|module|start_line — the identity tuple>
   - **Module:** <MOD-###, or MOD-UNASSIGNED when no module cites this file>
   - **File:** <repo-relative path, or — for a module-level metric>
-  - **Function:** <function name, or — for a file- or module-level metric>
-  - **Metric:** <complexity | function_length | file_length | duplication>
+  - **Function:** <function name, or — for a file- or module-level metric, and
+    for a function the measuring tool could not name>
+  - **Line:** <the start line from the key, or — where the metric has none>
+  - **Metric:** <complexity | function_length | file_length | duplication |
+    duplication-clone>
+  - **Clone peer:** <the other side of a duplication-clone pair, as a
+    repo-relative path — present ONLY on a duplication-clone entry, absent on
+    every other. The File field above names the first side.>
   - **Value:** <the measured value at the last check, or — when resolved>
   - **Severity:** <WARN | HIGH at the last check, or — when resolved>
-  - **Status:** <open | resolved>
+  - **Status:** <open | resolved | excluded-by-scope | superseded-duplicate>
+  - **Superseded by:** <the QI-### that now owns this entry's hotspot — present
+    ONLY on a superseded-duplicate entry, absent on every other>
+  - **Excluded by scope:** <category (exclusion config hash) — present ONLY on
+    an excluded-by-scope entry, absent on every other>
   - **First seen:** <ISO-8601 of the run that first registered it — never
     updated afterwards, on any subsequent run, for any reason>
   - **Last checked:** <ISO-8601 of the most recent run>
@@ -100,3 +200,25 @@
 -->
 
 {{quality_issues}}
+
+## Migration record
+
+<!--
+  WRITTEN BY THE COLLECTOR, ONE DATED ENTRY PER MIGRATION, AND READ BACK ON
+  EVERY RUN. The registry is rewritten in full each time, so a record that is
+  not carried forward survives exactly one run — and a migration nobody can find
+  afterwards is indistinguishable from ids that moved on their own, which is the
+  single thing permanent ids exist to rule out.
+
+  A migration happens when the SHAPE of the identity key changes. Ids are mapped
+  onto the new shape, never renumbered: an entry whose old key named exactly one
+  hotspot keeps its number and records the new key, and an entry whose old key
+  turned out to name several is decided by the Value each one recorded. Where
+  the recorded values do not decide it, the collector STOPS and says so rather
+  than guessing — a guess here moves a permanent id onto code nobody checked.
+
+  Each line names the id and what happened to it, so the mapping can be checked
+  rather than taken.
+-->
+
+{{migrations}}

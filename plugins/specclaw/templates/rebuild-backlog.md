@@ -148,6 +148,75 @@
   A stub is only ever created by a human choosing one at /specclaw:propose
   time. Nothing in this document creates, edits, or retires one.
 
+  QUALITY REMEDIATION ITEMS. When /specclaw:bf-quality has measured the legacy
+  tree, each module with at least one open hotspot at or above the configured
+  severity floor also carries ONE bash-written item — never one per hotspot —
+  headed "### BL-NNN — MOD-### quality remediation" and declaring
+  "**Item type:** QUALITY-REMEDIATION". Absent that measurement the whole
+  mechanism is inert and this document is exactly what it would have been
+  before the mechanism existed, down to the byte.
+
+  ONE PER MODULE. A large legacy tree registers hundreds of QI-###; an item
+  each would bury the functional backlog. The module is already the migration
+  and acceptance unit here, and it is also the finest grain the target-side
+  measurement can be taken at.
+
+  ITS ACCEPTANCE IS A MEASUREMENT, NEVER A LITERAL INSTRUCTION. The item's
+  criterion is that the REBUILT module measures within the thresholds in
+  config.yaml's `quality:` section and regresses on no dimension, evidenced by
+  .specclaw/analysis/quality-delta.json (from /specclaw:bf-quality --target
+  followed by --compare). It never asks anyone to change a named legacy source
+  file: that file is not part of the target and will not exist there. The
+  QI-### ids it lists are the evidence for WHY the item exists; the delta is
+  the proof that it is done.
+
+  A hotspot counts as retired at the grain the delta can actually carry —
+  module × metric. A hotspot's identity names a legacy file and function, and
+  neither survives into the rebuilt tree to be measured a second time, so a
+  per-hotspot claim of retirement would be a claim nothing could check.
+
+  ITS OWN VERIFICATION CHANNEL. "**Verification:** QUALITY-MEASURED" is a fifth
+  value alongside VERIFIABLE / PENDING CAPTURE / UNVERIFIABLE / NO BASELINE
+  DATA, and it is not one of them: those four all answer "is there a recorded
+  legacy output to compare against?", and here that question does not apply.
+  The item cites no DR-### and maps to no GM-###. /specclaw:bf-replay --item on
+  one refuses cleanly, names the item type, and points at
+  /specclaw:bf-quality --compare — it never reports NO BASELINE DATA, which
+  would read as "somebody forgot to record a fixture".
+
+  ITS OWN COMPLETION AXIS. "**Quality state:** BLOCKED | OPEN | DONE" is
+  bash-computed from the delta and is a THIRD question, not a restatement of
+  the two fields above it: Gate answers "can this start?", Verification "how
+  would it ever be checked?", and this one "has it been checked, and did it
+  pass?". It is recomputed every run, so it clears by regeneration alone.
+
+  MECHANICALLY GATED BEHIND ITS OWN MODULE. A remediation item is BLOCKED
+  until every functional item in its module carries a declared "BUILT:" line in
+  its Status-notes block — the same narrow declared trigger stub retirement and
+  item splits use, never a prose reading. You cannot measure the health of code
+  that does not exist yet.
+
+  WHAT PERSISTS. The body is regenerated in full on every run, so the ONE thing
+  that could not be recomputed is kept: a dated "⊕ Added"/"⊖ Retired" ledger
+  recording hotspots that appeared or stopped qualifying after the item was
+  created. A re-measured quality.json APPENDS a new hotspot to the module's
+  existing item and never creates a second one. Human Status notes survive
+  verbatim, exactly as on every other item.
+
+  A hotspot BELOW the severity floor generates no item. It is reported as an
+  advisory count on its module's line in the Module Coverage Rollup below, so
+  it stays visible without becoming something the rebuild must clear.
+
+  THE LEVER FOR "WE ACCEPT THIS DEBT" IS THE FLOOR, NOT A STRIKE. Deferring a
+  remediation item works normally and holds its id forever, like any other item.
+  STRIKING one does not stick: a tombstone keeps only the id and the reason, so
+  the module it belonged to is no longer recoverable from the document, and the
+  next --refresh sees a measured module with no item and generates one (once —
+  the new item is then permanent like any other). If a module's measured state
+  is genuinely acceptable, raise `quality.remediation_severity_floor` or resolve
+  the hotspots at source; both are re-measured facts rather than an edit to a
+  generated document.
+
   BL-NNN IDs are permanent identifiers, not position — assigned once in
   dependency order on the first-ever run and never renumbered afterward.
   A later /specclaw:bf-rebuild-plan --refresh may append a genuinely new item

@@ -3,6 +3,7 @@
 **Legacy measured:** {{legacy_path}} @ {{legacy_date}}
 **Target measured:** {{target_path}} @ {{target_date}}
 **Date compared:** {{date}}
+**Scan scope:** {{scan_scope}}
 
 <!--
   WRITTEN BY THE QUALITY NARRATION AGENT FROM ONE JSON ARTIFACT. Every
@@ -34,6 +35,22 @@
   When thresholds_match is false the two snapshots were classified against
   different policies, so every status comparison is between two different
   questions. That goes at the TOP of the document, not in a footnote.
+
+  ── THE SCAN SCOPE IS IDENTICAL ON BOTH SIDES, BY CONSTRUCTION ──────────────
+
+  Fill {{scan_scope}} from scan_scope.config_hash — one line, e.g. "identical on
+  both sides (sha256:1f3c…)". Both snapshots measured the same set of file
+  categories, because the comparison REFUSES to run otherwise: two sides scoped
+  differently have different denominators, and subtracting one from the other
+  produces a delta that looks real and means nothing.
+
+  So this is a fact to state once, not a caveat to hedge with, and there is no
+  mismatch case to narrate — a mismatched pair never reaches this document at
+  all. Do not speculate about what a differently-scoped comparison might have
+  shown.
+
+  Which files each scope covered is in the quality report's Scan Scope section.
+  Do not restate the category tables here.
 
   ── WHAT A REGRESSION IS ────────────────────────────────────────────────────
 
