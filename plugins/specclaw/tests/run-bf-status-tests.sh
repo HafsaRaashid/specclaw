@@ -115,7 +115,63 @@ seed_run() { # <root> <pool-relative-dir> <run_id> <target> <verdict> <date> <ta
 EOF
 }
 
+# The rest of the phase artifacts, so a fixture can be walked forward one phase
+# at a time and the recommendation checked at each stop.
+seed_clarify_done() { # <root> — one blocking question, answered, plus decisions.md
+  mkdir -p "$1/.specclaw/analysis"
+  cat > "$1/.specclaw/analysis/clarifications.md" <<'EOF'
+# Clarifications
+
+### SQ-001 — Target platform
+- **Blocking:** yes — the stack
+- **Answer:** .NET 9
+- **Decided by:** H, 2026-08-05
+EOF
+  printf '# Decisions\n\n### SQ-001 — Target platform\n**Decision:** .NET 9\n' \
+    > "$1/.specclaw/analysis/decisions.md"
+}
+
+seed_backlog() { # <root>
+  printf '### BL-001 — Thing\n**Gate:** CLEAR\n**Verification:** VERIFIABLE — fixtures: GM-001\n' \
+    > "$1/.specclaw/analysis/rebuild-backlog.md"
+}
+
+seed_baseline_recorded() { # <root>
+  mkdir -p "$1/.specclaw/baseline"
+  printf '# Seams\n' > "$1/.specclaw/baseline/seams.md"
+  printf '{"total_scenarios":1,"fixtures":[{"id":"GM-001"}],"missing_scenarios":[]}\n' \
+    > "$1/.specclaw/baseline/manifest.json"
+}
+
+seed_blueprint() { # <root>
+  printf '# Target Architecture\n\n**Blueprint status:** COMPLETE\n' \
+    > "$1/.specclaw/analysis/target-architecture.md"
+}
+
+seed_boot() { # <root> [not_applicable_reason]
+  mkdir -p "$1/.specclaw/bootstrap"
+  if [ -n "${2:-}" ]; then
+    printf '{"not_applicable":{"reason":"%s"},"foundation_ready":false}\n' "$2" \
+      > "$1/.specclaw/bootstrap/bootstrap-manifest.json"
+  else
+    printf '{"not_applicable":null,"foundation_ready":true,"stack":{"api":"Go"}}\n' \
+      > "$1/.specclaw/bootstrap/bootstrap-manifest.json"
+  fi
+}
+
 run_status() { bash "$STATUS_BIN" "$1/.specclaw" 2>&1; }
+
+# The compact guidance block — the same computation, rendered short. Every
+# lifecycle bf-* skill appends this, so what it says IS the end-of-command
+# guidance and is asserted here rather than in any skill.
+run_next() { bash "$STATUS_BIN" "$1/.specclaw" --next 2>&1; }
+
+# The '## Next' section of the dashboard, alone.
+next_section_of() { printf '%s\n' "$1" | awk '/^## Next$/{f=1;next} /^---$/{f=0} f'; }
+
+# sha256 of the whole tree — names AND contents, so neither a new file nor an
+# edit to an existing one can pass.
+tree_hash() { find "$1" -type f -exec sha256sum {} + 2>/dev/null | LC_ALL=C sort | sha256sum; }
 
 echo "=================================================="
 echo "specclaw-bf-status regression suite"
@@ -362,6 +418,374 @@ assert_contains "$OUT" "<specclaw_dir> is required" "naming what is missing"
 OUT="$(bash "$STATUS_BIN" "$WORK/does-not-exist" 2>&1)"; RC=$?
 assert_eq "2" "$RC" "a missing .specclaw dir exits 2"
 assert_contains "$OUT" "/specclaw:init" "pointing at the command that creates it"
+
+# ── 10. The compact interface writes nothing either ──────────────────────────
+#
+# The no-write invariant is the whole reason this command is exempt from the
+# archive-then-replace discipline every other .specclaw/ document follows, and
+# adding a second entry point is exactly how a script quietly acquires a cache.
+# Asserted against names AND contents, for both modes, and for the whole
+# project tree rather than just .specclaw/ — a stray file dropped in the repo
+# root would be just as much of a bug.
+echo
+echo "-- --next writes nothing, anywhere --"
+
+R="$WORK/nowrite2"; new_empty "$R"; seed_analysis "$R" "CONFIRMED by H, 2026-08-07"
+seed_clarify_done "$R"; seed_backlog "$R"; seed_baseline_recorded "$R"; seed_boot "$R"
+seed_run "$R" "replay/evidence" "20260820-101500" "MOD-001" "PASS" "2026-08-20" "false"
+BEFORE_TREE="$(tree_hash "$R")"
+run_next "$R"   >/dev/null
+run_status "$R" >/dev/null
+run_next "$R"   >/dev/null
+AFTER_TREE="$(tree_hash "$R")"
+assert_eq "$BEFORE_TREE" "$AFTER_TREE" "neither mode creates, edits or removes any file in the project"
+
+# ── 11. One computation, two renderings ──────────────────────────────────────
+#
+# The point of putting --next in this script rather than a sibling: there is no
+# second copy of the ordering to drift. Asserted directly — whatever command the
+# dashboard recommends, the compact block must name the same one.
+echo
+echo "-- single source of truth: dashboard and --next never disagree --"
+
+for STATE in empty analysis clarified baselined backlogged; do
+  R="$WORK/sot-$STATE"; new_empty "$R"
+  case "$STATE" in
+    analysis)   seed_analysis "$R" "CONFIRMED by H, 2026-08-07" ;;
+    clarified)  seed_analysis "$R" "CONFIRMED by H, 2026-08-07"; seed_clarify_done "$R" ;;
+    baselined)  seed_analysis "$R" "CONFIRMED by H, 2026-08-07"; seed_clarify_done "$R"
+                seed_baseline_recorded "$R" ;;
+    backlogged) seed_analysis "$R" "CONFIRMED by H, 2026-08-07"; seed_clarify_done "$R"
+                seed_baseline_recorded "$R"; seed_backlog "$R"; seed_blueprint "$R" ;;
+  esac
+  DASH_NEXT="$(next_section_of "$(run_status "$R")")"
+  COMPACT="$(run_next "$R")"
+  # Pull the recommended command out of each rendering and compare the tokens.
+  D_CMD="$(printf '%s\n' "$DASH_NEXT"  | grep -oE '/specclaw:[a-z-]+( --[a-z-]+)?' | head -1 || true)"
+  C_CMD="$(printf '%s\n' "$COMPACT"    | grep -oE '^\*\*Next command:\*\* `[^`]+`' | sed -E 's/.*`(.*)`/\1/' || true)"
+  assert_eq "$D_CMD" "$C_CMD" "state '$STATE': dashboard and --next name the same command"
+done
+
+# ── 12. Progression: each completed phase yields the next one ────────────────
+echo
+echo "-- basic progression --"
+
+R="$WORK/prog"; new_empty "$R"
+assert_contains "$(run_next "$R")" '`/specclaw:bf-analyze`' "an untouched project starts at bf-analyze"
+
+printf '**Date generated:** 2026-08-01\n' > "$R/.specclaw/analysis/codebase-report.md"
+assert_contains "$(run_next "$R")" '`/specclaw:bf-architecture`' "with a codebase report, architecture is next"
+
+printf '**Date generated:** 2026-08-01\n' > "$R/.specclaw/analysis/architecture.md"
+assert_contains "$(run_next "$R")" '`/specclaw:bf-domain`' "with an architecture, domain is next"
+
+seed_analysis "$R" "CONFIRMED by H, 2026-08-07"
+assert_contains "$(run_next "$R")" '`/specclaw:bf-clarify`' "with the domain documents, clarify is next"
+
+seed_clarify_done "$R"
+assert_contains "$(run_next "$R")" '`/specclaw:bf-baseline`' "with a resolved question set, the baseline is next"
+
+seed_baseline_recorded "$R"
+assert_contains "$(run_next "$R")" '`/specclaw:bf-rebuild-plan`' "with a recorded baseline, the backlog is next"
+
+seed_backlog "$R"
+assert_contains "$(run_next "$R")" '`/specclaw:bf-blueprint`' "with a backlog, the target blueprint is next"
+
+seed_blueprint "$R"
+assert_contains "$(run_next "$R")" "copy the Phase A artifacts" \
+  "with Phase A complete, the next step is a human one — bootstrap runs in the OTHER repo"
+assert_not_contains "$(run_next "$R")" '**Next command:** `/specclaw:bf-bootstrap`' \
+  "and bf-bootstrap is never recommended as a command, because a backlog exists in BOTH repos"
+
+seed_boot "$R"
+assert_contains "$(run_next "$R")" '`/specclaw:propose`' "with a ready foundation, an ordinary backlog item is next"
+
+# ── 13. --resolve is ranked by what actually refuses without it ──────────────
+#
+# decisions.md is what /specclaw:bf-blueprint and /specclaw:bf-bootstrap hard-
+# refuse without. The baseline and the backlog never read it, so a project that
+# has answered a question but not resolved it is not held back from either.
+echo
+echo "-- clarify --resolve ranking --"
+
+R="$WORK/resolve"; new_empty "$R"; seed_analysis "$R" "CONFIRMED by H, 2026-08-07"
+cat > "$R/.specclaw/analysis/clarifications.md" <<'EOF'
+# Clarifications
+
+### SQ-001 — Answered
+- **Blocking:** yes — the stack
+- **Answer:** .NET 9
+- **Decided by:** H, 2026-08-05
+EOF
+assert_contains "$(run_next "$R")" '`/specclaw:bf-baseline`' \
+  "an answered-but-unresolved question set does not hold the baseline back"
+
+seed_baseline_recorded "$R"; seed_backlog "$R"
+# Assert against the RECOMMENDATION line specifically, not the whole block: the
+# "no decisions.md" attention item names --resolve too, so a substring match on
+# the whole output would pass whether or not it was ever recommended.
+NEXT_CMD_LINE="$({ run_next "$R" | grep '^\*\*Next command:' || true; })"
+assert_contains "$NEXT_CMD_LINE" '`/specclaw:bf-clarify --resolve`' \
+  "but once the backlog exists, --resolve is next — blueprint and bootstrap both refuse without decisions.md"
+
+# Nothing answered at all: --resolve would refuse, so it is never recommended.
+R="$WORK/resolve-none"; new_empty "$R"; seed_analysis "$R" "CONFIRMED by H, 2026-08-07"
+cat > "$R/.specclaw/analysis/clarifications.md" <<'EOF'
+# Clarifications
+
+### SQ-001 — Unanswered
+- **Blocking:** no
+- **Answer:**
+- **Decided by:**
+EOF
+seed_baseline_recorded "$R"; seed_backlog "$R"
+NEXT_CMD_LINE="$({ run_next "$R" | grep '^\*\*Next command:' || true; })"
+assert_not_contains "$NEXT_CMD_LINE" '/specclaw:bf-clarify --resolve' \
+  "with nothing answered, --resolve is never recommended — resolve-collect would refuse it"
+# It is still named in the attention list, as the thing to run once someone has
+# answered — a conditional pointer, which is not the same as a recommendation.
+assert_contains "$(run_next "$R")" 'No `decisions.md`' \
+  "though the absent decisions.md is still reported as outstanding"
+
+# ── 14. Human work is named as human work ────────────────────────────────────
+#
+# The distinction the compact block exists for: a Next action is something no
+# command can clear. Getting this wrong in either direction is the failure —
+# telling someone to run a command that cannot help, or burying the edit that
+# actually unblocks them in a list they skim.
+echo
+echo "-- Next action vs Next command --"
+
+R="$WORK/act-map"; new_empty "$R"; seed_analysis "$R" "PROPOSED"
+OUT="$(run_next "$R")"
+assert_contains "$OUT" "**Next action:** Confirm the module map" "an unconfirmed map is a Next action"
+assert_contains "$OUT" '`**Status:**` line' "naming the edit that clears it"
+assert_contains "$OUT" "nothing is blocked by this" "and saying plainly that it gates nothing"
+assert_contains "$OUT" "**Next command:**" "while the phase command is still recommended alongside it"
+
+R="$WORK/act-cq"; new_empty "$R"; seed_analysis "$R" "CONFIRMED by H, 2026-08-07"
+cat > "$R/.specclaw/analysis/clarifications.md" <<'EOF'
+# Clarifications
+
+### SQ-014 — Unanswered, blocking
+- **Blocking:** yes — every fixture
+- **Answer:**
+- **Decided by:**
+
+### CQ-001 — Unanswered, NOT blocking
+- **Blocking:** no
+- **Answer:**
+- **Decided by:**
+
+### CQ-002 — Answered on the NEXT line, blocking
+- **Blocking:** yes — MOD-002
+- **Answer:**
+  Preserve the legacy behaviour.
+- **Decided by:** H, 2026-08-06
+EOF
+printf '# Decisions\n' > "$R/.specclaw/analysis/decisions.md"
+OUT="$(run_next "$R")"
+assert_contains "$OUT" "**Next action:** Answer 1 blocking question(s)" \
+  "an unanswered blocking question is a Next action, counted without the multi-line answer"
+assert_contains "$OUT" '`/specclaw:bf-clarify --resolve`' "with the command that follows the human's part named"
+# THE EDGE CASE: the action must come first, before the command it does not block.
+ACTION_LINE="$(printf '%s\n' "$OUT" | grep -n '^\*\*Next action:' | cut -d: -f1)"
+CMD_LINE="$(printf '%s\n' "$OUT" | grep -n '^\*\*Next command:' | cut -d: -f1)"
+if [ -n "$ACTION_LINE" ] && [ -n "$CMD_LINE" ] && [ "$ACTION_LINE" -lt "$CMD_LINE" ]; then
+  ok "the human action is rendered BEFORE the command, never after it"
+else
+  bad "the human action is rendered BEFORE the command, never after it" \
+      "action at line ${ACTION_LINE:-none}, command at line ${CMD_LINE:-none}"
+fi
+# And it must not also appear in the list below — one problem, stated once.
+assert_not_contains "$(printf '%s\n' "$OUT" | sed -n '/Needs attention/,$p')" \
+  "Answer 1 blocking question(s)" "the promoted action is not repeated in the attention list"
+
+# ── 15. Absence still implies nothing, in the compact rendering too ──────────
+echo
+echo "-- --next infers a phase only from that phase's own artifact --"
+
+R="$WORK/noinfer2"; new_empty "$R"
+printf '### BL-001 — Thing\n- **Module:** MOD-001\n' > "$R/.specclaw/analysis/rebuild-backlog.md"
+printf '{"total_scenarios":1,"fixtures":[],"missing_scenarios":["GM-001"]}\n' > "$R/.specclaw/analysis/ignored.json"
+OUT="$(run_next "$R")"
+assert_contains "$OUT" '`/specclaw:bf-analyze`' \
+  "a backlog naming MOD-001 never implies bf-analyze, bf-domain or the baseline have run"
+
+# ── 16. UI is optional and never becomes a gate ──────────────────────────────
+echo
+echo "-- UI: uncaptured screenshots are human work, never a blocked command --"
+
+R="$WORK/ui"; new_empty "$R"; seed_analysis "$R" "CONFIRMED by H, 2026-08-07"; seed_clarify_done "$R"
+mkdir -p "$R/.specclaw/ui"
+printf '# UI Inventory\n\n### SCR-001 — Login\n' > "$R/.specclaw/ui/ui-inventory.md"
+printf '# Screenshot checklist\n' > "$R/.specclaw/ui/screenshot-checklist.md"
+OUT="$(run_next "$R")"
+assert_contains "$OUT" "**Next action:** Capture the checklist screenshots" \
+  "a designed-but-unrecorded checklist is a Next action"
+assert_contains "$OUT" '`/specclaw:bf-ui --record`' "pointing at what turns the captures into evidence"
+
+if command -v jq >/dev/null 2>&1; then
+  printf '{"screenshots":["SCR-001"],"missing":["SCR-002","SCR-003"]}\n' > "$R/.specclaw/ui/ui-manifest.json"
+  OUT="$(run_next "$R")"
+  assert_contains "$OUT" "Capture 2 missing screenshot(s)" "a partial capture names the outstanding count"
+  printf '{"screenshots":["SCR-001"],"missing":[]}\n' > "$R/.specclaw/ui/ui-manifest.json"
+  assert_not_contains "$(run_next "$R")" "missing screenshot" "a complete capture raises nothing"
+fi
+# The whole workstream is optional, so it is never a recommended command.
+assert_not_contains "$(run_next "$R")" '**Next command:** `/specclaw:bf-ui`' \
+  "/specclaw:bf-ui is never recommended as a next command — the workstream is optional"
+
+# ── 17. Baseline capture is a human action at every stage ────────────────────
+echo
+echo "-- baseline: design → harness → capture --"
+
+R="$WORK/bl"; new_empty "$R"; seed_analysis "$R" "CONFIRMED by H, 2026-08-07"; seed_clarify_done "$R"
+mkdir -p "$R/.specclaw/baseline"
+printf '# Seams\n' > "$R/.specclaw/baseline/seams.md"
+printf '# Scenarios\n\n### GM-001 — A rule\n' > "$R/.specclaw/baseline/scenarios.md"
+OUT="$(run_next "$R")"
+assert_contains "$OUT" '`/specclaw:bf-baseline --harness`' "a design with no harness recommends --harness"
+
+mkdir -p "$R/.specclaw/baseline/harness"
+printf '# Error map\n\n### SOME_CODE\n' > "$R/.specclaw/baseline/error-map.md"
+OUT="$(run_next "$R")"
+assert_contains "$OUT" "**Next action:** Harness generated but no \`manifest.json\`" \
+  "a harness with no manifest is a human action, not a command to re-run blindly"
+assert_contains "$OUT" "refuses to write one at all if any fixture fails validation" \
+  "and says why an absent manifest is not simply an uncaptured baseline"
+
+if command -v jq >/dev/null 2>&1; then
+  printf '{"total_scenarios":3,"fixtures":[{"id":"GM-001"}],"missing_scenarios":["GM-002","GM-003"]}\n' \
+    > "$R/.specclaw/baseline/manifest.json"
+  OUT="$(run_next "$R")"
+  assert_contains "$OUT" "**Next action:** Capture 2 missing fixture(s)" \
+    "uncaptured fixtures are a human action — no specclaw command runs the harness"
+  assert_contains "$OUT" '`/specclaw:bf-baseline --record`' "with the command that validates them named"
+fi
+
+# ── 18. THE REGRESSION: a foundation is not something to replay ──────────────
+#
+# This recommendation used to read /specclaw:bf-replay, which compares the
+# REBUILT application against the fixtures. On a foundation that has just been
+# scaffolded there is nothing built to compare, so that run reports INCOMPLETE
+# or FAIL and means neither — and it contradicted bf-bootstrap's own summary,
+# which has always named /specclaw:propose. They must not diverge again.
+echo
+echo "-- post-bootstrap: propose, never replay --"
+
+R="$WORK/postboot"; new_empty "$R"; seed_analysis "$R" "CONFIRMED by H, 2026-08-07"
+seed_clarify_done "$R"; seed_backlog "$R"; seed_blueprint "$R"; seed_baseline_recorded "$R"; seed_boot "$R"
+OUT="$(run_next "$R")"
+assert_contains "$OUT" '**Next command:** `/specclaw:propose`' \
+  "a ready foundation with nothing built recommends an ordinary backlog item"
+assert_contains "$OUT" '**After that:** `/specclaw:bf-replay <change>`' \
+  "and names replay as what follows, so the ordering is stated rather than lost"
+assert_not_contains "$OUT" '**Next command:** `/specclaw:bf-replay`' \
+  "never replay: there is nothing built to compare against the fixtures yet"
+
+BOOTSTRAP_SKILL="$PLUGIN_ROOT/skills/bf-bootstrap/SKILL.md"
+assert_contains "$(cat "$BOOTSTRAP_SKILL")" '`/specclaw:propose "<the backlog'"'"'s recommended next item>"`' \
+  "and bf-bootstrap's own summary still names the same command it always did"
+
+# A repo that declared itself NOT the rebuild target still carries a manifest.
+# Its presence must not be read as a foundation standing here.
+if command -v jq >/dev/null 2>&1; then
+  R="$WORK/notapplicable"; new_empty "$R"; seed_analysis "$R" "CONFIRMED by H, 2026-08-07"
+  seed_clarify_done "$R"; seed_backlog "$R"; seed_blueprint "$R"; seed_baseline_recorded "$R"
+  seed_boot "$R" "this repo is the legacy source"
+  assert_not_contains "$(run_next "$R")" '`/specclaw:propose`' \
+    "a --not-applicable declaration is not a foundation, and is never told to propose backlog work"
+fi
+
+# ── 19. Replay: an outstanding FAIL is stated, and never as progress ─────────
+echo
+echo "-- replay in the compact block --"
+
+if command -v jq >/dev/null 2>&1; then
+  R="$WORK/replay-next"; new_empty "$R"; seed_analysis "$R" "CONFIRMED by H, 2026-08-07"
+  seed_clarify_done "$R"; seed_backlog "$R"; seed_blueprint "$R"; seed_baseline_recorded "$R"; seed_boot "$R"
+  seed_run "$R" "changes/trial-balance/replay-evidence" "20260818-090000" "trial-balance" "FAIL" "2026-08-18" "false"
+  seed_run "$R" "replay/evidence"                      "20260820-101500" "MOD-001"       "PASS" "2026-08-20" "false"
+  OUT="$(run_next "$R")"
+  assert_contains "$OUT" "Replay target **trial-balance** is **FAIL**" \
+    "a target whose own latest run failed is named, not hidden behind a newer unrelated PASS"
+  assert_contains "$OUT" '`20260818-090000`' "with the run id to go and read"
+  # PD-07: a FAIL must never be dressed as the phase having advanced.
+  assert_not_contains "$OUT" "**Next command:**" \
+    "and no command is recommended alongside it — nothing here may read as the phase advancing"
+  assert_not_contains "$OUT" "nothing outstanding" "nor may the run be reported as clean"
+
+  # Same target replayed again, clean: the superseded FAIL does not resurface.
+  seed_run "$R" "changes/trial-balance/replay-evidence" "20260821-090000" "trial-balance" "PASS" "2026-08-21" "false"
+  assert_not_contains "$(run_next "$R")" "is **FAIL**" \
+    "a re-run on the same target supersedes its own earlier verdict here too"
+
+  # Stub taint: a marker on a verdict's standing, never a verdict of its own.
+  R="$WORK/taint-next"; new_empty "$R"; seed_analysis "$R" "CONFIRMED by H, 2026-08-07"
+  seed_clarify_done "$R"; seed_backlog "$R"; seed_blueprint "$R"; seed_baseline_recorded "$R"; seed_boot "$R"
+  seed_run "$R" "replay/evidence" "20260820-101500" "MOD-001" "PASS" "2026-08-20" "true"
+  OUT="$(run_next "$R")"
+  assert_contains "$OUT" "ACTIVE dependency-bypass stub" "a tainted verdict is surfaced as human work"
+  assert_contains "$OUT" '`PASS*`' "marked PASS*, never presented as a bare PASS"
+  # The verdict itself is untouched — taint qualifies standing, not correctness.
+  assert_contains "$(run_status "$R")" "latest per target: 1 PASS, 0 not" \
+    "while the verdict it qualifies is still counted as the PASS it is"
+
+  R="$WORK/clean-next"; new_empty "$R"; seed_analysis "$R" "CONFIRMED by H, 2026-08-07"
+  seed_clarify_done "$R"; seed_backlog "$R"; seed_blueprint "$R"; seed_baseline_recorded "$R"; seed_boot "$R"
+  seed_run "$R" "replay/evidence" "20260820-101500" "MOD-001" "PASS" "2026-08-20" "false"
+  OUT="$(run_next "$R")"
+  assert_not_contains "$OUT" "dependency-bypass stub" "an untainted run is never accused of resting on a stub"
+  assert_contains "$OUT" "nothing outstanding" "and a genuinely clean project is told so plainly"
+else
+  echo "  (skipped — jq not installed)"
+fi
+
+# ── 20. The failure path emits no guidance at all ────────────────────────────
+#
+# PD-07, at the two levels it lives at. In the script: a refused invocation
+# prints no recommendation. In the skills: every guidance step carries the
+# instruction not to run it after a stop — because a `Next:` line printed after
+# a refusal reads as though the phase advanced.
+echo
+echo "-- a run that did not complete emits no next step --"
+
+OUT="$(bash "$STATUS_BIN" "$WORK/does-not-exist" --next 2>&1)"; RC=$?
+assert_eq "2" "$RC" "--next on a missing directory exits 2"
+assert_not_contains "$OUT" "Next command" "and prints no recommendation"
+assert_not_contains "$OUT" "Next action" "and no action either"
+assert_contains "$OUT" "/specclaw:init" "only the message naming what would fix it"
+
+OUT="$(bash "$STATUS_BIN" --next 2>&1)"; RC=$?
+assert_eq "2" "$RC" "--next with no directory at all exits 2"
+
+# ── 21. The ordering exists in exactly one place ─────────────────────────────
+#
+# PD-01 as a structural assertion rather than a promise. Every lifecycle skill
+# reaches the recommendation through this script, and the three that are not
+# lifecycle commands do not carry one at all: bf-status IS this output,
+# bf-quality has no phase row, and bf-e2e declares no .specclaw/ artifact.
+echo
+echo "-- single source of truth, across the skills --"
+
+LIFECYCLE="bf-analyze bf-architecture bf-domain bf-clarify bf-ui bf-baseline
+bf-rebuild-plan bf-blueprint bf-bootstrap bf-replay"
+for S in $LIFECYCLE; do
+  F="$PLUGIN_ROOT/skills/$S/SKILL.md"
+  N="$({ grep -cF 'specclaw-bf-status .specclaw --next' "$F" || true; })"
+  assert_eq "1" "$N" "$S invokes the shared guidance exactly once"
+  assert_contains "$(cat "$F")" "Never work the next step out yourself" \
+    "$S is told not to compute an ordering of its own"
+  assert_contains "$(cat "$F")" "Only if this run completed" \
+    "$S gates its guidance on the run having finished"
+done
+
+for S in bf-status bf-quality bf-e2e; do
+  F="$PLUGIN_ROOT/skills/$S/SKILL.md"
+  N="$({ grep -cF 'specclaw-bf-status .specclaw --next' "$F" || true; })"
+  assert_eq "0" "$N" "$S carries no guidance step (not a lifecycle phase)"
+done
 
 echo
 echo "=================================================="
