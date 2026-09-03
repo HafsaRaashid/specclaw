@@ -33,8 +33,11 @@ Usage: specclaw-bf-status <specclaw_dir> [--next]
 
 Read-only dashboard for the brownfield (bf-*) workstream. Prints to stdout:
 
-  - the inferred repo role (legacy source vs rebuild target), from the one
-    artifact that actually declares it — the bootstrap manifest
+  - the inferred repo role (legacy source vs rebuild target): declared by the
+    bootstrap manifest wherever one exists, since that is the artifact whose
+    job it is to say; inferred from retained replay evidence only where no
+    manifest is present, and reported as indeterminate where that evidence is
+    all there is
   - one row per bf-* phase: whether it has run, and the state of what it
     produced (module-map confirmation, unanswered blocking questions,
     fixtures captured vs scenarios designed, backlog gate counts, blueprint
@@ -584,7 +587,31 @@ REPLAY_RUNS="$(replay_meta_files | { grep -c . || true; })"
 if [ -z "$REPLAY_RUNS" ]; then REPLAY_RUNS=0; fi
 
 if [ "$REPLAY_RUNS" -gt 0 ]; then
-  REPO_ROLE="rebuild target"
+  # Retained replay evidence is real Phase B evidence — replay only ever runs in
+  # the rebuild repo — but it does NOT get to overrule the bootstrap manifest,
+  # and it used to. Two bugs came out of the unconditional assignment that
+  # stood here:
+  #
+  #   - A repo whose manifest declares `--not-applicable` says, in the one
+  #     artifact whose job is to declare it, that it is not the rebuild target.
+  #     A replay run beside it flipped the header to "rebuild target" anyway,
+  #     contradicting the row two lines below it.
+  #   - With no backlog and no bootstrap manifest, the header read "rebuild
+  #     target" while the Target foundation row read "not a rebuild target" —
+  #     on the same rendered page.
+  #
+  # So: the manifest decides where there is one, and replay evidence fills in
+  # only where there is not. Where replay evidence is the ONLY thing here, the
+  # signals genuinely disagree and the honest answer is to say that rather than
+  # to assert either role — this is a status view, and an inference nobody can
+  # reconcile with the table under it is worse than an admitted unknown.
+  if [ ! -f "$BOOT_MANIFEST" ]; then
+    if [ -f "$BACKLOG" ]; then
+      REPO_ROLE="rebuild target"
+    else
+      REPO_ROLE="indeterminate — replay evidence is here, but no rebuild-backlog.md and no bootstrap manifest are"
+    fi
+  fi
   REPLAY_TSV=""
   if [ "$HAVE_JQ" -eq 1 ]; then
     # run_id is a sortable timestamp, so a plain ascending sort puts each

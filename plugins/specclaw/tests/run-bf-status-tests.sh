@@ -742,6 +742,54 @@ else
   echo "  (skipped — jq not installed)"
 fi
 
+# ── 19b. The repo role never contradicts the table under it ──────────────────
+#
+# REPO_ROLE had two independent writers and they could disagree on one rendered
+# page. Both halves are pinned here, because a status view whose header argues
+# with its own rows is not a status view.
+echo
+echo "-- repo role: one page, one answer --"
+
+if command -v jq >/dev/null 2>&1; then
+  # (a) A --not-applicable manifest DECLARES the role. Replay evidence beside it
+  #     used to flip the header to "rebuild target" — contradicting the row.
+  R="$WORK/role-na"; new_empty "$R"; seed_analysis "$R" "CONFIRMED by H, 2026-08-07"
+  seed_boot "$R" "this repo is the legacy source"
+  seed_run "$R" "replay/evidence" "20260820-101500" "MOD-001" "PASS" "2026-08-20" "false"
+  OUT="$(run_status "$R")"
+  assert_contains "$OUT" "legacy source (bootstrap declared not applicable)" \
+    "a --not-applicable declaration is not overruled by a replay run beside it"
+  assert_not_contains "$OUT" "**Repo role (inferred):** rebuild target" \
+    "and the header never asserts the opposite of what the manifest declared"
+
+  # (b) Replay evidence with nothing to corroborate it: the Target foundation row
+  #     reads "not a rebuild target", so the header must not read "rebuild
+  #     target". Neither signal is discarded — the disagreement is reported.
+  R="$WORK/role-orphan"; new_empty "$R"
+  seed_run "$R" "replay/evidence" "20260820-101500" "MOD-001" "PASS" "2026-08-20" "false"
+  OUT="$(run_status "$R")"
+  assert_contains "$OUT" "not a rebuild target" "the Target foundation row still says what it always said"
+  assert_not_contains "$OUT" "**Repo role (inferred):** rebuild target" \
+    "and the header no longer contradicts it on the same page"
+  assert_contains "$OUT" "indeterminate" "the disagreement is named rather than silently resolved"
+
+  # (c) The ordinary rebuild repo is unaffected — this is the case that matters.
+  R="$WORK/role-normal"; new_empty "$R"; seed_analysis "$R" "CONFIRMED by H, 2026-08-07"
+  seed_clarify_done "$R"; seed_backlog "$R"; seed_baseline_recorded "$R"; seed_boot "$R"
+  seed_run "$R" "replay/evidence" "20260820-101500" "MOD-001" "PASS" "2026-08-20" "false"
+  assert_contains "$(run_status "$R")" "**Repo role (inferred):** rebuild target" \
+    "a real rebuild target still reads as one"
+
+  # (d) And replay evidence still fills in where no manifest has been copied yet.
+  R="$WORK/role-nobootstrap"; new_empty "$R"; seed_analysis "$R" "CONFIRMED by H, 2026-08-07"
+  seed_backlog "$R"
+  seed_run "$R" "replay/evidence" "20260820-101500" "MOD-001" "PASS" "2026-08-20" "false"
+  assert_contains "$(run_status "$R")" "**Repo role (inferred):** rebuild target" \
+    "replay evidence plus a backlog still infers a rebuild target with no manifest present"
+else
+  echo "  (skipped — jq not installed)"
+fi
+
 # ── 20. The failure path emits no guidance at all ────────────────────────────
 #
 # PD-07, at the two levels it lives at. In the script: a refused invocation
