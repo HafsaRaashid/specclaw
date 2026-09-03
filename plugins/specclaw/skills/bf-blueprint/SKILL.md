@@ -68,6 +68,20 @@ The three gates, and what each one protects:
 - Any `PQ-###` the agent raised this run, and what it holds provisional.
 - **Remind the user to `git add .specclaw/analysis/target-architecture.md`** — grounding the lifecycle in these documents via `context.pin` only works once `git ls-files` can see them, since `specclaw-discover-context` enumerates candidates that way.
 
+## Step 5 — Show what comes next
+
+```bash
+specclaw-bf-status .specclaw --next
+```
+
+Render its output **verbatim**, after the summary above — never instead of it. Read-only, writes nothing, costs a second.
+
+A `PROVISIONAL` blueprint and an unconfirmed `module-map.md` both surface there, and neither is a stop — exactly as this command treats them. Relay them as the guidance states them rather than restating the status in your own words.
+
+**Only if this run completed.** Steps 1 and 3 both say to surface stderr and stop; that means stop. A run that did not finish must never print a next step, which would read as though the phase advanced when it did not.
+
+**Never work the next step out yourself.** `specclaw-bf-status` owns the lifecycle ordering for every `bf-*` command — which phase follows which, which open items are human work, and which command clears them. A next phase decided here would be a second copy of that ordering, diverging the moment either side changes.
+
 ## What this command does not do
 
 `/specclaw:bf-blueprint` decides **nothing**. It never chooses a stack, a database engine, a hosting model, an auth approach or a UI framework — those are `SQ`/`CQ` decisions made by named humans through `/specclaw:bf-clarify`, and a blueprint that quietly picked one would be inventing the most consequential half of a rebuild. Where a decision is missing, it renders `PROVISIONAL` and says which question would settle it.

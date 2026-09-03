@@ -104,6 +104,22 @@ On success it deletes the declaration (a transient draft, like `.rebuild-plan-dr
 
 Remind the user to `git add` the scaffold and `.specclaw/bootstrap/` — the manifest is the gate's input, and an untracked one is invisible to a fresh clone and to CI.
 
+## Step 7 — Show what comes next
+
+```bash
+specclaw-bf-status .specclaw --next
+```
+
+Render its output **verbatim**, after the summary above — never instead of it. Read-only, writes nothing, costs a second.
+
+On a ready foundation it names `/specclaw:propose`, the same command Step 6's last bullet does, with `/specclaw:bf-replay <change>` as what follows. **That agreement is deliberate and load-bearing** — the two used to disagree, because the dashboard recommended replaying an application nobody had built yet. If you ever find them saying different things again, `specclaw-bf-status` is the one to fix; do not quietly reword this skill to match a wrong recommendation.
+
+It reads the manifest this run just wrote, so it is right for every mode without being told which one ran: `--not-applicable` reports nothing outstanding (this repo has declared it is not the rebuild target), and `recorded-ready` reports the same state as before, because nothing changed.
+
+**Only if this run completed.** Steps 1, 3, 4 and 5 each say to surface the problem and stop — that means stop. A run that did not finish must never print a next step, which would read as though the foundation were ready when it is not.
+
+**Never work the next step out yourself.** `specclaw-bf-status` owns the lifecycle ordering for every `bf-*` command — which phase follows which, which open items are human work, and which command clears them. A next phase decided here would be a second copy of that ordering, diverging the moment either side changes.
+
 ## The foundation-only boundary
 
 **MAY create:** the app shell · routing shell · API client foundation · frontend→API connectivity · solution/project layout · dependency injection · environment and configuration structure · CORS · error-handling conventions · ORM setup · database connectivity · migrations *infrastructure* (the mechanism, not a domain migration) · test-project structure for both sides · theme plumbing · exactly one health-check endpoint, purely to prove connectivity.

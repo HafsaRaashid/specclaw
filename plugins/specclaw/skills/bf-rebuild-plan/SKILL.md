@@ -118,6 +118,20 @@ It is a **status view, not evidence**: regenerated in full every invocation and 
 
 **Remind the user to `git add .specclaw/analysis/*.md`** (including the refreshed `rebuild-backlog.md`) if these files aren't already tracked — grounding the lifecycle in them via `context.pin` only works once `git ls-files` can see them, since `specclaw-discover-context` enumerates candidates that way. See `docs/rebuild-workflow.md` for the full pin/grounding recipe.
 
+## Step 6 — Show what comes next
+
+```bash
+specclaw-bf-status .specclaw --next
+```
+
+Render its output **verbatim**, after everything above — never instead of it. Read-only, writes nothing, costs a second.
+
+This answers a different question from the summary above and does not replace it. Step 5's *recommended next item* and *recommended next module* are **within** this backlog: which `BL-###` to build, computed by `render` from dependency rank and readiness. This is the per-**phase** view: which `bf-*` command the rebuild as a whole is waiting on. Report both; they are not alternatives.
+
+**Only if this run completed.** Steps 1 and 3 both say to surface stderr and stop — that means stop. A run that did not finish must never print a next step, which would read as though the phase advanced when it did not. Step 4's `module-status` failure is the one exception the skill already carves out: it is non-fatal, the backlog was still written, so guidance still applies.
+
+**Never work the next step out yourself.** `specclaw-bf-status` owns the lifecycle ordering for every `bf-*` command — which phase follows which, which open items are human work, and which command clears them. A next phase decided here would be a second copy of that ordering, diverging the moment either side changes.
+
 ## What this command does not do
 
 `/specclaw:bf-rebuild-plan` creates **nothing** under `.specclaw/changes/` and calls **no** lifecycle skill or script — it only reads its input documents and writes one file. The operator still runs `/specclaw:propose "<item>"` themselves for each backlog entry, exactly as they would for any other feature idea. This command does not, and should not, ever be extended to auto-invoke `/specclaw:propose` — that would silently reintroduce the lifecycle coupling this command is deliberately designed to avoid.

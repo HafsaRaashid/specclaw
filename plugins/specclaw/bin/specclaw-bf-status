@@ -529,6 +529,12 @@ fi
 BOOT_MANIFEST="$BOOTSTRAP/bootstrap-manifest.json"
 REPO_ROLE="legacy source (no Phase B artifacts)"
 
+# Whether a foundation is actually STANDING here, which is not the same question
+# as whether a manifest exists. A `--not-applicable` declaration is a manifest
+# too, and it says the opposite: this repo is not the rebuild target. Only the
+# recommendation reads this; no row does.
+FOUNDATION_READY=0
+
 if [ -f "$BOOT_MANIFEST" ] && [ "$HAVE_JQ" -eq 1 ]; then
   BOOT_NA="$(jqr "$BOOT_MANIFEST" '.not_applicable | if . == null then "" elif type == "object" then (.reason // "declared not applicable") else tostring end')"
   BOOT_READY="$(jqr "$BOOT_MANIFEST" '.foundation_ready' '?')"
@@ -538,6 +544,7 @@ if [ -f "$BOOT_MANIFEST" ] && [ "$HAVE_JQ" -eq 1 ]; then
     add_row "Target foundation" "/specclaw:bf-bootstrap" "N/A" "declared not applicable: ${BOOT_NA}"
   elif [ "$BOOT_READY" = "true" ]; then
     REPO_ROLE="rebuild target"
+    FOUNDATION_READY=1
     add_row "Target foundation" "/specclaw:bf-bootstrap" "DONE" "foundation ready${BOOT_STACK:+ — ${BOOT_STACK}}"
   else
     REPO_ROLE="rebuild target"
@@ -547,6 +554,9 @@ if [ -f "$BOOT_MANIFEST" ] && [ "$HAVE_JQ" -eq 1 ]; then
   fi
 elif [ -f "$BOOT_MANIFEST" ]; then
   REPO_ROLE="rebuild target"
+  # Without jq the row already reads DONE rather than guessing downward, and the
+  # recommendation follows the row rather than second-guessing it.
+  FOUNDATION_READY=1
   add_row "Target foundation" "/specclaw:bf-bootstrap" "DONE" "manifest present (install jq for readiness detail)"
 elif [ -f "$BACKLOG" ]; then
   add_row "Target foundation" "/specclaw:bf-bootstrap" "—" "no bootstrap-manifest.json"
@@ -637,7 +647,7 @@ if [ "$REPLAY_RUNS" -gt 0 ]; then
   else
     add_row "Replay acceptance" "/specclaw:bf-replay" "DONE" "${REPLAY_RUNS} retained run(s) (install jq for per-target verdicts)"
   fi
-elif [ -f "$MANIFEST" ] && [ -f "$BOOT_MANIFEST" ]; then
+elif [ -f "$MANIFEST" ] && [ "$FOUNDATION_READY" -eq 1 ]; then
   add_row "Replay acceptance" "/specclaw:bf-replay" "—" "no retained replay run"
   # NOT /specclaw:bf-replay, which is what this used to say.
   #

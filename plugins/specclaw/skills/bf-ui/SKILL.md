@@ -90,6 +90,24 @@ Run this in the **new (rebuild) repo**, for a change that is built — alongside
 
 5. **Tell the user what to do with the file:** a human opens `ui-review.md`, compares the new UI against the referenced legacy screenshots, fills in each row's `Verified by`/`Date`/`Notes`, and **commits the completed file with the PR alongside the replay evidence**. That committed, signed file is the fidelity proof for this change. An unsigned `ui-review.md` proves nothing.
 
+## Show what comes next — after any mode
+
+Once the mode's own summary is delivered, and only then:
+
+```bash
+specclaw-bf-status .specclaw --next
+```
+
+Render its output **verbatim**, after that summary — never instead of it. Read-only, writes nothing, costs a second. It runs after **all three modes**, unchanged, because it reads `ui-inventory.md` and `ui-manifest.json` rather than the invocation.
+
+**Uncaptured screenshots surface there as a `Next action`, and that is exactly right** — a human runs the legacy app and takes them; no specclaw command ever does. The guidance names the count and points at `--record` as what turns those files into hashed evidence. This is the computed form of Mode A's step 5 work order, not a replacement for it: give the user the checklist path and the filename convention as step 5 requires, then let the guidance state the count.
+
+This command is **optional and never required**, and the guidance reflects that: a project with no `ui-inventory.md` reads `N/A — optional`, and `/specclaw:bf-ui` is never recommended as a next command anywhere. Nothing here turns the UI workstream into a gate.
+
+**Only if this run completed.** Every mode has steps that say to surface stderr and stop — Mode A's `collect`, Mode B's `record`, Mode C's `checklist-collect` and `checklist-render`. Mode C's refusals in particular (`SQ-013` undecided, policy `REINTERPRET`, no `SCR-###` cited) are stops, not warnings. A run that did not finish must never print a next step.
+
+**Never work the next step out yourself.** `specclaw-bf-status` owns the lifecycle ordering for every `bf-*` command — which phase follows which, which open items are human work, and which command clears them. A next phase decided here would be a second copy of that ordering, diverging the moment either side changes.
+
 ## What this command does not do
 
 `/specclaw:bf-ui` never runs the legacy application, never takes a screenshot, never simulates or describes an unobserved screenshot, and never writes, moves, archives, or deletes anything under `.specclaw/ui/screens/` — screenshot capture is a human action, exactly like golden-master fixture capture, and "no captures yet" is a normal reported state, never an error.
