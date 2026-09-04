@@ -19,6 +19,22 @@ Invocation:
 /specclaw:bf-bootstrap --not-applicable "<why>"  # this repo is not the rebuild target; record that once
 ```
 
+## Step 0 — `--not-applicable` (early exit)
+
+**Only when the user invoked `--not-applicable`.** This repo is not the rebuild target — record the declaration and stop. Nothing else on this page runs: no collect, no agent, no scaffold, no smoke.
+
+```bash
+specclaw-bf-bootstrap not-applicable .specclaw \
+  --reason "<why — the user's own words>" \
+  --declared-by "<name>, <YYYY-MM-DD>"
+```
+
+Both flags are required and the subcommand refuses the declaration without them. That is deliberate: this declaration switches off `/specclaw:propose`'s target-foundation gate, and an unexplained or unattributable one is indistinguishable from having skipped the foundation by accident — the exact failure the gate exists to catch. Ask the user for their name, and for the reason if the invocation didn't carry one; never supply either yourself.
+
+If a real foundation manifest already exists, the subcommand refuses to overwrite it with a not-applicable declaration and says so — relay that verbatim rather than moving the manifest aside on your own initiative. If the declaration was already made, it reports that and leaves it unchanged.
+
+Then run **Step 7** to show what comes next, and stop.
+
 ## Step 1 — Collect (Phase 0 validate + Phase 1 resolve the stack)
 
 ```bash

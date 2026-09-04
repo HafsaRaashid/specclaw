@@ -18,13 +18,23 @@ specclaw-bf-bootstrap foundation-check .specclaw
 
 **If `applicable` is `false`, continue to step 1b** — there is no rebuild backlog, so this project is not a brownfield rebuild target and nothing here applies. Say nothing about it.
 
+**If the command does not run at all** — `command not found`, any non-zero exit, or no JSON on stdout — you cannot read the gate, so fall back to the one signal that does not need it: **if `.specclaw/analysis/rebuild-backlog.md` does not exist, continue to step 1b silently.** No backlog means this is not a rebuild target, so the gate has nothing to protect and stopping an ordinary proposal because a brownfield-only binary is missing from an older install would be a pure false positive. If that file **does** exist, say the foundation gate could not be evaluated, name the command that failed, and stop — a brownfield project is exactly where this gate matters. The fail-closed rule at the bottom of this page governs a manifest this command *read* and distrusted; it does not govern a command that never ran.
+
 **If `applicable` is `true` and `foundation_ready` is `false`, stop.** Do not offer or run the backfill, do not name the change, do not create the change directory, do not draft a proposal, do not run the dependency check. Relay the `reason`, then the `remedy` verbatim:
 
 > Target rebuild foundation has not been created. Run `/specclaw:bf-bootstrap` first.
 
 **Why this gate is absolute.** Without it, the first backlog item proposed inherits responsibility for inventing the application skeleton — and it inherits it *invisibly*, because nothing in the spec, the tasks or the verify report says "this item is also creating the app". That is how a screen-bearing item once shipped as a backend-only slice: the repo had no frontend, so the frontend was never anybody's task. A backlog item adds a capability to an application that already exists. If it does not exist yet, the answer is to create it deliberately, once, not to smuggle it into whichever item happened to be proposed first.
 
-The one legitimate false positive is proposing an ordinary change **inside the legacy repo**, which also carries a `rebuild-backlog.md`. That is recorded once, explicitly, with `/specclaw:bf-bootstrap --not-applicable "<why>"` — never inferred, because there is no honest signal that distinguishes the two repos.
+The one legitimate false positive is proposing an ordinary change **inside the legacy repo**, which also carries a `rebuild-backlog.md`. That is recorded once, explicitly, and attributably — never inferred, because there is no honest signal that distinguishes the two repos:
+
+```bash
+specclaw-bf-bootstrap not-applicable .specclaw \
+  --reason "<why this repo is not the rebuild target>" \
+  --declared-by "<name>, <YYYY-MM-DD>"
+```
+
+Both flags are required and the declaration is refused without them — same rule as a bypass's `Chosen by`. Ask the user for their name; do not supply one yourself.
 
 When `foundation_ready` is `true`, continue silently. Mention the foundation only if the user asks.
 
@@ -35,7 +45,19 @@ When `foundation_ready` is `true`, continue silently. Mention the foundation onl
    From here on `<change-name>` means the full numbered name, prefix included.
 2. Create `.specclaw/changes/<change-name>/`.
 
-2a. **Item-split resume check** (brownfield rebuilds only). Step 2b's `bypass-check` output carries a `splits` array — every non-`COMPLETE` `IS-###` split on this backlog item. **If it is empty (the normal case), skip to 2b.**
+2a. **Backlog check** (brownfield rebuilds only — inert everywhere else). **Run this once, here; steps 2b and 2c both read its output:**
+
+```bash
+specclaw-bf-rebuild-collect bypass-check .specclaw <BL-###|--title "<the item title>">
+```
+
+Pass the `BL-###` if the user named one; otherwise pass the title — always behind the `--title` flag, never as a bare positional, which is refused. **If the JSON says `"applicable": false`, skip straight to step 3** — there is no backlog, or this change isn't a backlog item, and neither 2b nor 2c applies. Relay the `reason` only when it reports an *ambiguous* title (the user has to name the id); the other reasons are just "this isn't a brownfield backlog item" and need no comment.
+
+**If the command does not run at all** — `command not found`, any non-zero exit, or no JSON on stdout — apply the same fallback as the step 1 gate: **if `.specclaw/analysis/rebuild-backlog.md` does not exist, skip straight to step 3 silently.** If it does exist, say the dependency check could not be evaluated, name the command that failed, and stop rather than proposing a backlog item with its dependencies unread.
+
+The check is read-only and idempotent — it writes nothing — so re-running it costs nothing if you lose its output.
+
+2b. **Item-split resume check.** Step 2a's output carries a `splits` array — every non-`COMPLETE` `IS-###` split on this backlog item. **If it is empty (the normal case), skip to 2c.**
 
 Otherwise this item has already been partly built, and this proposal is a **resume, not a fresh start**. Before anything else, present:
 
@@ -54,15 +76,7 @@ Then, by the split's `status`:
 
 **Never re-propose completed scope.** The proposal's scope section covers the remainder only, and `proposal.md` carries `## Resumes Split` citing the `IS-###`. Rebuilding the finished slice from scratch is the failure this record exists to prevent — the whole point of `IS-###` is that choosing item-split must never make implementation history disappear.
 
-2b. **Dependency check** (brownfield rebuilds only — inert everywhere else):
-
-```bash
-specclaw-bf-rebuild-collect bypass-check .specclaw <BL-###|--title "<the item title>">
-```
-
-Pass the `BL-###` if the user named one; otherwise pass the title. **If the JSON says `"applicable": false`, skip straight to step 3** — there is no backlog, or this change isn't a backlog item, and nothing below applies. Relay the `reason` only when it reports an *ambiguous* title (the user has to name the id); the other reasons are just "this isn't a brownfield backlog item" and need no comment.
-
-Otherwise, act on each dependency's `action`:
+2c. **Dependency check.** Act on each dependency in step 2a's `dependencies` array, by its `action`:
 
 | `action` | What it means | What to do |
 |---|---|---|
@@ -138,9 +152,9 @@ It prints the new `IS-###`. `Evidence` and `Replay evidence` stay `not yet merge
 **What to tell the user after recording it**, in one breath: the item will render `⚠ PARTIALLY BUILT` in `rebuild-backlog.md`, an `/specclaw:bf-replay --item BL-###` run will report **PARTIAL** and cannot be the item's final acceptance, and the split returns automatically — `--refresh` flips it to `READY-TO-RESUME` as soon as every blocked-until item carries a declared `BUILT:` note. Nothing is tainted: a split fakes nothing.
 
 3. Generate `proposal.md` from `$CLAUDE_PLUGIN_ROOT/templates/proposal.md`. Fill in: problem statement, proposed solution, scope (in / out), impact (files, complexity, risk), open questions.
-   - **`## Dependency Bypass`:** one bullet per **stubbed** dependency, citing the `ST-###` from step 2b, the strategy, the chooser and date, and the concrete sketch. **Omit the whole section** when there was no stub bypass — which is the normal case.
-   - **`## Item Split`:** present only when this proposal recorded an `IS-###` in step 2b. Cite the id, what ships now, what is deferred, the rules each half covers, what unblocks the remainder, and the chooser — plus the layer-removal confirmer when there was one. The scope section's **out** list must name the deferred scope explicitly; a split whose deferral appears nowhere in the scope section is a split the spec will quietly widen.
-   - **`## Resumes Split`:** present only when step 2a found a non-`COMPLETE` split. Cite the `IS-###`, what the earlier slice built, its change/PR/replay evidence, and state that this proposal covers the remainder only.
+   - **`## Dependency Bypass`:** one bullet per **stubbed** dependency, citing the `ST-###` from step 2c, the strategy, the chooser and date, and the concrete sketch. **Omit the whole section** when there was no stub bypass — which is the normal case.
+   - **`## Item Split`:** present only when this proposal recorded an `IS-###` in step 2c. Cite the id, what ships now, what is deferred, the rules each half covers, what unblocks the remainder, and the chooser — plus the layer-removal confirmer when there was one. The scope section's **out** list must name the deferred scope explicitly; a split whose deferral appears nowhere in the scope section is a split the spec will quietly widen.
+   - **`## Resumes Split`:** present only when step 2b found a non-`COMPLETE` split. Cite the `IS-###`, what the earlier slice built, its change/PR/replay evidence, and state that this proposal covers the remainder only.
    - Also generate `.specclaw/changes/<change-name>/status.md` from `$CLAUDE_PLUGIN_ROOT/templates/status.md`. Fill in: `{{title}}` and `{{change_name}}`, `{{date}}` / `{{updated}}` with today's date, and the phase rows — set Proposal status to `🟡 Draft` and the remaining phases (Spec, Design, Tasks, Build, Verify) to pending. Leave task/agent/issue sections empty for now.
 4. **Party panel (conditional).** Read the switch with the reader, never with your eyes:
 
@@ -207,4 +221,4 @@ It never creates a foundation, never infers that one exists from the presence of
 
 It fails **closed**: a manifest that can't be parsed, carries an unknown schema, or claims readiness while recording a failed smoke check reports not-ready with the reason. Passing a gate on a file nobody could read would defeat the point of having it.
 
-Nothing above applies to a project with no `rebuild-backlog.md`. Both `foundation-check` and `bypass-check` return `applicable: false` and propose behaves exactly as it always has.
+Nothing above applies to a project with no `rebuild-backlog.md`. Both `foundation-check` and `bypass-check` return `applicable: false` and propose behaves exactly as it always has — and if either command cannot run at all, the absence of that same file is the fallback signal, so a greenfield proposal is never blocked by a brownfield-only binary being missing. **A greenfield project is never gated here, on any path.**
