@@ -79,9 +79,22 @@ If `true`:
 5. Extract the verdict line from `review-report.md` and append a one-line summary to the verify-report that will be written in Step 4:
    `**Code Review:** <verdict> — <N findings: X BLOCK, Y WARN, Z NOTE>`
 
+## Step 3.6 — Partial-slice verification (conditional)
+
+Skip entirely unless `spec.md` carries a `## Item Split` or `## Resumed From Split` section — the normal case, no output, no error.
+
+When it does, this run verifies **a slice of a backlog item, not the item**. Say so on the report's face, immediately under the verdict:
+
+> **Partial-slice verification (split IS-001).** This verifies the scope this change agreed to build. `BL-010` is not fully built: `<the deferred scope>` remains, blocked until `BL-001 BUILT, BL-003 BUILT`. The item's own acceptance is `/specclaw:bf-replay --item BL-010`, which reports PARTIAL while the split is open.
+
+Two rules for the verdict itself:
+
+- **Criteria labelled `[already built: IS-###]` are out of scope.** They were satisfied by the earlier slice and this change does not implement them. Verifying against them would fail a change for not re-doing finished work.
+- **A clean verdict here means "the slice we agreed to build works".** It does not mean the feature exists, and the report must never phrase it that way. That distinction is the whole reason the split is on the record.
+
 ## Step 4 — Save report
 
-Save the agent's output as `.specclaw/changes/<change>/verify-report.md`. If Step 3.5 ran, append the code review summary line from Step 3.5 to the end of this report.
+Save the agent's output as `.specclaw/changes/<change>/verify-report.md`. If Step 3.5 ran, append the code review summary line from Step 3.5 to the end of this report. If Step 3.6 applied, the partial-slice statement belongs directly under the verdict, not appended at the end — a qualification a reader meets after the conclusion has already been read is a qualification that did not do its job.
 
 ## Step 5 — Update status
 

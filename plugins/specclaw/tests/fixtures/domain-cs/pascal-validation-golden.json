@@ -1,0 +1,1 @@
+[{"name":"ValidateReading","file":"src/Rules.pas","line":10,"body":"  Result := True;\n  if Value < 0 then\n  begin\n    Result := False;\n    Exit;\n  end;\n  if Value > 100 then\n    Result := False;\nend;"}]

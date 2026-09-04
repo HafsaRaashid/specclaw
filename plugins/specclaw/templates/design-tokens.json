@@ -1,0 +1,7 @@
+{
+  "generated": "{{date}}",
+  "view_technology": "{{view_technology}}",
+  "legacy_commit_sha": "{{legacy_commit_sha}}",
+  "token_groups": [],
+  "omitted": []
+}

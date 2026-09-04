@@ -4,6 +4,515 @@ All notable changes to specclaw are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.14.2] — 2026-08-25
+
+### Added
+- **`/specclaw:bf-quality` — a measured quality baseline, and an honest one.**
+  Sizing a legacy rebuild has always rested on a reading of the code that nobody
+  could reproduce. "The billing module is the scary one" is a real finding and it
+  travels as hearsay: it cannot be re-measured after the rebuild, and it cannot
+  be shown to a client who is being asked to fund the work.
+
+  The new command writes `.specclaw/analysis/quality.json` — per-module rollups
+  of cyclomatic complexity, function length, duplication and file length — plus a
+  narrated `quality-report.md`. Four modes: the legacy report, `--target <path>`
+  for the rebuilt tree, `--compare`, and `--compare --gate`.
+
+- **Every verdict is computed in bash; the agent narrates and cannot re-derive.**
+  Statuses, severities, per-module rollups and the gate result are all decided in
+  the collector from thresholds that live only in `config.yaml`'s new `quality:`
+  block. The narration agent is granted `Read` and `Write` and nothing else, so
+  it has no way to run a metric tool or check a number against source even if its
+  prompt failed to forbid it. A threshold that can be re-derived can be drifted,
+  and these numbers end up in front of clients.
+
+- **`NOT-MEASURED` is a result, not a gap.** No metric is ever estimated,
+  extrapolated or filled in. When one cannot be computed it is recorded with a
+  machine-readable reason — `language_unsupported`, `tool_missing`, or
+  `parse_error` — and the report states the coverage **above** the findings
+  rather than below them, because a reader who takes a rollup as complete without
+  knowing a third of the tree was unmeasurable has been misled. Language support
+  wins over a missing tool in that precedence: if no available tool parses the
+  language, installing something would not help, and saying `tool_missing` would
+  send someone off to fix the wrong thing.
+
+- **`scc`, `lizard` and `jscpd` are all optional.** Each is probed per run and a
+  missing one degrades only its own metrics. A run with none of them installed
+  still succeeds, reports everything as `NOT-MEASURED`, and invents no hotspot.
+  `jq` is the one hard dependency. Only documented machine-readable output is
+  parsed — never scraped human output.
+
+- **`QI-###` hotspots are permanent, and the registry is never archived.**
+  `templates/quality-issues.md` joins `ST-###`/`IS-###` under `CONTRACT.md` (c)
+  with one addition: the `quality.json` snapshot beside it *is* archived every
+  run, which is exactly why the id space lives in a separate document. A hotspot
+  that no longer exceeds its threshold is marked `resolved` and keeps its id and
+  first-seen date forever — never deleted, because "this used to be a hotspot" is
+  what distinguishes a module somebody cleaned up from one that was never bad.
+  Identity is `metric|file|function|module`, never the measured value, so two
+  reports months apart are comparable.
+
+- **A one-sided comparison is `NOT-COMPARABLE`, never an improvement.** This is
+  the flattering lie the compare mode exists to refuse. A legacy system in a
+  language no tool parses for complexity reports `NOT-MEASURED`; the rebuild, in
+  a well-supported language, reports `PASS`. Nothing has been shown to have
+  improved — nobody knows what the legacy figure was — and the delta report says
+  so in its own section, placed ahead of the wins.
+
+- **Advisory by default, and provably optional.** The default mode exits 0 even
+  when every module is `HIGH`. `--compare --gate` is the only enforcing path
+  anywhere in the command, printing `QUALITY-GATE: PASS`/`FAIL (n regressions)`
+  with a matching exit code, where a regression is a status *band* worsening at
+  module level. No other command requires anything this one produces. The single
+  interaction is `/specclaw:bf-rebuild-plan`, whose per-module coverage rollup
+  gains a quality status and open-hotspot count when `quality.json` happens to
+  exist — a guarded read whose every failure mode (no file, no `jq`, unreadable
+  JSON, an unmeasured module) degrades to the same empty string, so the rendered
+  backlog is byte-identical to a run predating the hook. `run-quality-tests.sh`
+  asserts that by diffing two renders and requiring every differing line to be an
+  annotation.
+
+- **Module numbers describe the cited slice, and say so.** Nothing in
+  `.specclaw/` maps a source file to a `MOD-###` — the module map maps modules to
+  entities, rules, services and screens. So the join uses only the file paths each
+  module cites in its own `**Evidence:**` bullets, an exact path citation beats a
+  directory one, and a file two modules both cite is left under
+  `MOD-UNASSIGNED` rather than allocated. A large unassigned bucket is the
+  expected result on a map nobody has enriched, and it is reported loudly: the
+  alternative — claiming every file under a cited file's directory — is inferring
+  a boundary, which is the one thing `module-map.md` forbids.
+
+- **Stack-blind.** No framework, product or project name appears in the
+  collector. Language handling is an extension→tool-capability table, so adding a
+  language is a row rather than a branch.
+
+
+## [0.14.0] — 2026-08-19
+
+### Added
+- **`/specclaw:bf-clarify --options-pack` — the client decision paper the
+  pipeline never had.** `clarifications.md` is written for engineers: seven type
+  labels, `file:line` sources, an ID namespace. The people who actually get to
+  choose the database, the hosting model or whether nine years of history moves
+  were being handed that document, or a verbal summary of it, and **the decision
+  was coming back attributed to "the client"** — which is to say, to nobody who
+  could be asked about it later.
+
+  It writes `.specclaw/analysis/options-pack.md`: every **undecided blocking**
+  question, from any family, restated in plain language, with 2–3 candidate
+  options, what each one means for *this* system, the trade-offs, and a
+  recommendation. **It records nothing.** The choice goes back through the
+  ordinary `clarifications.md` answer → `--resolve` path, attributed to a named
+  human — which is also the remediation path for attribution generally.
+- **Options are generated per run, never templated per stack.** There is no
+  curated menu of databases, hosts or frameworks in any bash collector or
+  template, and a hardcoded product name in one would be an architectural
+  defect rather than a convenience. The agent generates candidates at run time
+  from what this repo's own analysis documents show, cites each option's
+  consequences by `file:line`, and labels a trade-off that is professional
+  judgement rather than evidence `(judgment)` — so a client who cannot read the
+  code can still tell a measurement from an opinion.
+- **`/specclaw:bf-blueprint` — the target-side counterpart to
+  `architecture.md`.** The pipeline was asymmetric. The legacy side had
+  `architecture.md`, `domain-model.md` and `module-map.md`; the target side had
+  its architecture scattered across `decisions.md`, ADRs, `bootstrap-plan.md`
+  and the backlog, with **nothing that showed the shape of the thing being
+  built** and nothing anyone could put in front of a client.
+
+  It writes `.specclaw/analysis/target-architecture.md`: Mermaid C4 diagrams
+  (one Context, one Container, one Component per `MOD-###`, grouped exactly as
+  `rebuild-backlog.md` groups them), a **legacy→target mapping table in which
+  every row cites the `SQ`/`CQ`/`UQ` decision that sanctions it**, and
+  stack/persistence/hosting/auth sections where every claim carries its
+  decision id.
+- **It derives, it never decides.** A claim with no decision behind it renders
+  `PROVISIONAL(<id>)` naming the open question rather than becoming a confident
+  diagram box, and a module whose target shape is entirely undecided gets a
+  single placeholder naming what blocks it — **never an invented design.** A
+  speculative architecture is worse than an incomplete one: it reads as a plan,
+  and somebody builds it.
+- **Three bash gates that refuse the run rather than render something
+  misleading**: a mapping row with no citation and no `PROVISIONAL`/
+  `RETIRED-BY-DECISION` marker; a citation to an id that is not a real question
+  (worse than an uncited row — it *looks* answered); and a missing section for
+  an active module, or a section for one the map does not define.
+- One test suite, registered in CI: `run-blueprint-tests.sh`.
+
+### Changed
+- **Decision status is computed in bash, in one place, for both new
+  documents.** Whether a question is `DECIDED` / `UNDECIDED` /
+  `NOT-APPLICABLE` is derived from `decisions.md`'s literal heading structure
+  and `clarifications.md`'s own `## Not Applicable` section — the same
+  discipline `sanction-check` and the bootstrap gate already use — and handed
+  to the agents as a resolved verdict with the file that proves it. Neither
+  agent re-derives it, and the blueprint's `**Blueprint status:** COMPLETE |
+  PROVISIONAL (n unresolved blocking questions: …)` line is injected by bash,
+  never asserted by an agent. A status an agent inferred by re-reading markdown
+  is exactly the quietly-wrong claim this split prevents.
+- **A question answered in `clarifications.md` but not yet `--resolve`d counts
+  as decided.** Both new commands read the answer as well as the decision
+  record, and report which file proved it. Reporting a question as undecided to
+  the client who answered it that morning would make the pack lie.
+- **Zero undecided blocking questions is a clean state, not an error.**
+  `--options-pack` still writes the pack, saying nothing is pending and listing
+  what was decided and by whom; `bf-blueprint` renders `COMPLETE` with no
+  `PROVISIONAL` boxes. A project that has already answered everything gets a
+  real document out of both commands, not a refusal.
+- `target-architecture.md` joins the **Phase B copy set** in
+  `docs/rebuild-workflow.md`, on the same terms as `module-map.md`: it travels
+  for readability and nothing computes from it. `options-pack.md` deliberately
+  does not travel — a stale copy in the rebuild repo would show questions as
+  pending that have since been answered.
+- `plugins/specclaw/CLAUDE.md` gains registry rows for `specclaw-bf-blueprint`
+  and for `specclaw-bf-clarify`'s full subcommand set.
+
+### Fixed
+- Nothing in the new scan uses a tab as a field separator. A tab is an IFS
+  *whitespace* character, so `IFS=$'\t' read` collapses runs of them and every
+  field after the first empty one shifts left by a column — which an empty
+  `Type` on a `## Not Applicable` entry produces every time. Both new scans use
+  US (`0x1f`), which preserves empty fields.
+
+## [0.13.0] — 2026-08-17
+
+### Added
+- **`/specclaw:bf-bootstrap` — the target-foundation stage the pipeline never
+  had.** No command owned creating the rebuild's application skeleton. Every
+  `bf-` analysis command is read-only and runs in the legacy repo;
+  `bf-rebuild-plan` writes one document and calls no lifecycle command;
+  `bf-replay` assumes the rebuild's real service and entity files already
+  exist. The only writer of application source was `/specclaw:build`, scoped to
+  one change — so **the first backlog item proposed inherited responsibility
+  for inventing the skeleton, and inherited it invisibly**, because nothing in
+  its spec, tasks or verify report said so.
+
+  It reads the architecture the rebuild already decided (`decisions.md`'s
+  SQ/CQ answers plus accepted ADRs in the new repo) and scaffolds for it: app
+  shell, routing shell, API client, solution/project layout, DI, configuration,
+  CORS, error-handling conventions, ORM and database connectivity, migrations
+  infrastructure, test-project structure for both sides, theme plumbing, and
+  one health-check endpoint to prove connectivity. Then it smoke-tests that,
+  gates it, and records `.specclaw/bootstrap/bootstrap-manifest.json`.
+
+  **Stack-agnostic and purely dynamic — no per-stack scaffold template ships in
+  the plugin and none will.** The `bf-bootstrap-architect` agent generates the
+  skeleton for whatever stack the decisions name, exactly as the baseline
+  harness and the replay tests are generated.
+- **A foundation-only gate, enforced rather than hoped.** The agent declares a
+  census of everything it created — every file with a purpose, every route,
+  every screen, every design-token group, every decision it consumed and from
+  where — and bash checks that census against closed, stack-neutral
+  vocabularies. A file declared `capability`, a route beyond the health check,
+  or a `DR-###`/`BL-###`/`SCR-###` id anywhere in the scaffold each fail it.
+  **It states its own limit**: a declared-census check plus id greps cannot
+  prove the absence of capability logic, and a gate that overclaimed there
+  would be worse than no gate.
+- **A precondition gate on `/specclaw:propose`.** In a rebuild repo it now
+  stops before creating anything: *"Target rebuild foundation has not been
+  created. Run `/specclaw:bf-bootstrap` first."* Inert on any project with no
+  `rebuild-backlog.md`, so nothing greenfield ever sees it, and it fails closed
+  on a manifest it cannot parse. The one honest false positive — proposing an
+  ordinary change inside the **legacy** repo, which also carries a backlog — is
+  settled by a named human recording it once with
+  `--not-applicable "<why>"`, never by inferring which repo we are in.
+- **`SQ-014 — Target backend stack`** joins the standard question bank (bank
+  version 1 → 2). `SQ-001` picks the platform and `SQ-006` the UI framework;
+  between them **nothing asked what runs on the server**, and that gap is what
+  left a real rebuild's backend decided-but-unrecorded.
+- **`IS-###` item splits (`.specclaw/analysis/item-splits.md`)**, a persistent
+  record of scope deliberately deferred, with its own three-state lifecycle
+  (`ACTIVE → READY-TO-RESUME → COMPLETE`).
+- Two test suites, both registered in CI: `run-bootstrap-gate-tests.sh` (59
+  assertions) and `run-item-split-tests.sh` (89).
+
+### Changed
+- **`item-split` is no longer a stub strategy.** The other three *fake* a
+  dependency — they produce an `ST-###`, can taint a verdict, and are retired
+  when the real module lands. A split fakes nothing; it defers real scope. A
+  stub asks *"was the thing under test real?"*; a split asks *"is this item even
+  finished?"*, and answering that needs fields an `ST-###` entry never had (what
+  was deferred, which rules each half covers, what unblocks it).
+  `stub-append --strategy item-split` is now refused by name and points at
+  `split-append`. **Existing entries are grandfathered, never rewritten** — ids
+  are permanent — and are excluded from taint and from the retirement flow, with
+  the manual step named once.
+- **A split can no longer silently widen.** `split-append` refuses a rule
+  partition that does not account for the item's acceptance basis exactly (a
+  rule in neither half is scope belonging to nobody), and **refuses to defer the
+  whole UI layer from a screen-bearing item** without a named human confirming
+  that consequence. Screen-bearing is declared data — the item's own `SCR-###`
+  citations or its rendered UI-fidelity line — never inferred from a title.
+- **Re-proposing a split item resumes it.** `bypass-check` reports every
+  non-`COMPLETE` split with what was built, its change/PR/replay evidence, what
+  remains, and which blockers are now satisfied; a dependency an active split
+  already deferred is classified `deferred-by-split` and is **not re-elicited**.
+- **`--refresh` computes and writes `READY-TO-RESUME`.** Once every
+  blocked-until item carries a declared `BUILT:` note, bash flips the entry —
+  the `Status` line only, one direction, never back, with a `WARN` so it is
+  never silent. This is the one place a rendering command writes into a
+  registry, and it is deliberate: the transition is a pure function of declared
+  data, so a stale `ACTIVE` would be indistinguishable from "nobody got round to
+  it". `COMPLETE` stays a handoff — it needs a clean `--item` run to cite, and
+  `split-update` refuses it straight from `ACTIVE`.
+- **`--item` replay reports PARTIAL.** A run whose item carries an open split
+  appends `(partial — split IS-###)` **after** the verdict token, names which of
+  its fixtures cover built versus deferred scope, and states on the report's
+  face that it is not that item's final acceptance;
+  `run-metadata.json` records `not_final_acceptance`. **No verdict, divergence
+  class or exit code changes** — `PASS` still parses as `PASS`, and a split never
+  softens a `FAIL`. Deferred-scope fixtures are **reported, never excluded**:
+  dropping one would change what the run fails on and hide a real regression
+  behind a scope note, so a FAIL among them is explained and a PASS among them
+  is flagged as worth investigating.
+- `module-status.md` gains a **Partially built items** column and an
+  **Item Splits By Module** section, kept distinct from the stub-tainted column:
+  taint asks whether what a module was measured against was real, this asks
+  whether its work is finished at all.
+- The standard bank's version is now read from the bank file rather than
+  hardcoded, so a question minted after the bank grew no longer records itself
+  as coming from v1.
+
+### Fixed
+- **`⚠ PROVISIONAL` / `⚠ STUB-BACKED` markers doubled on every `--refresh` and
+  never cleared.** A preserved item's prior marker was kept as part of its
+  static body and a freshly computed one prepended on top, so the marker grew by
+  one per refresh and stale copies survived after the underlying condition went
+  away. Both documented claims — "recomputed fresh from nothing every run, never
+  persisted from a prior refresh's own rendered marker" and "retiring a stub
+  clears every marker automatically" — were false in practice for exactly the
+  items a refresh does not re-draft. Reproduced, fixed, and now covered by
+  tests.
+- **A preserved section's own template comment duplicated once per
+  `--refresh`.** The Coverage Check comment sits between its heading and its
+  placeholder, so reading the section back picked it up as content and
+  re-rendered it into a template that already contained it — four renders
+  produced four stacked copies, growing the document without bound.
+- **`item-split` registry entries tainted fixtures.** `resolve` and `render`
+  filtered on `Status` alone and never on `Strategy`, so an `item-split` entry
+  marked its items `⚠ STUB-BACKED` and stamped their fixtures `stub_refs` —
+  contradicting three documents that each stated item-split taints nothing.
+
+### Upgrade notes
+- Existing brownfield projects will find **`SQ-014` unanswered** and
+  `/specclaw:bf-bootstrap` will stop naming it. That is correct rather than a
+  regression: the backend stack *was* decided somewhere, and this records it.
+  Re-run `/specclaw:bf-clarify` (then `--resolve`) and re-copy `decisions.md`,
+  or answer it directly in the rebuild repo.
+- Projects with an existing `ST-###` entry whose `Strategy` is `item-split`
+  will see those items **stop reporting as stub-tainted**, and the entry move
+  out of the Stub Retirement flow into its own line. Nothing is migrated
+  automatically; `split-append` records a real split if resume tracking is
+  wanted.
+- No baseline needs re-recording, and no manifest schema changed.
+
+## [0.12.0] — 2026-08-13
+
+### Fixed
+- **`/specclaw:bf-replay` selected no fixtures at all on any correctly-run
+  project.** `resolve` joined fixtures to backlog items solely through the
+  manifest's `verifies_backlog_item`. The pipeline's own order runs
+  `/specclaw:bf-baseline` (A4) *before* `/specclaw:bf-rebuild-plan` (A5), so on
+  a first-recorded manifest that field necessarily holds the designer's
+  documented `not yet backlog-linked` placeholder on every entry — which means
+  change-scoped replay failed with `No fixtures matched selection` on every
+  project that followed the documented sequence. A resolve design defect, not
+  bad project data, and **no project needs its baseline re-recorded to get the
+  fix**.
+- **`ST-###` stub taint had never fired.** The taint join, and
+  `run-metadata.json`'s `bl_items_covered` / `stub_tainted_items`, read the same
+  placeholder field and so resolved to nothing — leaving
+  `/specclaw:bf-rebuild-plan module-status` with no per-item verdicts to read.
+  Taint now joins on the derived attribution, so it fires where it always
+  should have. **Expect a first run after upgrading to report taint that
+  earlier runs silently omitted.**
+
+### Changed
+- **The authoritative fixture join is now the backlog item's own acceptance
+  basis.** A `BL-0##` resolves to its fixtures through the `DR-###` ids its
+  acceptance basis cites, matched against each manifest entry's
+  `business_rules_pinned` (ANY-of, as the `module_ids` join already was). This
+  is deliberately the same chain `/specclaw:bf-rebuild-plan` walks to compute
+  each item's `**Verification:** VERIFIABLE — fixtures: …` line, which makes the
+  two testably equal — the suite asserts `--item BL-020`'s selection against a
+  backlog rendered by that other tool, so a disagreement between them cannot
+  ship silently.
+- **`verifies_backlog_item` is demoted to a cross-check and is never
+  load-bearing for selection again.** Populated and disagreeing with the join →
+  a `WARN` naming both sets and the fix, with selection unchanged (one of the
+  two documents is stale and bash cannot know which). Holding the placeholder →
+  ignored in silence, because there is no disagreement to report.
+- **`/specclaw:bf-baseline --record` now fills `verifies_backlog_item` and
+  `module_ids`** from `rebuild-backlog.md` and `module-map.md` when those
+  documents exist at record time, retiring the placeholder on any re-record.
+  Fill-in only: a value a scenario declares itself always stands verbatim, and
+  nothing downstream may require the result.
+
+### Added
+- **`/specclaw:bf-replay --item BL-###`** — a fourth selection scope for
+  accepting one backlog item's behaviour on its own, **with no change directory
+  required**. Validates that the item exists and is not a `STRUCK` tombstone,
+  reports the item id and its fixture count, writes its report to
+  `.specclaw/replay/report-<run_id>-BL-###.md`, keeps its evidence in the
+  corpus-wide pool, and records `bl_items_covered` as exactly that one id — a
+  shared fixture never quietly enters a second item's verdict history. Verdict
+  logic, exit codes, `PROVISIONAL` semantics and taint mechanics are identical
+  to every other scope; only selection differs.
+- **The empty-selection contract.** A valid, active item with genuinely zero
+  fixtures mapped to it is a *clean result*: `resolve` exits 0 with
+  `NO BASELINE DATA — 0 fixtures mapped to BL-###`, and the run renders
+  `INCOMPLETE` with the existing exit code 2, stating the same message on the
+  report's face. Never a precondition crash, never an invented fixture, and
+  never a `PASS` — a malformed manifest keeps its loud failure, and the
+  placeholder is neither of these.
+- **`specclaw-bf-replay parse-target`** — the four scopes are mutually
+  exclusive (a positional `<change-name>` combines with no flag; the flags
+  combine with nothing), and deciding whether an invocation is legal is now a
+  mechanical bash job rather than something the skill's prose has to remember.
+  Retention qualifiers still combine with any scope.
+
+## [0.11.0] — 2026-08-12
+
+### Added
+- **Module bypass — build a module before its dependencies exist, without
+  making that invisible.** The module dependency graph stays the *recommended*
+  order; a team can now depart from it deliberately, per unmet dependency, and
+  everything built on top of the departure is marked until the real module
+  lands. Working out of order was always possible by simply doing it — what
+  was missing was any way for a later reader to tell a verdict earned against
+  a real module from one earned against a placeholder.
+- **`.specclaw/analysis/module-stubs.md`** — the `ST-###` bypass registry. One
+  entry per bypass: which `BL-0##`/`MOD-###` it substitutes, the strategy
+  (`stub-interface` | `mock-data` | `feature-flag` | `item-split`), what it
+  concretely fakes (cited `file:line` in the rebuild, written at build time),
+  which items consumed it, who chose it and when. One shared corpus,
+  **append/update-in-place, never archived** — like `clarifications.md`.
+  `ST-###` ids are permanent; retirement updates an entry, never deletes it.
+- **`/specclaw:propose` gained dependency awareness** (it had none). When a
+  proposed item depends on a *cross-module* item with no completion signal,
+  propose stops and presents the four strategies with concrete sketches
+  grounded in what the dependency actually is, plus "it is actually built" and
+  "abort and follow the recommended order". **A bypass is always an explicit
+  human choice** — never agent-decided, never a default; entries record a
+  named chooser and a date. Same-module dependencies are refused rather than
+  offered a strategy: stubbing one means stubbing part of the thing being
+  built. Three new bash subcommands (`bypass-check`, `stub-append`,
+  `stub-update`) own the mechanical half; agents never compute any of it.
+- **Spec carry-through.** `spec.md` gains `## Bypassed Dependencies`, and on a
+  bypassed change **every** acceptance criterion is labelled `[real]` or
+  `[stub: ST-###]`. Two criteria are mandatory per stub: the dev/test-scoping
+  assertion naming the repo's own isolation mechanism, and the
+  registry-completion obligation.
+- **Stub taint in `/specclaw:bf-replay`.** Any fixture verifying an item that
+  consumed an `ACTIVE` stub is stamped `stub_refs`, carried through
+  `compare.json` into the report (`(with active stubs: ST-###)` on the verdict
+  line, a **Stubs In Effect** section, a per-row Stubs column) and into
+  `run-metadata.json`. A three-state flow (`ACTIVE` → `RETIRING` → `RETIRED`)
+  makes a clean re-replay able to honestly retire a stub.
+- **`module-status.md`** gained a **Stub-tainted items** column (latest run per
+  item wins), renders `PASS*` while it is non-zero, and lists per module the
+  `ST-###` entries faking *that* module for others — so "who is waiting on the
+  real MOD-005" is one lookup.
+- **`/specclaw:bf-rebuild-plan`** gained a bash-computed **Stub Retirement**
+  block naming, per stub, the consuming items and the exact replay commands,
+  with each step attributed to human or Claude — and a per-item
+  `⚠ STUB-BACKED` marker alongside `⚠ PROVISIONAL`.
+- `run-stub-registry-tests.sh` (42 assertions), registered in CI.
+
+### Unchanged by design
+- **Verdict logic and exit codes.** Taint enters no rule of `CONTRACT.md`
+  (j.3), adds no `field_class` or `divergence_class`, and has no exit code of
+  its own. It marks a PASS as resting on something unreal; **it never softens
+  a FAIL**, which is asserted directly in the new suite. Unlike `PROVISIONAL`,
+  which participates in the verdict because an open question means nobody has
+  decided what correct is, a stub leaves the comparison sound and qualifies
+  only its standing.
+- **No re-record.** `manifest.json` and its schema number are untouched.
+- **Greenfield and non-brownfield projects see nothing.** No registry means no
+  stubs, silently; `bypass-check` returns `applicable: false` and propose
+  behaves exactly as before.
+- Evidence immutability, the fixture contract, and dependency ordering as the
+  default recommendation.
+
+## [0.10.0] — 2026-08-11
+
+### Added
+- **Module hierarchy (`MOD-###`) across the brownfield pipeline.** A large
+  legacy system can now be migrated and behaviourally accepted **one module at
+  a time** instead of through a flat whole-project backlog and all-or-one-change
+  replay scoping. The hierarchy is `MOD-### → BL-0## → DR-### → GM-###`:
+  modules are migration/acceptance units, backlog items remain the build units.
+  Modules are a **selection dimension** over the one shared corpus — one
+  manifest, one backlog, one `fixtures/` directory; nothing is split per module.
+- **`.specclaw/analysis/module-map.md`** — written by `/specclaw:bf-domain`
+  (new rubric dimension). Per module: purpose, owned entities, **referenced-but-
+  not-owned** entities with their owner, services/routes, screens, owned
+  `DR-###` rules, dependencies, and evidence (`file:line` or a quoted analysis
+  passage) for every grouping claim. Grouping is evidence-based, never derived
+  from directory names. The map is agent-**proposed** and human-**confirmed**
+  via its own `Status:` line; every downstream command runs regardless and
+  states on its face when the grouping is unconfirmed. `MOD-###` ids are
+  **reconciled** across regenerations (name match, then ≥50% owned-entity
+  overlap), never renumbered; a retired module leaves a `WITHDRAWN` tombstone.
+- **Ambiguous boundaries become questions, not assignments.** A contested
+  entity/rule/screen, or a reconciliation tie, raises a typed pending question
+  (trigger `T3`) naming both candidate modules, places the item provisionally
+  with a `⚠ PROVISIONAL` marker, and is typed `DECISION`/`SCOPE` by
+  `/specclaw:bf-clarify`. No new question type was added — the seven-type
+  taxonomy is unchanged.
+- **`/specclaw:bf-rebuild-plan`** requires the map, groups items under
+  `## MOD-###` headings in the map's own dependency order (cycles reported, not
+  silently ordered), gives every item a declared `**Module:**`, adds a
+  bash-computed per-module coverage rollup, recommends the **next module to
+  build** with its reasons stated, and accepts `--module MOD-###` to (re)plan
+  one module while preserving every other module's items, coverage lines, and
+  human-added status notes.
+- **`/specclaw:bf-baseline`** — each scenario declares the `MOD-###` module(s)
+  owning the rules it pins (a scenario spanning modules is tagged with **all**
+  of them); `record` carries these into `manifest.json`'s new `module_ids` and
+  hard-fails on a module tag with no map heading; `--module` designs or extends
+  a harness for one module without disturbing another's scenarios or generated
+  tests, via the new deterministic `merge-scenarios` step.
+- **`/specclaw:bf-replay --module MOD-###`** — a third selection scope between
+  a change and `--all`, resolved by a pure jq join on `module_ids` (ANY-of).
+  The report gains a **module rollup**: per-module counts, each module's own
+  verdict, and — always — how many of its fixtures are **shared** with which
+  other modules. Partial views are marked `PARTIAL`. Selection only: verdict
+  logic and exit codes are identical across all three scopes.
+- **`.specclaw/analysis/module-status.md`** — a read-only per-module status view
+  (items planned/total, scenarios captured/designed, latest module-scoped replay
+  verdict, open questions), regenerated in full by every
+  `/specclaw:bf-rebuild-plan` run and deliberately exempt from
+  archive-then-replace.
+
+### Changed
+- **`manifest_schema` 2 → 3**, adding per-fixture `module_ids`. **This forces no
+  re-record**: change-scoped and `--all` runs still read a schema-2 manifest
+  unchanged. Only `--module`, which is a join on that field, requires 3, and it
+  fails with its own message naming the fix.
+- `CONTRACT.md` gains section **(l)** (module hierarchy, ownership direction,
+  the cross-module honesty rule, selection-only guarantee); `MOD-NNN` joins the
+  ID-permanence rule in (c), which now also documents tombstones and
+  reconciliation.
+- `/specclaw:bf-rebuild-plan`'s Coverage Check and Sequencing Rationale are now
+  actually taken from the planner agent's draft. They were previously discarded,
+  so both sections rendered a placeholder string on a first run and every later
+  `--refresh` preserved that placeholder — the agent's coverage work never
+  reached the file.
+
+### Fixed
+- **Every fixture read `SUPERSEDED` on every re-record on Windows/MSYS.** jq's
+  Windows build emits CRLF, so the manifest's recorded `scenario_content_hash`
+  never equalled the recomputed one — holding every replay at
+  `PASS-PENDING-DECISIONS` permanently, for a reason nothing surfaced.
+- `split_scenario_blocks` did not stop at the next `## ` heading, so the last
+  scenario absorbed `## No Legacy Behaviour Exists` and `## Rule Coverage Check`
+  into its own block — putting unrelated prose inside its content hash (editing
+  the coverage check marked that fixture `SUPERSEDED`) and letting a `MOD-###`
+  mentioned in the coverage check read back as that scenario's declared module.
+- `scenario_block_title` used a `[—-]` bracket expression, which byte-splits the
+  multi-byte em dash on a byte-oriented sed build and left stray bytes on the
+  front of every title — silently defeating every `WITHDRAWN*` tombstone check.
+
 ## [0.5.5] — 2026-07-17
 
 ### Added

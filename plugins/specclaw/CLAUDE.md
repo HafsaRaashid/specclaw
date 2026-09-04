@@ -211,6 +211,11 @@ All executable scripts live in `bin/`. Key ones:
 | `specclaw-validate-change` | Check phase prerequisites |
 | `specclaw-parse-tasks` | Parse `tasks.md` → JSON; **the only task counter** (`--count`) — see below |
 | `specclaw-party` | Adversarial proposal panel: `panel` (resolve the roster) / `tally` (compute the verdict) / `report` (assemble `party-report.md`) / `get` (**the only reader of the `party:` block**) — see below |
+| `specclaw-bf-status` | Per-**phase** brownfield dashboard to stdout: one row per `bf-*` phase, the open items holding each back, and the next command. `--next` prints the same computation as the compact guidance block every lifecycle `bf-*` skill appends to its own summary — the next human **action**, the next **command**, and a short attention list. **This is the single source of the `bf-*` lifecycle ordering**; no skill may work out its own next phase. Writes nothing in either mode — no file, no cache, no archive entry. jq optional. Complements `specclaw-bf-rebuild-collect module-status`, which is the per-**module** view and *is* a written artifact |
+| `specclaw-bf-bootstrap` | Target-foundation stage: `collect` (validate + resolve the required decisions) / `gate` (foundation-only boundary) / `smoke` / `record` / `foundation-check` (the gate `/specclaw:propose` reads) / `not-applicable` |
+| `specclaw-bf-clarify` | Clarify engine: `collect` / `render` (extract mode) / `resolve-collect` / `resolve-render` (`--resolve`) / `options-pack-collect` / `options-pack-render` (`--options-pack` — the client decision paper; bash owns every DECIDED/UNDECIDED/NOT-APPLICABLE verdict, the header counts and the Client-decision lines) |
+| `specclaw-bf-blueprint` | Target blueprint: `collect` (module roster + structural legacy inventory + decision status + the bash-computed `Blueprint status:` line) / `render` (three refusal gates: uncited mapping row, citation to a non-existent id, missing or invented module section) |
+| `specclaw-bf-quality-collect` | Code-quality measurement: `collect` (probe scc/lizard/jscpd, enumerate, join files to `MOD-###` via the map's own Evidence citations, classify against `config.yaml`'s `quality:` thresholds, register `QI-###`, snapshot) / `compare` (per-module per-metric deltas, `NOT-COMPARABLE` for one-sided dimensions, and the `--gate` verdict). Bash owns every status, severity, rollup and verdict; the agent only narrates. Advisory except `compare --gate` |
 
 ## Task counting: `specclaw-parse-tasks --count` is the only counter
 
@@ -309,12 +314,19 @@ Suites live in `tests/`, are bash + coreutils only (no jq in the suites themselv
 | `run-long-orchestration-tests.sh` | `run-long`, the e2e tier, `browser-lock wrap`, PR-aware status |
 | `run-synth-agent-tests.sh` | dynamically synthesized build subagents |
 | `run-shellcheck-gate-tests.sh` | the shellcheck gate itself |
+| `run-replay-classification-tests.sh` | field-path language, record-time validation, divergence classification, verdict order |
+| `run-stub-registry-tests.sh` | module bypass: `bypass-check` classification, the declared `BUILT:` signal, registry refusals, and that stub taint changes no verdict or exit code |
+| `run-bootstrap-gate-tests.sh` | the target-foundation stage: the propose gate (inert / not-ready / naming its command), the loud stop on an undecided required `SQ-###`, the foundation-only gate refusing a BL capability, `record`'s refusals, re-run behaviour, and that the gate fails closed |
+| `run-item-split-tests.sh` | item splits: the DR partition and layer-removal guards, the `IS-###` record's fields, `ACTIVE → READY-TO-RESUME → COMPLETE` and who flips each, marker rendering/clearing, resume-not-restart, and that PARTIAL changes no verdict or exit code |
+| `run-blueprint-tests.sh` | the client options pack and the target blueprint: the three-way decision-status computation, empty-field integrity in the scan, the zero-pending clean state, the options-pack draft refusals, the blueprint's missing-input stops, unconfirmed-map-is-a-WARN-not-a-stop, and all three render gates |
+| `run-cs-body-parser-tests.sh` | validation-routine body parsing per language: the C# `{`/`}` parser, a golden byte-comparison proving the Pascal `begin`/`end;` path is untouched, and a mixed `.pas` + `.cs` run (needs `jq`) |
+| `run-bf-status-tests.sh` | the brownfield phase dashboard and the `--next` guidance block, including no-write guarantees, per-target replay verdict handling, action-vs-command guidance, post-bootstrap recommendation, replay FAIL attention, and lifecycle-ordering checks |
+| `run-quality-tests.sh` | the code-quality collector: per-language coverage, `NOT-MEASURED` reason precedence, threshold bands, `QI-###` permanence, compare classification, gate exit codes, module joins, and rebuild-plan rendering checks |
 | `run-status-row-tests.sh` | `status-row` upserts, and the two sed defects it replaced |
 | `run-phase-state-tests.sh` | `set-phase` transitions and `reconcile` drift detection |
 | `run-loop-gate-tests.sh` | `loop gates` report readers — BLOCK counting and verdict extraction |
 | `run-change-numbering-tests.sh` | `next-change-number` derivation, `renumber-changes` plan/refusals/backfill |
 | `run-party-tests.sh` | party seat resolution and clamping, the fail-loud fallback, the panel cache, the verdict tally, the report grammar, and the `party_val` config-collision regression |
-
 `shellcheck-gate.sh` fails CI on any shellcheck finding absent from `shellcheck-baseline.txt` (pairs of `<path> <SCxxxx>`, no line numbers, so unrelated edits do not churn it). Fix a new finding or add a targeted `# shellcheck disable=SCxxxx` with a rationale — never silence one by appending to the baseline. It skips with exit 0 when shellcheck is not installed, so the suite still runs locally.
 
 ## Templates

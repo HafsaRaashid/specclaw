@@ -23,6 +23,22 @@ jobs:
         run: bash plugins/specclaw/tests/run-synth-agent-tests.sh
       - name: Run shellcheck-gate tests
         run: bash plugins/specclaw/tests/run-shellcheck-gate-tests.sh
+      - name: Run replay-classification tests
+        run: bash plugins/specclaw/tests/run-replay-classification-tests.sh
+      - name: Run stub-registry tests
+        run: bash plugins/specclaw/tests/run-stub-registry-tests.sh
+      - name: Run bootstrap-gate tests
+        run: bash plugins/specclaw/tests/run-bootstrap-gate-tests.sh
+      - name: Run item-split tests
+        run: bash plugins/specclaw/tests/run-item-split-tests.sh
+      - name: Run blueprint + options-pack tests
+        run: bash plugins/specclaw/tests/run-blueprint-tests.sh
+      - name: Run C#/Pascal validation-body parser tests
+        run: bash plugins/specclaw/tests/run-cs-body-parser-tests.sh
+      - name: Run bf-status dashboard tests
+        run: bash plugins/specclaw/tests/run-bf-status-tests.sh
+      - name: Run code-quality collector tests
+        run: bash plugins/specclaw/tests/run-quality-tests.sh
       - name: Run status-row tests
         run: bash plugins/specclaw/tests/run-status-row-tests.sh
       - name: Run phase-state tests

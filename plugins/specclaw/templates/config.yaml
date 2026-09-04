@@ -40,6 +40,17 @@ context:
   max_lines: 3000                  # total line budget for injected docs
   folders: []                      # restrict discovery to these dirs (empty = whole repo)
   pin: []                          # always-include paths (exact, repo-relative)
+  # Example: after running /specclaw:bf-analyze, /specclaw:bf-architecture, and
+  # /specclaw:bf-domain, pin their output so /specclaw:plan, /specclaw:build,
+  # and /specclaw:verify treat it as authoritative context. Requires
+  # `git add .specclaw/analysis/*.md` first (discovery enumerates via
+  # `git ls-files`) and raising max_lines accordingly — see
+  # docs/rebuild-workflow.md for the full recipe, incl. max_lines sizing:
+  #   pin:
+  #     - .specclaw/analysis/codebase-report.md
+  #     - .specclaw/analysis/architecture.md
+  #     - .specclaw/analysis/domain-model.md
+  #     - .specclaw/analysis/functional-spec.md
   exclude: []                      # patterns to skip
 
 # Build settings
@@ -163,6 +174,141 @@ pr:
                     # unit  — requires unit test evidence in verify-report + build.test_command set
                     # e2e   — requires e2e test evidence in verify-report + build.test_command set
                     # both  — requires unit + e2e evidence
+
+# Code quality thresholds (optional — /specclaw:bf-quality only)
+#
+# The ONLY place these numbers live. The collector holds the same values as its
+# documented defaults and reads nothing else, so a policy change is a config
+# edit rather than a code edit — and any status in a quality report can be
+# checked against the block that produced it.
+#
+# A metric no available tool can compute for a language is reported as
+# NOT-MEASURED with a reason, never estimated, so raising a threshold never
+# manufactures coverage. Nothing here gates anything: quality runs are advisory
+# unless invoked as `--compare --gate`.
+quality:
+  complexity_warn: 10          # cyclomatic complexity per function
+  complexity_high: 20
+  function_length_warn: 60     # lines per function
+  function_length_high: 120
+  duplication_warn: 5          # percent duplicated lines, per module
+  duplication_high: 15
+  file_length_warn: 500        # lines per file
+  file_length_high: 1000
+
+  # Which severity band earns a permanent QI-### id. HIGH | WARN.
+  # HIGH by default and deliberately: QI ids are permanent and entries are never
+  # deleted, so registering every WARN on a large legacy tree accumulates
+  # thousands of rows that outlive the code they describe. WARN findings are
+  # still counted in every module rollup — they are just not individually
+  # immortalised.
+  register_severity: HIGH
+
+  # Which severity band earns a REBUILD REMEDIATION BACKLOG ITEM in
+  # /specclaw:bf-rebuild-plan. HIGH | WARN.
+  #
+  # Deliberately INDEPENDENT of register_severity above. That one decides which
+  # hotspots get a permanent QI-### id; this one decides which of those the
+  # rebuild is held ACCOUNTABLE for. A project can immortalise every WARN and
+  # still only be answerable for the HIGH ones.
+  #
+  # A QI below this floor generates no backlog item — it is reported as an
+  # advisory count on its module's coverage-rollup line, so it stays visible
+  # without becoming something the rebuild must clear.
+  remediation_severity_floor: HIGH
+
+  # ── Duplication clone pairs ────────────────────────────────────────────────
+  #
+  # The per-module duplication percentage above says HOW MUCH code is
+  # duplicated. These control the other half of the question — WHERE — by
+  # preserving the clone pairs the detector found: two file:line ranges, the
+  # duplicated line count, and the module each side belongs to.
+  #
+  # No duplicated SOURCE is ever stored or reported. Each clone carries its two
+  # locations and a hash of the normalised fragment, which is its stable
+  # identity across runs; the ranges point at code that is already in the
+  # repository. A quality report is the artifact most likely to be forwarded
+  # outside the team, and one that embeds source cannot be.
+  clone_qi_min_lines: 30       # a clone at or above this many duplicated lines
+                               # earns a permanent QI-### and enters the same
+                               # accountability chain as every other hotspot.
+                               # This is the whole significance judgement, so
+                               # everything registered is HIGH — quality.register_severity
+                               # picks a band and a clone has no band.
+
+  clone_function_min_overlap: 0.5   # a function name is attached to a clone side
+                               # only when that function CONTAINS the clone's
+                               # start line and covers at least this fraction of
+                               # the clone's lines. Anything else — a clone
+                               # straddling two functions, a language with no
+                               # function-level measurement, two functions both
+                               # qualifying — reports file:range with no name.
+                               # Never a nearest-match guess.
+
+  clone_capture_top_n: 50      # how many clones quality.json stores, largest
+                               # first. Truncation is always visible in the
+                               # census; QI registration is NOT bounded by this,
+                               # so a permanent id is never lost to a display cap.
+
+  clone_report_top_m: 10       # how many the report's hotspot section shows.
+
+  # ── Scan scope: what the quality scan measures ─────────────────────────────
+  #
+  # The scan measures production code. Generated migrations, designer files,
+  # minified bundles, vendored dependencies and test suites are excluded by
+  # default, because a hotspot in a file nobody maintains is not a finding about
+  # this project's code — and left in, it distorts module rollups, duplication
+  # percentages and the legacy-vs-target compare.
+  #
+  # THE DEFAULT PATTERNS ARE NOT HERE. They ship with the plugin, in
+  # lib/quality-exclusions.yaml, grouped into the five categories named below.
+  # Read that file to see exactly what each category matches and why; it also
+  # documents the matching semantics in full. This block is the PROJECT layer
+  # that overlays them.
+  #
+  # Matching, in one line: globs against repo-relative paths, case-insensitive,
+  # `**` crosses directories and `*` does not, and `**/x` matches `x` at any
+  # depth including the repo root.
+  #
+  # NOTHING IS HIDDEN. Every excluded file is counted, per category, into
+  # quality.json's `exclusions.census` and narrated in the report's "Scan scope"
+  # section. The effective set is hashed, and `--compare` refuses to compute a
+  # delta across two snapshots whose hashes differ rather than silently
+  # comparing two different denominators.
+  exclusions:
+
+    # Each category on or off independently. Switching one off does not delete
+    # its patterns — they live in lib/quality-exclusions.yaml and come back the
+    # moment this flips to true.
+    generated: true
+    third_party_and_build: true
+    tests: true
+    pipeline_owned: true
+    data_and_lockfiles: true
+
+    # Measure test code into its OWN reported bucket instead of leaving it out.
+    # Requires `tests: true` above — this decides where the test files go, not
+    # whether they are separated. Test code is never folded into a production
+    # module rollup either way: its norms are different (long fixture builders,
+    # repetitive arrange/assert blocks that read as duplication) and mixing the
+    # two makes both numbers mean less.
+    tests_as_separate_bucket: false
+
+    # This project's own additions. Same glob syntax.
+    #   - "**/ThirdPartyControls/**"
+    extra_excludes: []
+
+    # Files forced back IN despite matching an enabled category. Always wins.
+    #
+    # This is the escape hatch for the one trap in the defaults:
+    # `third_party_and_build` excludes `bin/`, `build/`, `out/`, `target/` and
+    # `packages/`, which are build-output directories in .NET, Maven/Gradle,
+    # Rust and NuGet — and legitimate SOURCE directories in shell, Go, Python
+    # and plugin repos. If this project keeps source in one of them, name it
+    # here rather than switching the whole category off:
+    #   - "bin/**"
+    #   - "src/db/Migrations/HandWrittenBackfill.cs"
+    include_overrides: []
 
 # Plugin housekeeping
 plugin:
