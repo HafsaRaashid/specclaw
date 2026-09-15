@@ -698,6 +698,48 @@ if command -v jq >/dev/null 2>&1; then
     "a --not-applicable declaration is not a foundation, and is never told to propose backlog work"
 fi
 
+# ── 18b. A rebuild-repo checkout does not recommend Phase A commands ─────────
+#
+# Phase A (bf-analyze/bf-architecture/bf-domain/bf-clarify) runs in the LEGACY
+# repo. A rebuild-repo checkout can carry a bootstrap-manifest.json (only
+# /specclaw:bf-bootstrap writes it, and only in the new repo) while never
+# having had the legacy analysis documents copied over. The old code inferred
+# each missing document as "this phase hasn't happened yet" and recommended
+# running it here — a command that cannot help, in the wrong repo.
+echo
+echo "-- rebuild-repo checkout: Phase A recommendations go silent --"
+
+if command -v jq >/dev/null 2>&1; then
+  R="$WORK/rebuild-only"; new_empty "$R"; seed_boot "$R"
+  OUT="$(run_next "$R")"
+  assert_not_contains "$OUT" '/specclaw:bf-analyze' \
+    "a ready foundation with no analysis docs never recommends bf-analyze — that phase runs in the legacy repo"
+  assert_not_contains "$OUT" '/specclaw:bf-architecture' \
+    "nor bf-architecture"
+  assert_not_contains "$OUT" '/specclaw:bf-domain' \
+    "nor bf-domain"
+  assert_not_contains "$OUT" '/specclaw:bf-clarify' \
+    "nor bf-clarify"
+
+  DASH_NEXT="$(next_section_of "$(run_status "$R")")"
+  assert_not_contains "$DASH_NEXT" '/specclaw:bf-analyze' \
+    "the full dashboard's Next section agrees — no Phase A command is recommended there either"
+
+  # The rows still report the documents as not written — this suppresses the
+  # RECOMMENDATION, not the row's own honest state.
+  assert_contains "$(run_status "$R")" "codebase-report.md not written" \
+    "the row itself still reports the document as absent"
+
+  # A repo with the analysis docs present is unaffected — the ordinary
+  # progression from section 12 still recommends bf-analyze when it is
+  # actually the phase this repo is missing.
+  R2="$WORK/legacy-only"; new_empty "$R2"
+  assert_contains "$(run_next "$R2")" '`/specclaw:bf-analyze`' \
+    "with no bootstrap manifest at all, bf-analyze is still recommended as normal"
+else
+  echo "  (skipped — jq not installed)"
+fi
+
 # ── 19. Replay: an outstanding FAIL is stated, and never as progress ─────────
 echo
 echo "-- replay in the compact block --"

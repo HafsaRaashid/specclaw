@@ -225,6 +225,28 @@ set_next_action() {
   NEXT_ACTION="$1"; NEXT_ACTION_AFTER="${2:-}"
 }
 
+# Early, minimal check used ONLY to decide whether Phase A's own "missing
+# document" recommendations below still apply to THIS repo. A repo carrying a
+# bootstrap-manifest.json not declared not-applicable is unambiguously the
+# rebuild repo -- that file is written only by /specclaw:bf-bootstrap, which
+# runs nowhere else -- and Phase A's documents belong in the legacy repo, not
+# here. Recommending "run /specclaw:bf-analyze" in a repo that already has a
+# foundation would be recommending a phase that does not apply to this repo at
+# all, not a phase this repo merely hasn't reached yet. The FULL REPO_ROLE /
+# FOUNDATION_READY computation still happens in its usual place, in Phase B1
+# below -- this is only the one bit the Phase A blocks need in order to stay
+# silent instead of racing ahead of it via set_next's first-caller-wins rule.
+EARLY_BOOT_MANIFEST="$BOOTSTRAP/bootstrap-manifest.json"
+EARLY_FOUNDATION_STARTED=0
+if [ -f "$EARLY_BOOT_MANIFEST" ]; then
+  if [ "$HAVE_JQ" -eq 1 ]; then
+    _early_na="$(jqr "$EARLY_BOOT_MANIFEST" '.not_applicable | if . == null then "" else "1" end' '')"
+    [ -z "$_early_na" ] && EARLY_FOUNDATION_STARTED=1
+  else
+    EARLY_FOUNDATION_STARTED=1
+  fi
+fi
+
 # ─── Phase A1/A2 — bf-analyze, bf-architecture ────────────────────────────────
 
 CODEBASE_REPORT="$ANALYSIS/codebase-report.md"
@@ -232,7 +254,7 @@ if [ -f "$CODEBASE_REPORT" ]; then
   add_row "Codebase report" "/specclaw:bf-analyze" "DONE" "generated $(doc_date "$CODEBASE_REPORT")"
 else
   add_row "Codebase report" "/specclaw:bf-analyze" "—" "codebase-report.md not written"
-  set_next "/specclaw:bf-analyze" "no codebase-report.md — every later phase reads it for stack and risk grounding"
+  [ "$EARLY_FOUNDATION_STARTED" -eq 0 ] && set_next "/specclaw:bf-analyze" "no codebase-report.md — every later phase reads it for stack and risk grounding"
 fi
 
 ARCH="$ANALYSIS/architecture.md"
@@ -240,7 +262,7 @@ if [ -f "$ARCH" ]; then
   add_row "Architecture (C4)" "/specclaw:bf-architecture" "DONE" "generated $(doc_date "$ARCH")"
 else
   add_row "Architecture (C4)" "/specclaw:bf-architecture" "—" "architecture.md not written"
-  set_next "/specclaw:bf-architecture" "no architecture.md — /specclaw:bf-blueprint has no legacy view to map the target against"
+  [ "$EARLY_FOUNDATION_STARTED" -eq 0 ] && set_next "/specclaw:bf-architecture" "no architecture.md — /specclaw:bf-blueprint has no legacy view to map the target against"
 fi
 
 # ─── Phase A3 — bf-domain (three documents, one confirmation gate) ────────────
@@ -271,7 +293,7 @@ if [ -z "$DOMAIN_MISSING" ]; then
   esac
 else
   add_row "Domain + module map" "/specclaw:bf-domain" "—" "missing: ${DOMAIN_MISSING% }"
-  set_next "/specclaw:bf-domain" "missing ${DOMAIN_MISSING% } — /specclaw:bf-baseline derives scenarios from domain-model.md's numbered rules and cannot run without it"
+  [ "$EARLY_FOUNDATION_STARTED" -eq 0 ] && set_next "/specclaw:bf-domain" "missing ${DOMAIN_MISSING% } — /specclaw:bf-baseline derives scenarios from domain-model.md's numbered rules and cannot run without it"
 fi
 
 # ─── Phase A4 — bf-clarify ────────────────────────────────────────────────────
@@ -352,7 +374,7 @@ else
   # is: clarify's own collect refuses when none of the analysis documents exist,
   # so recommending it before them would name a command that cannot run.
   if [ -z "$DOMAIN_MISSING" ]; then
-    set_next "/specclaw:bf-clarify" "the analysis documents exist but nothing has been turned into a numbered question set — /specclaw:bf-blueprint and /specclaw:bf-bootstrap both refuse to run without the decisions.md that --resolve writes"
+    [ "$EARLY_FOUNDATION_STARTED" -eq 0 ] && set_next "/specclaw:bf-clarify" "the analysis documents exist but nothing has been turned into a numbered question set — /specclaw:bf-blueprint and /specclaw:bf-bootstrap both refuse to run without the decisions.md that --resolve writes"
   fi
 fi
 
