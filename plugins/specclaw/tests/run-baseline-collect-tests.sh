@@ -1,19 +1,23 @@
 #!/usr/bin/env bash
-# run-baseline-collect-tests.sh — regression suite for `specclaw-bf-baseline
-# collect`'s module-map reciprocity: a `DR-###` rule co-owned by two modules
-# must land in BOTH modules' `rules[]` arrays in the collected JSON, even
-# though the analyst's convention only requires ONE side to write the
-# annotation.
+# run-baseline-collect-tests.sh — regression suite for `specclaw-bf-baseline`'s
+# module-map co-ownership reciprocity, in BOTH places it is computed: `collect`
+# (module_map.modules[].rules, fed to bf-baseline-designer) and `record`'s
+# fallback module derivation (MOD_RULES, used only when a scenario's own
+# `Modules:` field is left blank). A `DR-###` rule co-owned by two modules
+# must land in BOTH modules' rule sets in either path, even though the
+# analyst's convention only requires ONE side to write the annotation.
 #
-# THE REGRESSION: rules[] used to be computed by grepping each MOD-###.md
-# file for its OWN `DR-###` tokens. A co-owned rule annotated on only one
-# module's line (the documented, minimum-required form — see
+# THE REGRESSION: each rule set used to be computed by grepping a module's OWN
+# split-out MOD-###.md text for `DR-###` tokens. A co-owned rule annotated on
+# only one module's line (the documented, minimum-required form — see
 # agents/bf-domain-analyst.md) never appeared in the OTHER module's own file
-# text, so that module's rules[] silently omitted it. Downstream,
-# bf-baseline-designer derives each scenario's `Modules:` tag from this exact
+# text, so that module's rule set silently omitted it. Downstream,
+# bf-baseline-designer derives each scenario's `Modules:` tag from collect's
 # index (agents/bf-baseline-designer.md:19,67), so the missing module never
 # got tagged onto the fixture and `/specclaw:bf-replay --module` could sign
-# that module off clean without ever replaying the rule it implements.
+# that module off clean without ever replaying the rule it implements. The
+# fix is one shared pair of functions (coowned_pairs / apply_coowned_rules)
+# used by both collect and record, so this suite pins both call sites.
 #
 # Needs jq (collect's own output is validated through it here).
 set -uo pipefail
@@ -141,6 +145,52 @@ if [ "$MOD2_DR003_COUNT" = "1" ]; then
 else
   bad "a rule already listed on both sides appears exactly once, not twice" "got ${MOD2_DR003_COUNT} occurrences"
 fi
+
+# ── 4. THE SECOND REGRESSION: record's own fallback derivation ──────────────
+#
+# A scenario that declares no `Modules:` field at all falls back to `record`
+# deriving it from the module map itself (MOD_RULES) — a second, independent
+# implementation of the same per-module grep, and the one this suite's
+# earlier sections do NOT exercise (they only call `collect`). Fixed by the
+# same shared coowned_pairs/apply_coowned_rules pair, so it must show the
+# same reciprocity.
+echo
+echo "-- record's fallback module derivation (no Modules: field declared) --"
+
+R="$WORK/record-fallback"; new_project "$R"
+mkdir -p "$R/.specclaw/baseline/fixtures"
+cat > "$R/.specclaw/analysis/module-map.md" <<'EOF'
+# Module Map
+
+**Status:** CONFIRMED by H, 2026-08-07
+
+### MOD-001 — Foo
+- **Business rules:** DR-001, DR-003 (co-owned with MOD-002: dedup check)
+- **Depends on:** None
+
+### MOD-002 — Bar
+- **Business rules:** DR-005
+- **Depends on:** None
+EOF
+cat > "$R/.specclaw/baseline/scenarios.md" <<'EOF'
+### GM-001 — dedup check, no Modules field declared
+
+- **Seam:** Svc.Do
+- **Seam layer:** service
+- **Business rules pinned:** DR-003
+- **Verifies backlog item:** not yet backlog-linked
+EOF
+cat > "$R/.specclaw/baseline/fixtures/GM-001.json" <<'EOF'
+{"scenario_id":"GM-001","captured_at":"2026-08-07T10:15:00Z","anchor_date":"2026-08-07",
+ "legacy_commit_sha":"abc","runtime_version":"1","normalized_fields":[],
+ "input":{},"output":{"outcome":"OK","error_code":null,"threw":false,"result":{"x":1}}}
+EOF
+bash "$BASELINE_BIN" record "$R/.specclaw" >/dev/null 2>&1
+MOD_IDS="$(jq -rc '.fixtures[0].module_ids' "$R/.specclaw/baseline/manifest.json")"
+assert_contains "$MOD_IDS" "MOD-001" \
+  "the annotating module is still derived (unaffected by the fix)"
+assert_contains "$MOD_IDS" "MOD-002" \
+  "and the named co-owner is now derived too, though the scenario names no Modules: field at all"
 
 echo
 echo "=================================================="

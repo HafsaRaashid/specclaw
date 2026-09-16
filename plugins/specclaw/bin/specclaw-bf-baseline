@@ -291,6 +291,58 @@ read_module_map_status() {
     | sed -E 's/^\*\*Status:\*\* *//' | sed -E 's/[[:space:]]+$//'; } || true
 }
 
+# For every "(co-owned with MOD-###)" annotation across a set of split
+# MOD-###.md files, print "<named-module> <DR-id>" — one line per annotation.
+# Each annotation pairs with the NEAREST DR-### to its LEFT on the same line:
+# "DR-001 and DR-002 (co-owned with MOD-002)" must yield DR-002, the id right
+# next to it, not DR-001 — a single regex spanning both cannot express
+# "nearest", so this walks left from the annotation and stops at the first
+# DR-### it finds.
+#
+# Shared by `collect` and `record`'s fallback module derivation: a rule
+# co-owned by two modules is written on only ONE module's line (the
+# documented, minimum-required form), so the OTHER module's own text never
+# mentions it — a plain per-module grep would silently miss it there. Fixing
+# this once, here, means both callers see the same rule attribution.
+coowned_pairs() { # <MOD-*.md file>...
+  local cf
+  for cf in "$@"; do
+    awk -v src="$(basename "$cf" .md)" '
+      {
+        line = $0
+        while (match(line, /co-owned with MOD-[0-9][0-9][0-9]/)) {
+          st = RSTART; ln = RLENGTH
+          ann = substr(line, st, ln)
+          mod = substr(ann, length(ann) - 6)
+          before = substr(line, 1, st - 1)
+          dr = ""; tmp = before
+          while (match(tmp, /DR-[0-9][0-9][0-9]/)) {
+            dr = substr(tmp, RSTART, RLENGTH)
+            tmp = substr(tmp, RSTART + RLENGTH)
+          }
+          if (dr != "" && mod != src) print mod, dr
+          line = substr(line, st + ln)
+        }
+      }
+    ' "$cf" 2>/dev/null || true
+  done
+}
+
+# Add the DR-### ids another module declared co-owned with <mod_id> to its
+# existing comma-joined rule list, skipping any already present. Reads the
+# pairs coowned_pairs() produced, filtered to this module.
+apply_coowned_rules() { # <mod_id> <existing-csv-rules> <coowned-pairs-file>
+  local mod_id="$1" rules="$2" pairs_file="$3" extra
+  while IFS= read -r extra; do
+    [ -n "$extra" ] || continue
+    case ",${rules}," in
+      *",${extra},"*) ;;
+      *) rules="${rules:+${rules},}${extra}" ;;
+    esac
+  done < <(awk -v m="$mod_id" '$1 == m { print $2 }' "$pairs_file" | awk '!seen[$0]++')
+  printf '%s' "$rules"
+}
+
 # Fingerprint of a scenario's own defining content — used only to detect
 # SUPERSEDED (a re-run of design mode changed what this GM-ID means while a
 # captured fixture from the OLD definition still sits on disk; fixture
@@ -433,52 +485,16 @@ cmd_collect() {
     # signs off against, so deriving the pair from the declaration is what
     # stops a module being signed off without replaying a rule it implements.
     # A one-sided note is no longer a silent single-owner attribution.
-    #
-    # Each annotation pairs with the NEAREST DR-### to its left on the same
-    # line. A single regex spanning both cannot express "nearest": it anchors
-    # on the leftmost DR-### that reaches the annotation, so "DR-001 and
-    # DR-002 (co-owned with MOD-002)" yields DR-001 and, because -o matches do
-    # not overlap, never examines DR-002 at all — the wrong rule propagated
-    # and the right one dropped, from a map that is correct.
     local coown_file="$mworkdir/.coowned"
-    : > "$coown_file"
-    local cf
-    for cf in "${mod_files[@]}"; do
-      awk -v src="$(basename "$cf" .md)" '
-        {
-          line = $0
-          while (match(line, /co-owned with MOD-[0-9][0-9][0-9]/)) {
-            st = RSTART; ln = RLENGTH
-            ann = substr(line, st, ln)
-            mod = substr(ann, length(ann) - 6)
-            before = substr(line, 1, st - 1)
-            dr = ""; tmp = before
-            while (match(tmp, /DR-[0-9][0-9][0-9]/)) {
-              dr = substr(tmp, RSTART, RLENGTH)
-              tmp = substr(tmp, RSTART + RLENGTH)
-            }
-            if (dr != "" && mod != src) print mod, dr
-            line = substr(line, st + ln)
-          }
-        }
-      ' "$cf" >> "$coown_file" 2>/dev/null || true
-    done
+    coowned_pairs "${mod_files[@]}" > "$coown_file"
 
-    local mf mid mname mrules mextra
+    local mf mid mname mrules
     for mf in "${mod_files[@]}"; do
       mid="$(basename "$mf" .md)"
       mname="$(head -1 "$mf" | sed -E 's/^### MOD-[0-9]+[[:space:]]*(—|-)[[:space:]]*//')"
       case "$mname" in WITHDRAWN*) ;; *) known_mods+=("$mid") ;; esac
       mrules="$({ grep -oE 'DR-[0-9]{3}' "$mf" 2>/dev/null | awk '!seen[$0]++' | paste -sd, -; } || true)"
-      # Rules another module declares co-owned with this one, in declaration
-      # order, skipping any this section already lists.
-      while IFS= read -r mextra; do
-        [ -n "$mextra" ] || continue
-        case ",${mrules}," in
-          *",${mextra},"*) ;;
-          *) mrules="${mrules:+${mrules},}${mextra}" ;;
-        esac
-      done < <(awk -v m="$mid" '$1 == m { print $2 }' "$coown_file" | awk '!seen[$0]++')
+      mrules="$(apply_coowned_rules "$mid" "$mrules" "$coown_file")"
       if $mfirst; then mfirst=false; else modules_json="${modules_json},"; fi
       modules_json="${modules_json}
     {\"mod_id\": \"$(json_escape "$mid")\", \"name\": \"$(json_escape "$mname")\", \"rules\": [$(csv_to_json_array "$mrules")]}"
@@ -768,12 +784,20 @@ cmd_record() {
     shopt -s nullglob
     local -a mr_files=("$mrworkdir"/MOD-*.md)
     shopt -u nullglob
+    # Reciprocal, same as collect's module_map.modules[].rules: a rule
+    # co-owned with this module but only written on the OTHER module's line
+    # must still count as this module's too, or a scenario left to this
+    # fallback would derive only the annotating module and never its
+    # declared co-owner.
+    local mr_coown_file="$mrworkdir/.coowned"
+    coowned_pairs "${mr_files[@]}" > "$mr_coown_file"
     local mrf mrid mrtitle mrrules
     for mrf in "${mr_files[@]}"; do
       mrid="$(basename "$mrf" .md)"
       mrtitle="$(head -1 "$mrf" | sed -E 's/^### MOD-[0-9]+[[:space:]]*(—|-)[[:space:]]*//' | tr -d '\r')"
       case "$mrtitle" in WITHDRAWN*) continue ;; esac
       mrrules="$({ grep -oE 'DR-[0-9]{3}' "$mrf" | awk '!seen[$0]++' | paste -sd, -; } || true)"
+      mrrules="$(apply_coowned_rules "$mrid" "$mrrules" "$mr_coown_file")"
       [ -n "$mrrules" ] && MOD_RULES["$mrid"]="$mrrules"
     done
     rm -rf "$mrworkdir"
