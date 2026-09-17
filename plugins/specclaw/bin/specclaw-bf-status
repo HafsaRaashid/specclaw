@@ -173,6 +173,20 @@ NEXT_AFTER=""
 NEXT_ACTION=""
 NEXT_ACTION_AFTER=""
 
+# Count of phases this dashboard SEQUENCES whose own artifact is absent —
+# computed from the rows bash actually emitted, never inferred from NEXT_CMD
+# being empty. Deliberately excludes /specclaw:bf-ui (optional; reports N/A
+# when unstarted) and /specclaw:bf-e2e (declares no `.specclaw/` artifact at
+# all, so its row reads "—" in every repo for ever). Those two are precisely
+# why "no command is recommended" cannot be rendered as "nothing left to do".
+UNRUN_SEQUENCED=0
+mark_unrun_sequenced() { UNRUN_SEQUENCED=$((UNRUN_SEQUENCED + 1)); }
+
+# Set when a rebuild-repo checkout suppressed a Phase A recommendation, so the
+# guidance block can say what IS outstanding instead of falling through to a
+# completion message. See the advisory at the end of Phase A.
+PHASE_A_SUPPRESSED=0
+
 add_row() { # <phase> <command> <state> <detail>
   ROWS="${ROWS}| ${1} | \`${2}\` | ${3} | ${4} |
 "
@@ -254,7 +268,12 @@ if [ -f "$CODEBASE_REPORT" ]; then
   add_row "Codebase report" "/specclaw:bf-analyze" "DONE" "generated $(doc_date "$CODEBASE_REPORT")"
 else
   add_row "Codebase report" "/specclaw:bf-analyze" "—" "codebase-report.md not written"
-  [ "$EARLY_FOUNDATION_STARTED" -eq 0 ] && set_next "/specclaw:bf-analyze" "no codebase-report.md — every later phase reads it for stack and risk grounding"
+  mark_unrun_sequenced
+  if [ "$EARLY_FOUNDATION_STARTED" -eq 0 ]; then
+    set_next "/specclaw:bf-analyze" "no codebase-report.md — every later phase reads it for stack and risk grounding"
+  else
+    PHASE_A_SUPPRESSED=1
+  fi
 fi
 
 ARCH="$ANALYSIS/architecture.md"
@@ -262,7 +281,12 @@ if [ -f "$ARCH" ]; then
   add_row "Architecture (C4)" "/specclaw:bf-architecture" "DONE" "generated $(doc_date "$ARCH")"
 else
   add_row "Architecture (C4)" "/specclaw:bf-architecture" "—" "architecture.md not written"
-  [ "$EARLY_FOUNDATION_STARTED" -eq 0 ] && set_next "/specclaw:bf-architecture" "no architecture.md — /specclaw:bf-blueprint has no legacy view to map the target against"
+  mark_unrun_sequenced
+  if [ "$EARLY_FOUNDATION_STARTED" -eq 0 ]; then
+    set_next "/specclaw:bf-architecture" "no architecture.md — /specclaw:bf-blueprint has no legacy view to map the target against"
+  else
+    PHASE_A_SUPPRESSED=1
+  fi
 fi
 
 # ─── Phase A3 — bf-domain (three documents, one confirmation gate) ────────────
@@ -293,7 +317,12 @@ if [ -z "$DOMAIN_MISSING" ]; then
   esac
 else
   add_row "Domain + module map" "/specclaw:bf-domain" "—" "missing: ${DOMAIN_MISSING% }"
-  [ "$EARLY_FOUNDATION_STARTED" -eq 0 ] && set_next "/specclaw:bf-domain" "missing ${DOMAIN_MISSING% } — /specclaw:bf-baseline derives scenarios from domain-model.md's numbered rules and cannot run without it"
+  mark_unrun_sequenced
+  if [ "$EARLY_FOUNDATION_STARTED" -eq 0 ]; then
+    set_next "/specclaw:bf-domain" "missing ${DOMAIN_MISSING% } — /specclaw:bf-baseline derives scenarios from domain-model.md's numbered rules and cannot run without it"
+  else
+    PHASE_A_SUPPRESSED=1
+  fi
 fi
 
 # ─── Phase A4 — bf-clarify ────────────────────────────────────────────────────
@@ -370,12 +399,30 @@ if [ -f "$CLARIF" ]; then
   fi
 else
   add_row "Clarifications" "/specclaw:bf-clarify" "—" "clarifications.md not written"
+  mark_unrun_sequenced
   # Gated on the domain documents exactly as the baseline recommendation below
   # is: clarify's own collect refuses when none of the analysis documents exist,
   # so recommending it before them would name a command that cannot run.
   if [ -z "$DOMAIN_MISSING" ]; then
-    [ "$EARLY_FOUNDATION_STARTED" -eq 0 ] && set_next "/specclaw:bf-clarify" "the analysis documents exist but nothing has been turned into a numbered question set — /specclaw:bf-blueprint and /specclaw:bf-bootstrap both refuse to run without the decisions.md that --resolve writes"
+    if [ "$EARLY_FOUNDATION_STARTED" -eq 0 ]; then
+      set_next "/specclaw:bf-clarify" "the analysis documents exist but nothing has been turned into a numbered question set — /specclaw:bf-blueprint and /specclaw:bf-bootstrap both refuse to run without the decisions.md that --resolve writes"
+    else
+      PHASE_A_SUPPRESSED=1
+    fi
   fi
+fi
+
+# Phase A's four documents are produced in the LEGACY repo, so a rebuild-repo
+# checkout suppresses their recommendations above. Suppressing them must not
+# leave the guidance block empty, because an empty NEXT_CMD renders as a
+# completion message — "nothing outstanding" — in a repo where those documents
+# are demonstrably absent. The outstanding work is real and it is human work no
+# command HERE can do, which is exactly what the set_next_action channel is
+# for; it names no command to run in this repo, so the suppressed Phase A
+# verbs are not reinstated by the back door. Same copy set the post-Phase-A
+# action below cites.
+if [ "$PHASE_A_SUPPRESSED" -eq 1 ]; then
+  set_next_action "Phase A's analysis documents are absent here. They are produced in the **legacy** repo — not this one — and brought across: run Phase A there, then copy its artifacts into this repo (see \`docs/rebuild-workflow.md\`'s Phase B copy set)"
 fi
 
 # ─── Phase A5 — bf-ui (optional workstream) ───────────────────────────────────
@@ -461,6 +508,7 @@ fi
 
 if [ ! -f "$SEAMS" ] && [ ! -f "$SCENARIOS" ]; then
   add_row "Golden-master baseline" "/specclaw:bf-baseline" "—" "no seams.md or scenarios.md"
+  mark_unrun_sequenced
   if [ -z "$DOMAIN_MISSING" ]; then
     set_next "/specclaw:bf-baseline" "domain-model.md exists but no baseline is designed — without fixtures every backlog item reads NO BASELINE DATA and no rebuild behaviour can be accepted"
   fi
@@ -526,6 +574,7 @@ if [ -f "$BACKLOG" ]; then
   fi
 else
   add_row "Rebuild backlog" "/specclaw:bf-rebuild-plan" "—" "rebuild-backlog.md not written"
+  mark_unrun_sequenced
   if [ -z "$DOMAIN_MISSING" ] && [ -f "$CODEBASE_REPORT" ] && [ -f "$ARCH" ]; then
     set_next "/specclaw:bf-rebuild-plan" "all five analysis documents exist but no backlog has been generated — nothing sequences the migration yet"
   fi
@@ -571,6 +620,7 @@ if [ -f "$TARGET_ARCH" ]; then
   esac
 else
   add_row "Target blueprint" "/specclaw:bf-blueprint" "—" "target-architecture.md not written"
+  mark_unrun_sequenced
   # Gated on blueprint's own three declared inputs, named in its collect
   # refusal: architecture.md, module-map.md and decisions.md. Recommending it
   # without them would name a command whose first step is a hard stop.
@@ -615,6 +665,7 @@ elif [ -f "$BOOT_MANIFEST" ]; then
   add_row "Target foundation" "/specclaw:bf-bootstrap" "DONE" "manifest present (install jq for readiness detail)"
 elif [ -f "$BACKLOG" ]; then
   add_row "Target foundation" "/specclaw:bf-bootstrap" "—" "no bootstrap-manifest.json"
+  mark_unrun_sequenced
   # An ACTION, deliberately not a command, and this is the one place the
   # recommendation refuses to name a bf-* verb.
   #
@@ -728,6 +779,7 @@ if [ "$REPLAY_RUNS" -gt 0 ]; then
   fi
 elif [ -f "$MANIFEST" ] && [ "$FOUNDATION_READY" -eq 1 ]; then
   add_row "Replay acceptance" "/specclaw:bf-replay" "—" "no retained replay run"
+  mark_unrun_sequenced
   # NOT /specclaw:bf-replay, which is what this used to say.
   #
   # Replay compares the REBUILT application against the recorded fixtures. On a
@@ -741,6 +793,7 @@ elif [ -f "$MANIFEST" ] && [ "$FOUNDATION_READY" -eq 1 ]; then
   set_next "/specclaw:propose" "the foundation is ready and fixtures are recorded, but nothing has been built to replay yet — every backlog item is now a vertical slice through an application that already exists" "/specclaw:bf-replay <change>"
 else
   add_row "Replay acceptance" "/specclaw:bf-replay" "—" "no retained replay run"
+  mark_unrun_sequenced
 fi
 
 # ─── Phase B3 — bf-e2e ────────────────────────────────────────────────────────
@@ -781,7 +834,14 @@ render_next() {
     shown=1
   fi
   if [ "$shown" -eq 0 ]; then
-    echo "**Next:** nothing outstanding — every phase this dashboard sequences has run, and no phase that has run is reporting an open item."
+    # Gated on the rows this run actually emitted, not on NEXT_CMD being
+    # empty: "no recommendation" and "nothing left to do" are different facts,
+    # and a rebuild-repo checkout is the case where they come apart.
+    if [ "$UNRUN_SEQUENCED" -eq 0 ]; then
+      echo "**Next:** nothing outstanding — every phase this dashboard sequences has run, and no phase that has run is reporting an open item."
+    else
+      echo "**Next:** no command is recommended here, but ${UNRUN_SEQUENCED} sequenced phase(s) have not run — see the phase table with \`/specclaw:bf-status\`."
+    fi
   fi
   echo
   echo "_Computed from the phase artifacts by \`specclaw-bf-status --next\`. Run \`/specclaw:bf-status\` for the full phase table._"
@@ -832,7 +892,13 @@ else
   # at all, so both can sit at "—" forever while this line claims otherwise.
   # What is true is the narrower statement — every phase this dashboard knows
   # how to sequence has run.
-  echo "No phase command is recommended — every phase this dashboard sequences has already run. What remains is in **Needs attention** above, or is human work no command can do for you — answering questions, capturing fixtures, confirming the module map."
+  # Same gate as render_next: only the row count can tell "finished" apart from
+  # "nothing to recommend HERE".
+  if [ "$UNRUN_SEQUENCED" -eq 0 ]; then
+    echo "No phase command is recommended — every phase this dashboard sequences has already run. What remains is in **Needs attention** above, or is human work no command can do for you — answering questions, capturing fixtures, confirming the module map."
+  else
+    echo "No phase command is recommended here, but ${UNRUN_SEQUENCED} sequenced phase(s) in the table above have not run. What they need is either in **Needs attention** above, or is human work no command in this repo can do for you."
+  fi
 fi
 echo
 echo "---"
