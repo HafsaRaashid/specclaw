@@ -192,6 +192,154 @@ assert_contains "$MOD_IDS" "MOD-001" \
 assert_contains "$MOD_IDS" "MOD-002" \
   "and the named co-owner is now derived too, though the scenario names no Modules: field at all"
 
+# ── 5. A WITHDRAWN module cannot confer co-ownership (B2) ───────────────────
+#
+# Co-ownership is a claim a LIVE module makes. A tombstoned module's
+# "(co-owned with MOD-###)" is a stale claim about a module that no longer
+# exists; honouring it made the named LIVE module accountable for a rule its
+# own section never mentions — and it reached manifest.json's module_ids,
+# which is what /specclaw:bf-replay --module joins on.
+echo
+echo "-- a WITHDRAWN module's stale co-ownership claim is not conferred --"
+
+R="$WORK/withdrawn"; new_project "$R"
+mkdir -p "$R/.specclaw/baseline/fixtures"
+cat > "$R/.specclaw/analysis/module-map.md" <<'EOF'
+# Module Map
+
+**Status:** CONFIRMED by H, 2026-08-07
+
+### MOD-001 — WITHDRAWN — dead module, merged away
+- **Business rules:** DR-900 (co-owned with MOD-002: stale claim)
+- **Depends on:** None
+
+### MOD-002 — Live Module
+- **Business rules:** DR-010 (co-owned with MOD-003: genuine, still live)
+- **Depends on:** None
+
+### MOD-003 — Third
+- **Business rules:** DR-020
+- **Depends on:** None
+EOF
+OUT="$(bash "$BASELINE_BIN" collect "$R/.specclaw" 2>&1)"
+assert_not_contains "$(rules_of "$OUT" "MOD-002")" "DR-900" \
+  "collect: the live module does not inherit a rule claimed by a WITHDRAWN module"
+assert_contains "$(rules_of "$OUT" "MOD-002")" "DR-010" \
+  "collect: and keeps its own rule"
+assert_contains "$(rules_of "$OUT" "MOD-003")" "DR-020" \
+  "collect: a live module's own rule is untouched"
+assert_contains "$(rules_of "$OUT" "MOD-003")" "DR-010" \
+  "collect: co-ownership between two LIVE modules still works (not over-filtered)"
+
+# Same scenario through record's fallback derivation, which is a second,
+# independent computation of the same attribution.
+cat > "$R/.specclaw/baseline/scenarios.md" <<'EOF'
+### GM-001 — pins only the dead module's rule, declares no Modules field
+
+- **Seam:** Svc.A
+- **Seam layer:** service
+- **Business rules pinned:** DR-900
+- **Verifies backlog item:** not yet backlog-linked
+EOF
+cat > "$R/.specclaw/baseline/fixtures/GM-001.json" <<'EOF'
+{"scenario_id":"GM-001","captured_at":"2026-08-07T10:15:00Z","anchor_date":"2026-08-07",
+ "legacy_commit_sha":"abc","runtime_version":"1","normalized_fields":[],
+ "input":{},"output":{"outcome":"OK","error_code":null,"threw":false,"result":{"x":1}}}
+EOF
+bash "$BASELINE_BIN" record "$R/.specclaw" >/dev/null 2>&1
+MIDS="$(jq -rc '.fixtures[0].module_ids' "$R/.specclaw/baseline/manifest.json")"
+assert_not_contains "$MIDS" "MOD-002" \
+  "record: a withdrawn module's claim does not tag the fixture with the live module"
+if [ "$MIDS" = "[]" ]; then
+  ok "record: the fixture carries no module at all, since only a tombstone owned its rule"
+else
+  bad "record: the fixture carries no module at all, since only a tombstone owned its rule" "got ${MIDS}"
+fi
+
+# ── 6. Every co-owner on one line is attributed, exactly once (B3) ──────────
+#
+# The annotation walk used to consume the line as it went, so the text to the
+# LEFT of each match was destroyed and a SECOND annotation on the same line had
+# no DR-### to pair with — it was dropped in silence. Section 2 above pins the
+# other half of this: each annotation still pairs with its own nearest id.
+echo
+echo "-- two co-owners in one annotation group, and no duplicates --"
+
+R="$WORK/multi-coowner"; new_project "$R"
+cat > "$R/.specclaw/analysis/module-map.md" <<'EOF'
+# Module Map
+
+**Status:** CONFIRMED by H, 2026-08-07
+
+### MOD-001 — Owner
+- **Business rules:** DR-020 (co-owned with MOD-002, co-owned with MOD-004)
+- **Depends on:** None
+
+### MOD-002 — Second
+- **Business rules:** DR-010
+- **Depends on:** None
+
+### MOD-004 — Fourth
+- **Business rules:** DR-030
+- **Depends on:** None
+EOF
+OUT="$(bash "$BASELINE_BIN" collect "$R/.specclaw" 2>&1)"
+assert_contains "$(rules_of "$OUT" "MOD-002")" "DR-020" \
+  "the first co-owner on the line is attributed"
+assert_contains "$(rules_of "$OUT" "MOD-004")" "DR-020" \
+  "and so is the second, which used to be dropped in silence"
+for M in MOD-002 MOD-004; do
+  N="$(printf '%s' "$OUT" | jq -r --arg m "$M" '.module_map.modules[] | select(.mod_id == $m) | [.rules[] | select(. == "DR-020")] | length')"
+  if [ "$N" = "1" ]; then
+    ok "${M} carries DR-020 exactly once"
+  else
+    bad "${M} carries DR-020 exactly once" "got ${N} occurrences"
+  fi
+done
+
+# The same module named twice for one rule is one ownership fact, not two.
+R="$WORK/repeated-coowner"; new_project "$R"
+cat > "$R/.specclaw/analysis/module-map.md" <<'EOF'
+# Module Map
+
+**Status:** CONFIRMED by H, 2026-08-07
+
+### MOD-001 — Owner
+- **Business rules:** DR-020 (co-owned with MOD-002, co-owned with MOD-002)
+- **Depends on:** None
+
+### MOD-002 — Second
+- **Business rules:** DR-010
+- **Depends on:** None
+EOF
+OUT="$(bash "$BASELINE_BIN" collect "$R/.specclaw" 2>&1)"
+N="$(printf '%s' "$OUT" | jq -r '.module_map.modules[] | select(.mod_id == "MOD-002") | [.rules[] | select(. == "DR-020")] | length')"
+if [ "$N" = "1" ]; then
+  ok "the same module named twice on one line is attributed once, not twice"
+else
+  bad "the same module named twice on one line is attributed once, not twice" "got ${N}"
+fi
+
+# A co-owned annotation with no DR-### to its left still pairs with nothing —
+# unchanged behaviour, pinned so the scan-offset rewrite cannot alter it.
+R="$WORK/no-dr-left"; new_project "$R"
+cat > "$R/.specclaw/analysis/module-map.md" <<'EOF'
+# Module Map
+
+**Status:** CONFIRMED by H, 2026-08-07
+
+### MOD-001 — Owner
+- **Business rules:** (co-owned with MOD-002) DR-001
+- **Depends on:** None
+
+### MOD-002 — Second
+- **Business rules:** DR-010
+- **Depends on:** None
+EOF
+OUT="$(bash "$BASELINE_BIN" collect "$R/.specclaw" 2>&1)"
+assert_not_contains "$(rules_of "$OUT" "MOD-002")" "DR-001" \
+  "an annotation with no rule id to its left still attributes nothing"
+
 echo
 echo "=================================================="
 echo "Passed: $PASS   Failed: $FAIL"
