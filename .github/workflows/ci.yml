@@ -55,6 +55,8 @@ jobs:
         run: bash plugins/specclaw/tests/run-prototype-status-machine-tests.sh
       - name: Run prototype readiness-scope tests
         run: bash plugins/specclaw/tests/run-prototype-readiness-scope-tests.sh
+      - name: Run prototype brief-contract tests
+        run: bash plugins/specclaw/tests/run-prototype-brief-contract-tests.sh
 
   shellcheck:
     name: ShellCheck bin scripts

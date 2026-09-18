@@ -77,6 +77,9 @@ Usage:
 USAGE
 }
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PLUGIN_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+
 die() { echo "ERROR: $*" >&2; exit 1; }
 warn() { echo "WARN: $*" >&2; }
 
@@ -151,6 +154,18 @@ yaml_val() {
   printf '%s' "$val"
 }
 
+# ─── Template substitution (copied verbatim from specclaw-bf-ui) ─────────────
+
+substitute() {
+  local content="$1" token="$2" value="$3"
+  local out="" rest="$content"
+  while [[ "$rest" == *"$token"* ]]; do
+    out="${out}${rest%%"$token"*}${value}"
+    rest="${rest#*"$token"}"
+  done
+  printf '%s' "${out}${rest}"
+}
+
 # ─── sha256 (portable; copied verbatim from specclaw-bf-ui) ──────────────────
 
 sha256_of() {
@@ -179,11 +194,22 @@ sha256_of_string() {
   printf '%s' "$out"
 }
 
+# The manifest and the map both record which plugin version produced them, so
+# a reader can tell whether a record predates a change in how it is computed.
+# CLAUDE_PLUGIN_ROOT is set when running as an installed plugin; PLUGIN_ROOT is
+# where this script actually lives, which is correct when it is run by path —
+# as every test and every development run does. Falling back to it is what
+# stops a manifest recording "unknown" for a version that is sitting two
+# directories up.
 plugin_version_of_this_run() {
-  local root="${CLAUDE_PLUGIN_ROOT:-}" v=""
-  if [ -n "$root" ] && [ -f "$root/.claude-plugin/plugin.json" ] && command -v jq >/dev/null 2>&1; then
+  local v="" root
+  for root in "${CLAUDE_PLUGIN_ROOT:-}" "$PLUGIN_ROOT"; do
+    [ -n "$root" ] || continue
+    [ -f "$root/.claude-plugin/plugin.json" ] || continue
+    command -v jq >/dev/null 2>&1 || break
     v="$(jqr '.version // ""' "$root/.claude-plugin/plugin.json" 2>/dev/null || true)"
-  fi
+    [ -n "$v" ] && break
+  done
   printf '%s' "${v:-unknown}"
 }
 
@@ -1057,12 +1083,21 @@ language is not the design anybody is approving." >&2
 
   # ── Approvals ───────────────────────────────────────────────────────────
   declare -A AP_VERDICT=() AP_BY=() AP_DATE=() AP_HASH=()
-  local aps averdict aby adate ahash
+  local aps averdict aby adate ahash n_approval_rows=0
   while IFS=$'\t' read -r aps averdict aby adate ahash; do
     [ -n "$aps" ] || continue
     AP_VERDICT["$aps"]="$averdict"; AP_BY["$aps"]="$aby"
     AP_DATE["$aps"]="$adate"; AP_HASH["$aps"]="$ahash"
+    n_approval_rows=$((n_approval_rows + 1))
   done < <(approval_rows "$approvals")
+
+  # A human wrote this file by hand, so a malformed table is the likeliest way
+  # for an approval to go missing — and a missing approval reads as DRAFT, a
+  # perfectly ordinary state that nobody would investigate. Say so loudly
+  # instead: the file existing but yielding no rows is always a mistake.
+  if [ -f "$approvals" ] && [ "$n_approval_rows" -eq 0 ]; then
+    warn "prototype-approvals.md exists but no approval rows could be read from it. Each row must be a Markdown table row of five cells: | PS-### | APPROVED|CHANGES-REQUESTED|REJECTED | <approver name> | <date> | <tree_hash> |. Until a row parses, every screen reads DRAFT or IN-REVIEW as though nobody had reviewed it."
+  fi
 
   # ── Provisional references per PS, and whether each is still unresolved ──
   declare -A PROV_REFS=() PROV_OPEN=()
@@ -1524,28 +1559,41 @@ cmd_map_render() {
 
   local retired_rows; retired_rows="$(jqr '.retired_ps[]? | "| " + .id + " | " + .key + " | RETIRED |"' "$manifest")"
 
+  # Statuses are rendered in client-facing words. The manifest keeps the
+  # machine values; a client reading this document should not have to learn
+  # them, and PD-14 keeps internal vocabulary out of client-visible files.
+  rows="$(printf '%s
+' "$rows"     | sed -e 's/| PROVISIONAL |/| Awaiting a decision |/'           -e 's/| CHANGES-REQUESTED |/| Changes requested |/'           -e 's/| IN-REVIEW |/| In review |/'           -e 's/| APPROVED |/| Approved |/'           -e 's/| REJECTED |/| Not approved |/'           -e 's/| STALE |/| Changed since approval |/'           -e 's/| DRAFT |/| Draft |/')"
+
+  local retired_section=""
+  if [ -n "$retired_rows" ]; then
+    retired_section="## Screens no longer in the redesign
+
+_These keep their identifier permanently, so anything still referring to one fails loudly rather than quietly pointing at a different screen._
+
+| Screen | Originally mapped to | Status |
+|---|---|---|
+${retired_rows}
+
+"
+  fi
+
+  local template_file doc
+  template_file="$PLUGIN_ROOT/templates/prototype-map.md"
+  [ -f "$template_file" ] || die "template not found: $template_file"
+  doc="$(cat "$template_file")"
+  doc="$(substitute "$doc" '{{ready_line}}' "$line")"
+  doc="$(substitute "$doc" '{{stack}}' "${fw} · ${lang}")"
+  doc="$(substitute "$doc" '{{counts}}' "${n_total} total · ${n_appr} approved · ${n_prov} awaiting a decision · ${n_stale} changed since approval")"
+  doc="$(substitute "$doc" '{{narration}}' "$narration")"
+  doc="$(substitute "$doc" '{{rows}}' "$rows")"
+  doc="$(substitute "$doc" '{{retired_section}}' "$retired_section")"
+  doc="$(substitute "$doc" '{{date}}' "$(date +%Y-%m-%d)")"
+  doc="$(substitute "$doc" '{{plugin_version}}' "$(plugin_version_of_this_run)")"
+
   mkdir -p "${specclaw_dir_abs}/prototype"
-  {
-    printf '# Redesigned screens — approval record\n\n'
-    printf '**%s**\n\n' "$line"
-    printf '**Built in:** %s · %s\n\n' "$fw" "$lang"
-    printf '**Screens:** %s total · %s approved · %s awaiting a decision · %s changed since approval\n\n' \
-      "$n_total" "$n_appr" "$n_prov" "$n_stale"
-    if [ -n "$narration" ]; then printf '%s\n\n' "$narration"; fi
-    printf '## Screens\n\n'
-    printf '| Screen | Replaces | Module | Backlog items | Rules shown | Proposed changes | Status | Approved by | Date |\n'
-    printf '|---|---|---|---|---|---|---|---|---|\n'
-    printf '%s\n' "$rows"
-    if [ -n "$retired_rows" ]; then
-      printf '\n## Screens no longer in the redesign\n\n'
-      printf '_These keep their identifier permanently, so anything still referring to one fails loudly rather than pointing at a different screen._\n\n'
-      printf '| Screen | Originally mapped to | Status |\n|---|---|---|\n'
-      printf '%s\n' "$retired_rows"
-    fi
-    printf '\n---\n\n'
-    printf '_Every screen above is approved by a named client stakeholder before build. A screen marked APPROVED was signed off on the date shown, against the exact prototype recorded in this run._\n\n'
-    printf '<!-- Provenance: generated by specclaw-bf-prototype map-render from .specclaw/prototype/prototype-manifest.json. Fully regenerated each run — never hand-edit. Approvals live in prototype-approvals.md and are written only by a human. -->\n'
-  } > "$out"
+  printf '%s
+' "$doc" > "$out"
 
   echo "Wrote ${out#"$project_root"/} (${n_total} screen(s), ${n_appr} approved)." >&2
 }
