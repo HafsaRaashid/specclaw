@@ -174,6 +174,10 @@ echo "== bf-bootstrap's eighth precondition =="
 
 NEW="$WORK/new"
 build_new_repo "$LEGACY" "$NEW"
+# shellcheck disable=SC2069  # deliberate: `2>&1 >/dev/null` in THIS order sends
+# stderr to the original stdout and then discards stdout, which is how these
+# assertions capture a command's stderr alone. The refusal messages under test
+# are written to stderr; the JSON on stdout would drown them.
 boot() { bash "$BOOT_BIN" collect "$NEW/.specclaw" 2>&1 >/dev/null; }
 
 OUT="$(bash "$BOOT_BIN" collect "$NEW/.specclaw" 2>/dev/null)"
@@ -307,6 +311,10 @@ build_legacy "$EMPTY"
 rm -f "$EMPTY"/.specclaw/prototype/app/src/*
 bash "$PROTO_BIN" record "$EMPTY/.specclaw" >/dev/null 2>&1
 assert_eq "2" "$?" "empty prototype.output_dir exits 2, distinct from NOT-READY"
+# shellcheck disable=SC2069  # deliberate: `2>&1 >/dev/null` in THIS order sends
+# stderr to the original stdout and then discards stdout, which is how these
+# assertions capture a command's stderr alone. The refusal messages under test
+# are written to stderr; the JSON on stdout would drown them.
 OUT="$(bash "$PROTO_BIN" record "$EMPTY/.specclaw" 2>&1 >/dev/null)"
 assert_contains "$OUT" "prototype.output_dir is empty" "…naming the directory"
 assert_not_contains "$OUT" "NOT-READY" "…and never calling it a rejected design"
@@ -323,6 +331,10 @@ build_new_repo "$LEGACY" "$F"
 sed -i 's/^- \*\*Decision:\*\* REINTERPRET.*$/- **Decision:** FAITHFUL — reproduce the legacy layout exactly./' "$F/.specclaw/analysis/decisions.md"
 assert_eq "false" "$(bash "$PROTO_BIN" verify "$F/.specclaw" | jq -r '.applicable')" \
   "a FAITHFUL rebuild is not applicable, even with a manifest sitting there"
+# shellcheck disable=SC2069  # deliberate: `2>&1 >/dev/null` in THIS order sends
+# stderr to the original stdout and then discards stdout, which is how these
+# assertions capture a command's stderr alone. The refusal messages under test
+# are written to stderr; the JSON on stdout would drown them.
 OUT="$(bash "$BOOT_BIN" collect "$F/.specclaw" 2>&1 >/dev/null)"
 assert_not_contains "$OUT" "prototype" "…and bootstrap says nothing about a prototype"
 

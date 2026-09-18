@@ -271,6 +271,10 @@ build_repo
 rm -f "$SPEC/prototype/app/src/page.rsx"
 RC="$(record_rc)"
 assert_eq "2" "$RC" "empty prototype.output_dir: exit 2, not 1"
+# shellcheck disable=SC2069  # deliberate: `2>&1 >/dev/null` in THIS order sends
+# stderr to the original stdout and then discards stdout, which is how these
+# assertions capture a command's stderr alone. The refusal messages under test
+# are written to stderr; the JSON on stdout would drown them.
 OUT="$(bash "$PROTO_BIN" record "$SPEC" 2>&1 >/dev/null)"
 assert_contains "$OUT" "prototype.output_dir is empty" "…and says so by name"
 assert_contains "$OUT" "Nothing to record" "…and does not call it a failed approval"
