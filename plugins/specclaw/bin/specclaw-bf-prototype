@@ -1105,7 +1105,7 @@ language is not the design anybody is approving." >&2
   while IFS= read -r pline; do
     [ -n "$pline" ] || continue
     pps="$(dfield "$pline" 1)"; pref="$(dfield "$pline" 2)"
-    [ -n "$pps" ] && [ -n "$pref" ] || continue
+    if [ -z "$pps" ] || [ -z "$pref" ]; then continue; fi
     PROV_REFS["$pps"]="${PROV_REFS[$pps]:-}${PROV_REFS[$pps]:+,}${pref}"
     if provisional_unresolved "$pq_file" "$decisions_file" "$pref"; then
       PROV_OPEN["$pps"]="${PROV_OPEN[$pps]:-}${PROV_OPEN[$pps]:+,}${pref}"
@@ -1118,7 +1118,7 @@ language is not the design anybody is approving." >&2
   while IFS= read -r rline; do
     [ -n "$rline" ] || continue
     rps="$(dfield "$rline" 1)"; rprot="$(dfield "$rline" 2)"; rtext="$(dfield "$rline" 3)"
-    [ -n "$rps" ] && [ -n "$rtext" ] || continue
+    if [ -z "$rps" ] || [ -z "$rtext" ]; then continue; fi
     RP_JSON["$rps"]="${RP_JSON[$rps]:-}${RP_JSON[$rps]:+, }{\"text\": \"$(json_escape "$rtext")\", \"protects\": \"$(json_escape "$rprot")\"}"
   done < "$workdir/rp.txt"
 
@@ -1129,7 +1129,7 @@ language is not the design anybody is approving." >&2
   while IFS= read -r tline; do
     [ -n "$tline" ] || continue
     tscr="$(dfield "$tline" 1)"; tcq="$(dfield "$tline" 2)"
-    [ -n "$tscr" ] && [ -n "$tcq" ] || continue
+    if [ -z "$tscr" ] || [ -z "$tcq" ]; then continue; fi
     if cq_is_decided "$decisions_file" "$tcq"; then
       RETIRED["$tscr"]="$tcq"
       if $rfirst; then rfirst=false; else retired_json="${retired_json}, "; fi
