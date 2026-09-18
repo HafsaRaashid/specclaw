@@ -49,7 +49,20 @@ Skip all of this when the proposal has no bypass section, which is the normal ca
 
 Skip all of this when the proposal has neither section, which is the normal case.
 
-4. Generate three files in `.specclaw/changes/<change>/`:
+4. **Read the change's size first** — `specclaw-validate-change .specclaw <change> status` prints
+   `Size: <spike|bounded|architectural>`. It decides what this step writes:
+
+   | Size | Write | Then |
+   |---|---|---|
+   | **spike** | `findings.md` only, from `$CLAUDE_PLUGIN_ROOT/templates/findings.md` | present it, get an explicit *noted*, and go straight to `/specclaw:archive`. `build`, `verify` and `pr` are refused for a spike — say so rather than attempting them. |
+   | **bounded** | `spec.md` and `tasks.md` | `spec.md` carries an `## Approach` section, **≤ 10 lines**, holding the one design decision and the file map. That map is what `verify` checks scope against, so it is not optional. **Do not write `design.md`.** |
+   | **architectural** | `spec.md`, `design.md`, `tasks.md` | exactly as below. |
+
+   A change with no recorded size is `architectural`. When in doubt, ask rather than assume — an
+   under-sized change loses its design record, and the ratchet only goes the other way.
+
+4a. Generate the files in `.specclaw/changes/<change>/` (the full set shown here is the
+   architectural one; drop `design.md` for bounded, and write only `findings.md` for a spike):
    - `spec.md` — functional requirements, non-functional requirements, acceptance criteria, edge cases.
      - **If `--author-spec` is set:** invoke the `spec-author` subagent via the `Agent` tool with `subagent_type: "spec-author"` to author the spec interactively. After the agent writes the file, **STOP and require explicit user approval** (e.g. "approved", "yes", "go") before proceeding to `design.md` and `tasks.md`. Do not generate the remaining files until the user approves.
      - **Otherwise:** generate `spec.md` directly using `$CLAUDE_PLUGIN_ROOT/templates/spec.md` as a starting template (single-shot, no dialogue).
@@ -59,9 +72,11 @@ Skip all of this when the proposal has neither section, which is the normal case
 5. Record each phase as its file lands — one call per artifact, immediately after writing it:
    ```bash
    specclaw-set-phase .specclaw <change> spec done
-   specclaw-set-phase .specclaw <change> design done
+   specclaw-set-phase .specclaw <change> design done      # architectural only
    specclaw-set-phase .specclaw <change> tasks done
    ```
+   A bounded change skips the `design` call because it has no `design.md`; a spike records none of
+   the three.
    `specclaw-set-phase` is the only writer of phase state — it records `state.json` and upserts the matching row in `status.md`. Never hand-edit those rows. With `--author-spec`, run the `spec` call before pausing for approval, and the other two after.
 6. Present a plan summary to the user (counts of FRs, ACs, tasks, waves).
 7. Update status: `specclaw-update-status .specclaw`.

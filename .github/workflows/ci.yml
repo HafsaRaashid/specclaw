@@ -51,6 +51,8 @@ jobs:
         run: bash plugins/specclaw/tests/run-party-tests.sh
       - name: Run debug-protocol tests
         run: bash plugins/specclaw/tests/run-debug-protocol-tests.sh
+      - name: Run change-size tests
+        run: bash plugins/specclaw/tests/run-change-size-tests.sh
 
   shellcheck:
     name: ShellCheck bin scripts
