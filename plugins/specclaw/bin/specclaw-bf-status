@@ -748,13 +748,39 @@ fi
 
 # ─── Phase B3 — bf-e2e ────────────────────────────────────────────────────────
 #
-# Deliberately reported as untracked rather than omitted. /specclaw:bf-e2e
-# writes page objects and test scripts wherever the target repo's own
-# conventions put them — it declares no .specclaw/ artifact at all — so there is
-# nothing here to read. Guessing from a test directory would invent a signal
-# that command does not emit, and dropping the row would read as "no such
-# phase" to anyone scanning the table for it.
-add_row "E2E coverage" "/specclaw:bf-e2e" "—" "not tracked — writes no \`.specclaw/\` artifact"
+# /specclaw:bf-e2e writes page objects and test scripts wherever the target
+# repo's own conventions put them, but it also persists a summary report at a
+# fixed, predictable path — .specclaw/e2e/e2e-report.md — so this phase reads
+# that artifact the same way every other phase row does. The report's
+# Execution Results section (specclaw-bf-e2e-run) is a one-off recorded run,
+# never a lifecycle verdict, so DONE here means "the report was generated" —
+# same as every other phase row — not "the generated tests are accepted".
+# /specclaw:verify remains the one authoritative pass/fail gate.
+# A single **<Label>:** line's value, verbatim — same doc_date convention
+# (grep | sed, guarded with `|| true` so a missing line under `set -o
+# pipefail` reads as empty rather than aborting the whole dashboard).
+e2e_report_field() {
+  local file="$1" label="$2"
+  { grep -m1 -- "^\\*\\*${label}:\\*\\*" "$file" 2>/dev/null \
+    | sed -E "s/^\\*\\*${label}:\\*\\* *//" | sed -E 's/[[:space:]]+$//'; } || true
+}
+
+E2E_REPORT="$SPECCLAW_DIR/e2e/e2e-report.md"
+if [ -f "$E2E_REPORT" ]; then
+  E2E_DETAIL="generated $(doc_date "$E2E_REPORT")"
+  E2E_PASS="$(e2e_report_field "$E2E_REPORT" "Pass Count")"
+  E2E_FAIL="$(e2e_report_field "$E2E_REPORT" "Fail Count")"
+  if [ -n "$E2E_PASS" ] && [ -n "$E2E_FAIL" ] && [[ "$E2E_PASS" =~ ^[0-9]+$ ]] && [[ "$E2E_FAIL" =~ ^[0-9]+$ ]]; then
+    E2E_DETAIL="${E2E_DETAIL}; last recorded run: ${E2E_PASS} passed, ${E2E_FAIL} failed"
+    if [ "$E2E_FAIL" -gt 0 ]; then
+      add_attention "**The E2E suite's last recorded run had ${E2E_FAIL} failure(s)** (\`.specclaw/e2e/e2e-report.md\`). This was a one-off run for the report, not a lifecycle gate — read the report, fix what's failing, and re-run \`specclaw-bf-e2e-run run .specclaw\` to refresh it." \
+        action "The E2E suite's last recorded run had ${E2E_FAIL} failure(s) — read \`.specclaw/e2e/e2e-report.md\`"
+    fi
+  fi
+  add_row "E2E coverage" "/specclaw:bf-e2e" "DONE" "${E2E_DETAIL} — see \`.specclaw/e2e/e2e-report.md\`"
+else
+  add_row "E2E coverage" "/specclaw:bf-e2e" "—" "not yet run"
+fi
 
 # ─── Render ───────────────────────────────────────────────────────────────────
 
@@ -831,10 +857,10 @@ if [ -n "$NEXT_CMD" ]; then
   fi
 else
   # NOT "no phase is unstarted", which this used to say and which was simply
-  # false: /specclaw:bf-ui is optional and /specclaw:bf-e2e declares no artifact
-  # at all, so both can sit at "—" forever while this line claims otherwise.
-  # What is true is the narrower statement — every phase this dashboard knows
-  # how to sequence has run.
+  # false: /specclaw:bf-ui is optional and /specclaw:bf-e2e is not part of the
+  # sequenced lifecycle ordering (see NEXT_CMD above), so both can sit at "—"
+  # forever while this line claims otherwise. What is true is the narrower
+  # statement — every phase this dashboard knows how to sequence has run.
   echo "No phase command is recommended — every phase this dashboard sequences has already run. What remains is in **Needs attention** above, or is human work no command can do for you — answering questions, capturing fixtures, confirming the module map."
 fi
 echo
