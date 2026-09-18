@@ -545,6 +545,20 @@ ${FILE_LIST_FORMATTED}
 5. Keep changes minimal and focused on THIS task only
 6. Commit with message: "${COMMIT_PREFIX}(${CHANGE_NAME}): ${TASK_ID} — ${TASK_TITLE}"
 
+## Required Report Footer
+Your report MUST end with this block, and it must be the LAST thing in it:
+
+## Verification
+Command: <exactly what you ran — one command>
+Exit: <its exit code>
+Output (tail): <the last 20 lines or fewer>
+
+A task is not marked complete without it. \`specclaw-build check-report\` reads the
+LAST \`## Verification\` section outside any code fence and requires a non-empty
+\`Command:\` and \`Exit: 0\`; anything else marks this task failed with
+\`no-verification-evidence\` and re-dispatches it. A docs-only task is not exempt —
+\`Command: ls docs/thing.md\` with \`Exit: 0\` is a legitimate footer.
+
 ## Definition of Done
 - All listed files created/modified correctly
 - Code compiles/runs without errors

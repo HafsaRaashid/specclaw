@@ -64,6 +64,26 @@ build:
   parallel_tasks: 3               # Max concurrent agent spawns
   timeout_seconds: 300             # Per-task timeout
 
+  # Per-task review gate (opt-in).
+  #
+  #   off   build behaves exactly as before — one review, at verify, over the
+  #         whole diff.
+  #   spec  after each task's commit, a task-scoped code-reviewer reads only
+  #         that task's prepared diff and judges SPEC COMPLIANCE: did this task
+  #         build what it said it would, nothing more, nothing less?
+  #   full  the same, plus the quality dimensions.
+  #
+  # Ships `off` because `full` doubles agent spawns per task and the gate's
+  # value — how many wave-1 defects it catches before waves 2-4 build on them —
+  # has not been measured yet. Same one-release rollout workflow.code_review_block
+  # and party.default took. The reviewer always runs on models.review, never on
+  # the dynamic_agents ladder: reading a diff is not the work the ladder sizes.
+  #
+  # NOTE: the VERIFICATION FOOTER is not configurable and is always enforced. A
+  # task whose report cannot show what it ran, and that the run exited 0, does
+  # not become `complete`. That is not a feature with a trade-off.
+  task_review: off                 # off | spec | full
+
   # Memory-aware parallelism (opt-in). Lowers effective build concurrency
   # when free RAM is tight; absent → parallel_tasks used unchanged.
   memory:

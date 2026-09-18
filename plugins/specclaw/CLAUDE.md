@@ -259,6 +259,7 @@ All executable scripts live in `bin/`. Key ones:
 | `specclaw-validate-change` | Check phase prerequisites |
 | `specclaw-parse-tasks` | Parse `tasks.md` → JSON; **the only task counter** (`--count`) — see below |
 | `specclaw-bootstrap-snapshot` | The live state block the `SessionStart` hook injects: one row per active change and pending proposal, from `state.json` / `tasks.md` / `proposal.md`. Reads only — writes nothing anywhere, spawns no model, exits 0 on every path |
+| `specclaw-build` | Build orchestration: `setup` / `commit` / `finalize` / `worktree-path` / `synth-agent` / `check-report` (**the evidence gate on `done`**) / `review-package` (prepare one task's diff for a task-scoped review; read-only w.r.t. git) |
 | `specclaw-set-size` | The one-way size ratchet (`spike → bounded → architectural`). Refuses downgrades and no-ops **by name**; does not write `state.json` itself — it re-records the current phase through `specclaw-set-phase`, which stays the only writer |
 | `specclaw-party` | Adversarial proposal panel: `panel` (resolve the roster) / `tally` (compute the verdict) / `report` (assemble `party-report.md`) / `get` (**the only reader of the `party:` block**) — see below |
 | `specclaw-bf-status` | Per-**phase** brownfield dashboard to stdout: one row per `bf-*` phase, the open items holding each back, and the next command. `--next` prints the same computation as the compact guidance block every lifecycle `bf-*` skill appends to its own summary — the next human **action**, the next **command**, and a short attention list. **This is the single source of the `bf-*` lifecycle ordering**; no skill may work out its own next phase. Writes nothing in either mode — no file, no cache, no archive entry. jq optional. Complements `specclaw-bf-rebuild-collect module-status`, which is the per-**module** view and *is* a written artifact |
@@ -383,7 +384,52 @@ Suites live in `tests/`, are bash + coreutils only (no jq in the suites themselv
 | `run-description-lint-tests.sh` | **the lint itself**, not a test of it — `LEN` / `TRIGGER` / `NARRATION` over every `skills/*/SKILL.md`, against `description-lint-baseline.txt` |
 | `run-lint-meta-tests.sh` | the lint's rules, pinned against synthetic skills in a temp tree so they do not depend on what the real descriptions say today; plus the trigger fixture's shape and the runner's opt-in and fail-loud behaviour |
 | `run-trigger-tests.sh` | **opt-in, costs API calls** (`SPECCLAW_TRIGGER_EVALS=1`) — does an utterance reach the right verb. Nightly in `trigger-evals.yml`, never on push |
+| `run-task-review-tests.sh` | `check-report`'s three verdicts and the fenced-footer decoy, the last-footer-wins rule, `review-package`'s contents and its git-cleanliness, and the prompt/template/agent wiring |
 `shellcheck-gate.sh` fails CI on any shellcheck finding absent from `shellcheck-baseline.txt` (pairs of `<path> <SCxxxx>`, no line numbers, so unrelated edits do not churn it). Fix a new finding or add a targeted `# shellcheck disable=SCxxxx` with a rationale — never silence one by appending to the baseline. It skips with exit 0 when shellcheck is not installed, so the suite still runs locally.
+
+## Evidence before `done`, and the optional per-task review
+
+Two halves of change 035, priced differently on purpose.
+
+**The verification footer ships on, and is not configurable.** Every coding-agent prompt ends with a
+required block — `Command:`, `Exit:`, `Output (tail):` — and
+`specclaw-build check-report <report>` gates the move to `complete` on it: the footer must exist,
+`Command:` must be non-empty, and `Exit:` must be `0`. Anything else marks the task `failed` with
+`no-verification-evidence` and re-dispatches it through the normal retry path.
+
+This is not a feature with a trade-off. A task that cannot show what it ran, and that the run exited
+0, should not be `done`; agents routinely report *"implemented and tested"* having run nothing, and
+this is the only place a **script** can catch it. There is no docs-only exemption —
+`Command: ls docs/thing.md` · `Exit: 0` is a legitimate footer and costs nothing, and an exemption
+would be a hole shaped exactly like the failure.
+
+**`check-report` is fence-aware, and reads the LAST footer.** A report routinely quotes the footer
+template it was handed, or pastes an earlier attempt, putting a literal `## Verification` / `Exit: 0`
+inside a code block — which a fence-blind check reads as evidence that something ran. Same rule, and
+the same reason, as `specclaw-parse-tasks`. Taking the *last* footer means a retry is judged on the
+retry.
+
+**The per-task review gate ships off** (`build.task_review: off | spec | full`). After a task's
+commit, `specclaw-build review-package` writes `changes/<change>/reviews/<task>.diff` — base and head
+SHAs, the task brief from `tasks.md`, the stat and the diff, capped at 4000 lines **with a visible
+truncation marker**, because a reviewer handed a silently-shortened diff approves the half it was
+shown. It is read-only with respect to git: no checkout, no stash, no add, so it cannot disturb an
+in-flight task in a parallel wave.
+
+The reviewer is the **existing** `code-reviewer` seat with a task-scoped prompt — read the diff file
+once, **do not crawl the repo**, spec compliance first and quality second. Without the read-once rule
+a per-task reviewer re-reads the codebase once per task, and an unaffordable gate is a gate that gets
+switched off. It always runs on `models.review`, never the `dynamic_agents` ladder: the ladder sizes
+implementation difficulty, and reading one task's diff is not that work.
+
+Bash owns the verdict's consequence, as always: `BLOCK` marks the task failed and re-dispatches it,
+`WARN`/`NOTE` are recorded and the task proceeds. **A `BLOCK` shares the task's normal retry budget**
+— two counters would let a task alternate between failing tests and failing review and exhaust
+neither.
+
+It ships `off` because `full` doubles agent spawns per task and the gate's value has not been
+measured; the same one-release rollout `workflow.code_review_block` and `party.default` took. The
+whole-change reviewer at verify is told the per-task findings exist and must not repeat them.
 
 ## Skill descriptions: the lint, and the rule for editing one
 

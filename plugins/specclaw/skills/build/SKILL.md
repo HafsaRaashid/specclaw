@@ -118,8 +118,45 @@ specclaw-bf-rebuild-collect split-update .specclaw IS-### \
 **d.** Wait for all agents in the wave to complete.
 
 **e.** For each succeeded agent:
+   0. **Evidence before done — always, and not configurable.** Write the agent's report to
+      `.specclaw/changes/<change>/reports/<TASK_ID>.md` and check it:
+
+      ```bash
+      specclaw-build check-report .specclaw/changes/<change>/reports/<TASK_ID>.md --task <TASK_ID>
+      ```
+
+      **Exit 1 means the task is `failed`, not `complete`** — reason `no-verification-evidence` — and
+      it goes down path **f** below with the printed line as the failure summary; the retry restates
+      the footer requirement. An agent that reports "implemented and tested" having run nothing is
+      the single most common way a build ends green and broken, and this is the only place a script
+      can catch it. Do not paraphrase the check's verdict, and never mark a task complete on a report
+      it rejected.
    1. Mark complete: `specclaw-update-task-status .specclaw/changes/<change>/tasks.md <TASK_ID> complete`. If the task previously failed, run `specclaw-log-error .specclaw <change> --resolve <TASK_ID>`.
    2. Commit: `specclaw-build commit .specclaw <change> <TASK_ID> "<title>" <files...>`.
+   2b. **Per-task review — only when `build.task_review` is `spec` or `full`** (it ships `off`, in
+      which case skip this entirely and build behaves exactly as it did before):
+
+      ```bash
+      specclaw-build review-package .specclaw <change> <TASK_ID>
+      ```
+
+      Spawn the existing `code-reviewer` agent on `models.review` — **always `models.review`, never
+      the `dynamic_agents` ladder**: the ladder sizes implementation difficulty, and reading one
+      task's diff is not that work. Give it the task-scoped prompt from
+      `$CLAUDE_PLUGIN_ROOT/references/agent-prompts.md`, and tell it the mode (`spec` = compliance
+      only, `full` = compliance then quality).
+
+      Read the verdict token it ends with and act on it mechanically:
+
+      | Verdict | Do |
+      |---|---|
+      | `PASS` / `NOTE` | record it in the Agent Runs `Review` column; continue |
+      | `WARN` | record `WARN(n)`; the findings stay in `reviews/<TASK_ID>.md`; continue |
+      | `BLOCK` | mark the task **failed**, write the findings into `errors.md`, and send it down path **f** |
+
+      **A `BLOCK` retry shares the task's normal retry budget.** It does not get one of its own — a
+      task that fails review and a task that fails its tests are both "this task is not done", and
+      two counters would let a task alternate between them and exhaust neither.
    3. Notify: `✅ Task Complete: <TASK_ID> — <title>`.
 
 **f.** For each failed agent:

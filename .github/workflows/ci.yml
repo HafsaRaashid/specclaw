@@ -60,6 +60,8 @@ jobs:
       # The lint itself. Pure bash, no network, no API key — cheap enough to run
       # on every push, which is the whole reason the expensive routing suite is
       # a separate, nightly workflow.
+      - name: Run task-review gate tests
+        run: bash plugins/specclaw/tests/run-task-review-tests.sh
       - name: Lint skill descriptions (no new offences)
         run: bash plugins/specclaw/tests/run-description-lint-tests.sh
 
