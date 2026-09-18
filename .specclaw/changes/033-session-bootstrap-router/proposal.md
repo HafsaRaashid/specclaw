@@ -29,9 +29,14 @@ contributor guide is blunt about it: *"The bootstrap is what causes skills to au
 right moments. Without it, the skills are dead weight — present on disk but never invoked."*
 specclaw is currently dead weight in exactly that sense.
 
-What we do **not** want from superpowers is its routing doctrine — *"if there is even a 1% chance a
-skill might apply you ABSOLUTELY MUST invoke it"*. That is a persuasion-heavy, non-deterministic rule.
-specclaw's contract is "a model judges; a script decides" — the router must be a table, not a mood.
+superpowers' routing doctrine — *"if there is even a 1% chance a skill might apply you ABSOLUTELY MUST
+invoke it"* — is persuasion-heavy and non-deterministic, and applying it to every verb would make the
+router a mood, not a table. But it exists because the one moment an agent reliably rationalises its way
+past a process is **the moment before it starts writing code for something new**. That is exactly the
+moment specclaw's paper trail is created or lost forever: a change that starts without `propose` never
+gets a change dir, and no later verb can recover it. So the forcing language is worth taking for
+**that one route and no other**: new work in the codebase MUST go through `/specclaw:propose`; every
+other verb is routed by a deterministic table and may be declined.
 
 ## Proposed Solution
 
@@ -53,11 +58,27 @@ specclaw's contract is "a model judges; a script decides" — the router must be
 Content, in this order:
 
 - **What specclaw is, in three lines**, and where the change dirs live.
-- **The routing table** — deterministic, intent → verb:
+- **The hard gate — new work MUST be proposed.** One block, in superpowers' own register, scoped to
+  one route:
+
+  > If the user asks to add, build, create, implement, change, extend, remove or "just quickly" alter
+  > anything in this codebase — a feature, a flag, a file, a config value, a one-line fix — and there is
+  > even a 1% chance it is new work rather than a question, you MUST invoke `/specclaw:propose` before
+  > reading, editing or creating any source file. This is not negotiable. You cannot rationalise your way
+  > out of it. "It's too small", "I'll propose it after", "they seem in a hurry", "I'm just looking
+  > first" — all of these mean STOP and invoke `/specclaw:propose`. The skill sizes the ceremony
+  > (change 036); the gate does not scale.
+
+  The gate is forcing because this is the only route with no recovery path: a change that begins
+  without a proposal has no change dir, and nothing downstream can create one retroactively. It
+  applies to **new work in the codebase only** — questions about the code, debugging an existing
+  change, planning, building, verifying and shipping are routed by the table below and are advisory.
+
+- **The routing table** — deterministic, intent → verb, for everything that is not new work:
 
   | The user… | Route | Never route when… |
   |---|---|---|
-  | wants to add / build / change / implement something | `/specclaw:propose` | it is a question about the code, not a request to change it |
+  | wants to add / build / change / implement something | `/specclaw:propose` — **the hard gate above applies; this row is not optional** | it is a question about the code, not a request to change it |
   | says a proposal is approved / asks for spec, design, tasks | `/specclaw:plan` | no proposal dir exists — propose first |
   | says go / build / implement the tasks | `/specclaw:build` | tasks.md is absent |
   | reports a bug, failing test, unexpected behaviour, broken build | `/specclaw:debug` (see change 034) | — |
@@ -71,9 +92,10 @@ Content, in this order:
   first tool call. This is the one superpowers habit worth keeping verbatim: the operator can veto
   a bad route in one message instead of discovering it three files later.
 - **A short Red-Flags table** (≤ 8 rows) for the rationalisations that skip the lifecycle: "this is
-  too small for a proposal", "I'll just fix it and propose after", "the user seems in a hurry".
-  Recognition tables at decision time are the phrasing superpowers measured to work
-  (`docs/superpowers/specs/2026-06-10-positive-instruction-redesign-design.md`).
+  too small for a proposal", "I'll just fix it and propose after", "the user seems in a hurry",
+  "let me explore the codebase first". Recognition tables at decision time are the phrasing superpowers
+  measured to work (`docs/superpowers/specs/2026-06-10-positive-instruction-redesign-design.md`); they
+  back up the hard gate for propose and are the *only* enforcement for the advisory rows.
 - **Coexistence rule**: if the session also has superpowers, `brainstorming` may run *inside*
   propose's elicitation, but the artifact is `proposal.md`, and `writing-plans` is replaced by
   `/specclaw:plan`. Two frameworks, one paper trail.
@@ -116,7 +138,8 @@ snapshot; corrupted STATUS.md → router still emitted, snapshot omitted, exit 0
   and an eval to prove it helped.
 - A `/specclaw:debug` skill — change **034**. The router table references it; until 034 lands the row
   routes to `/specclaw:loop` when a build is in progress and to plain investigation otherwise.
-- Any `PreToolUse`/`Stop` hooks that *block* actions. This change informs; it does not gate.
+- Any `PreToolUse`/`Stop` hooks that *block* actions. This change gates in prose (propose only); it
+  does not gate in the harness.
 
 ## Impact
 
@@ -132,9 +155,14 @@ snapshot; corrupted STATUS.md → router still emitted, snapshot omitted, exit 0
 
 1. **Should the snapshot fire on `compact` too?** It is cheap and keeps state after compaction, but
    a stale "live" timestamp could mislead. Lean: yes, always regenerate at emit time.
-2. **Strict vs advisory routing.** Should a `bootstrap.mode: strict` exist where the router says "do not
-   edit source without an active change", or is that a future `PreToolUse` gate (explicitly out of
-   scope here)? Lean: advisory only in this change; measure with 037's evals before adding teeth.
+2. **Strict vs advisory routing.** The propose gate is already strict in prose. Should a
+   `bootstrap.mode: strict` add a `PreToolUse` block on `Edit`/`Write` to source files when no change is
+   active (explicitly out of scope here), or is the forcing language enough? Lean: prose only in this
+   change; measure the propose row's hit rate with 037's evals — including its negative rows, since a
+   MUST gate is exactly what over-triggers on read-only questions — before adding teeth.
+2b. **Does the propose gate fire inside an active build?** "Add a retry to T5" mid-build is a scope
+   change to an existing change, not new work. Lean: the snapshot tells the router a build is active,
+   and the gate yields to *"is this part of `<change>`, or new?"* — one question, then route.
 3. **Plugin cache lag.** The installed plugin (`~/.claude/plugins/cache/chan4lk/specclaw/0.4.2`) is
    several versions behind the repo. Hooks only load from the installed plugin — document that the
    hook needs a plugin update, and have `specclaw-check-update` mention it.
