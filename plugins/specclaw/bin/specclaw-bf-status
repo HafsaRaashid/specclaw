@@ -527,6 +527,61 @@ else
   fi
 fi
 
+# ─── Phase A9 — bf-prototype (REINTERPRET only, and then mandatory) ───────────
+#
+# Entirely absent from the dashboard under every other UI fidelity policy. A
+# project that answered FAITHFUL, THEME-ONLY, or nothing at all never sees this
+# row, because for it the stage does not exist.
+#
+# When it DOES apply it is not optional and it is not last-minute: it stands
+# between the legacy analysis and the whole new repo. So a REINTERPRET project
+# with no prototype yet gets this as its next step, ahead of bf-bootstrap —
+# recommending bootstrap there would name a command whose first check is this
+# one.
+
+PROTO_DIR="$SPECCLAW_DIR/prototype"
+PROTO_MANIFEST="$PROTO_DIR/prototype-manifest.json"
+FIDELITY=""
+if [ -f "$DECISIONS" ]; then
+  FIDELITY="$({ awk '/^### SQ-013[[:space:]]/{c=1;next} c&&/^### /{c=0} c' "$DECISIONS" 2>/dev/null \
+    | grep -m1 -- '^- \*\*Decision:\*\*' | sed -E 's/^- \*\*Decision:\*\* *//'; } || true)"
+fi
+case "$FIDELITY" in
+  *REINTERPRET*)
+    if [ -f "$PROTO_MANIFEST" ] && command -v jq >/dev/null 2>&1 && jq -e . "$PROTO_MANIFEST" >/dev/null 2>&1; then
+      PROTO_READY="$(jq -r '.prototype_ready // false' "$PROTO_MANIFEST" 2>/dev/null | tr -d '\r')"
+      PROTO_TOTAL="$(jq -r '[.screens[]?] | length' "$PROTO_MANIFEST" 2>/dev/null | tr -d '\r')"
+      PROTO_APPR="$(jq -r '[.screens[]? | select(.status == "APPROVED")] | length' "$PROTO_MANIFEST" 2>/dev/null | tr -d '\r')"
+      PROTO_WHY="$(jq -r '(.not_ready_reasons // []) | join(", ")' "$PROTO_MANIFEST" 2>/dev/null | tr -d '\r')"
+      if [ "$PROTO_READY" = "true" ]; then
+        add_row "Prototype approval" "/specclaw:bf-prototype" "DONE" "READY — ${PROTO_APPR}/${PROTO_TOTAL} screen(s) approved"
+      else
+        add_row "Prototype approval" "/specclaw:bf-prototype" "ATTN" "NOT-READY — ${PROTO_APPR}/${PROTO_TOTAL} screen(s) approved${PROTO_WHY:+; ${PROTO_WHY}}"
+        add_attention "**The redesign is not approved yet${PROTO_WHY:+ — ${PROTO_WHY}}.** Nothing in the new repo may start until \`/specclaw:bf-prototype --record\` prints \`PROTOTYPE: READY\`: \`/specclaw:bf-bootstrap\` refuses to scaffold and \`/specclaw:propose\` refuses every item. A screen reading STALE needs re-approving against the current prototype; one reading PROVISIONAL is waiting on a question a human has to decide." \
+          action "The redesign is not approved yet${PROTO_WHY:+ — ${PROTO_WHY}}" "/specclaw:bf-prototype --record"
+        set_next "/specclaw:bf-prototype --record" "SQ-013 is REINTERPRET and the prototype is not recorded READY — the whole new repo is gated on it"
+      fi
+    elif [ -f "$PROTO_MANIFEST" ]; then
+      add_row "Prototype approval" "/specclaw:bf-prototype" "ATTN" "\`prototype-manifest.json\` present but unreadable"
+      add_attention "\`.specclaw/prototype/prototype-manifest.json\` could not be parsed. Until it can be, nothing here can say which screens the client approved — and the new repo's gates fail closed on exactly that, so bootstrap and propose will both refuse." \
+        action "\`.specclaw/prototype/prototype-manifest.json\` is unreadable — inspect it, or re-record" "/specclaw:bf-prototype --record"
+    elif [ -d "$PROTO_DIR" ]; then
+      add_row "Prototype approval" "/specclaw:bf-prototype" "ATTN" "briefed; nothing recorded"
+      add_attention "A prototype has been briefed but never recorded. Put it in front of the client, capture one screenshot per \`PS-###\` into \`.specclaw/prototype/screens/\`, and have a named stakeholder write their verdict into \`prototype-approvals.md\` — that file is written by a human and by nobody else. Then run \`--record\`." \
+        action "Prototype briefed but never recorded — capture the screenshots and collect the client's approvals" "/specclaw:bf-prototype --record"
+      set_next "/specclaw:bf-prototype --record" "SQ-013 is REINTERPRET and a prototype has been briefed but never recorded"
+    else
+      add_row "Prototype approval" "/specclaw:bf-prototype" "—" "not started (SQ-013 is REINTERPRET, so this stage is required)"
+      if [ -f "$TARGET_ARCH" ]; then
+        set_next "/specclaw:bf-prototype" "SQ-013 is REINTERPRET, so the redesign has to be approved by a named client stakeholder before any of the new repo is built"
+      fi
+    fi
+    ;;
+  *)
+    : # Not a REINTERPRET project. This stage does not exist for it.
+    ;;
+esac
+
 # ─── Phase B1 — bf-bootstrap (runs in the NEW repo) ───────────────────────────
 
 BOOT_MANIFEST="$BOOTSTRAP/bootstrap-manifest.json"
