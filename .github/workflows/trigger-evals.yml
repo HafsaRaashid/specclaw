@@ -1,0 +1,63 @@
+name: Skill-trigger evals
+
+# Does an utterance actually reach the right specclaw verb?
+#
+# THIS WORKFLOW SPENDS API CALLS, so it is deliberately not on every push:
+# nightly, on PRs that change the routing surface, and on demand. A suite that
+# bills every push is a suite somebody switches off — and a switched-off suite
+# is worse than no suite, because the badge still says it exists.
+#
+# The cheap structural half (tests/run-description-lint-tests.sh) runs in ci.yml
+# on every push instead.
+
+on:
+  schedule:
+    # 03:17 UTC — off the hour, so it does not queue behind everything else.
+    - cron: '17 3 * * *'
+  pull_request:
+    paths:
+      - 'plugins/specclaw/skills/**/SKILL.md'
+      - 'plugins/specclaw/hooks/**'
+      - 'plugins/specclaw/tests/fixtures/triggers.tsv'
+      - 'plugins/specclaw/tests/run-trigger-tests.sh'
+  workflow_dispatch:
+    inputs:
+      reps:
+        description: 'Reps per utterance'
+        required: false
+        default: '5'
+      model:
+        description: 'Model to measure'
+        required: false
+        default: 'sonnet'
+
+jobs:
+  triggers:
+    name: Routing matrix
+    runs-on: ubuntu-latest
+    # Without a key there is nothing to measure. The job is skipped rather than
+    # failed, because a fork PR legitimately has no secret — but the RUNNER
+    # itself fails loudly on a missing CLI, so a configured run can never report
+    # green while measuring nothing.
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the Claude Code CLI
+        run: npm install -g @anthropic-ai/claude-code
+
+      - name: Run the trigger matrix
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          SPECCLAW_TRIGGER_EVALS: '1'
+          SPECCLAW_TRIGGER_REPS: ${{ github.event.inputs.reps || '5' }}
+          SPECCLAW_TRIGGER_MODEL: ${{ github.event.inputs.model || 'sonnet' }}
+        run: bash plugins/specclaw/tests/run-trigger-tests.sh
+
+      - name: Upload the matrix
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: trigger-matrix
+          path: plugins/specclaw/tests/results/triggers-*.md
+          if-no-files-found: warn

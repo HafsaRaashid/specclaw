@@ -55,6 +55,13 @@ jobs:
         run: bash plugins/specclaw/tests/run-change-size-tests.sh
       - name: Run session-bootstrap hook tests
         run: bash plugins/specclaw/tests/run-bootstrap-hook-tests.sh
+      - name: Run description-lint meta tests
+        run: bash plugins/specclaw/tests/run-lint-meta-tests.sh
+      # The lint itself. Pure bash, no network, no API key — cheap enough to run
+      # on every push, which is the whole reason the expensive routing suite is
+      # a separate, nightly workflow.
+      - name: Lint skill descriptions (no new offences)
+        run: bash plugins/specclaw/tests/run-description-lint-tests.sh
 
   shellcheck:
     name: ShellCheck bin scripts

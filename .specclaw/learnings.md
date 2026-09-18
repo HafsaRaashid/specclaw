@@ -170,3 +170,18 @@ specclaw-detect-patterns update_pattern uses BSD-incompatible sed (grouped {s///
 Fix update_pattern's sed portability in its own change, or port it to awk as specclaw-status-row already did for the same class of defect.
 
 ---
+
+## [L12] spec_gap — Proposal 037 step 4 (rewrite ~35 skill descriptions to tr...
+
+**When:** 2026-09-18 19:55 UTC
+**Category:** spec_gap
+**Priority:** high
+**Status:** pending
+
+### Detail
+Proposal 037 step 4 (rewrite ~35 skill descriptions to trigger-first form) was NOT implemented alongside the lint. The proposal itself requires a before/after trigger matrix as the evidence a rewrite helped, and producing one needs API spend that was not authorised in the implementing session. Rewriting blind would have been ~35 unmeasured behaviour changes to the routing surface, under a change whose entire purpose is to stop exactly that.
+
+### Action
+Clear description-lint-baseline.txt entries skill-by-skill, each with a before/after matrix from SPECCLAW_TRIGGER_EVALS=1 run-trigger-tests.sh. The bf-* family is the bulk of the debt and no fixture row covers it — add rows first.
+
+---

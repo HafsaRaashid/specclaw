@@ -380,7 +380,64 @@ Suites live in `tests/`, are bash + coreutils only (no jq in the suites themselv
 | `run-debug-protocol-tests.sh` | the investigation record's grammar and its two refusals, the `architecture-question` halt and its four counting rules, halt-reason slugs, the fix agent's root-cause payload, and cause-based pattern clustering |
 | `run-change-size-tests.sh` | the size field's round-trip and carry-over, the per-size validation matrix (including the no-size row), every ratchet refusal, the status.md row, the re-required `design.md`, and the dashboard glyph |
 | `run-bootstrap-hook-tests.sh` | the session-start hook: both silent paths, JSON validity, the router and state content, the block-scoped `bootstrap.enabled` read against decoy keys, the byte cap, `max_lines`, and the snapshot's no-write guarantee |
+| `run-description-lint-tests.sh` | **the lint itself**, not a test of it — `LEN` / `TRIGGER` / `NARRATION` over every `skills/*/SKILL.md`, against `description-lint-baseline.txt` |
+| `run-lint-meta-tests.sh` | the lint's rules, pinned against synthetic skills in a temp tree so they do not depend on what the real descriptions say today; plus the trigger fixture's shape and the runner's opt-in and fail-loud behaviour |
+| `run-trigger-tests.sh` | **opt-in, costs API calls** (`SPECCLAW_TRIGGER_EVALS=1`) — does an utterance reach the right verb. Nightly in `trigger-evals.yml`, never on push |
 `shellcheck-gate.sh` fails CI on any shellcheck finding absent from `shellcheck-baseline.txt` (pairs of `<path> <SCxxxx>`, no line numbers, so unrelated edits do not churn it). Fix a new finding or add a targeted `# shellcheck disable=SCxxxx` with a rationale — never silence one by appending to the baseline. It skips with exit 0 when shellcheck is not installed, so the suite still runs locally.
+
+## Skill descriptions: the lint, and the rule for editing one
+
+A skill's `description:` is its **only** routing surface, and it is the one part of specclaw that
+nothing else measures. superpowers measured what a long one costs: an agent given a description that
+summarised the workflow *followed the description and skipped the skill body* — one review instead of
+the two the flowchart required. Every extra sentence is a chance for the model to stop reading there.
+
+`tests/run-description-lint-tests.sh` runs on every push and checks three rules:
+
+| Rule | Check |
+|---|---|
+| `LEN` | ≤ 300 characters |
+| `TRIGGER` | contains a clause from the **closed** set: `Use when` · `Use after` · `Use before` · `Run after` · `Run before` · `Invoke when` · `Invoke immediately when` · `Trigger when` · `Called when` · a `when …` condition |
+| `NARRATION` | no `→`, no ` then `, no `Step N`, no `first … then` |
+
+`disable-model-invocation: true` skills are exempt from `TRIGGER` — nothing routes to them by
+description — and still owe `LEN` and `NARRATION`.
+
+**The trigger set is closed on purpose.** Any list broad enough to admit *"Show the project's
+dashboard"* also admits *"Manage …"*, *"Create …"*, *"Produce …"*, *"Synthesize …"* — which is every
+description in this repo, at which point the rule checks nothing. The cost of that decision is a
+large day-one offender list in `tests/description-lint-baseline.txt`; the benefit is that the rule
+means something.
+
+**The baseline is a debt register, not a licence.** Same format and same discipline as
+`shellcheck-baseline.txt`: `<path> <RULE>` pairs, no line numbers, and a fixed offence is reported as
+prunable rather than silently accepted, so the list can only shrink. **A new skill gets no entries**
+and must pass outright from its first commit — `skills/debug` and `skills/using-specclaw` landed
+alongside the lint and are not in it. Never add an entry to silence a description you just wrote.
+
+**Any PR that edits a `SKILL.md` description, or the router in `skills/using-specclaw/`, carries the
+trigger matrix in its body.** Routing is stochastic and invisible; a rewrite that reads better and
+routes worse is indistinguishable from one that helped, unless it was measured.
+
+```
+SPECCLAW_TRIGGER_EVALS=1 bash plugins/specclaw/tests/run-trigger-tests.sh   # before
+# …edit the description…
+SPECCLAW_TRIGGER_EVALS=1 bash plugins/specclaw/tests/run-trigger-tests.sh   # after
+```
+
+`specclaw-pr` attaches the newest `tests/results/triggers-*.md` automatically. The suite costs API
+calls, so it is opt-in behind `SPECCLAW_TRIGGER_EVALS=1` and runs in CI nightly and on PRs touching
+`skills/**/SKILL.md` or `hooks/**` — never on every push. It asserts on the **`Skill` tool
+invocation** in `claude -p --output-format json`, never on prose: a model that says *"I'll use the
+propose skill"* and invokes nothing is the exact failure being measured. And it **fails loudly** when
+no row produces a recognisable tool-use block, because `claude -p` output-format churn would
+otherwise read as a total routing collapse.
+
+`tests/fixtures/triggers.tsv` holds the utterances. **Negative rows (`expect = none`) are not
+optional** — over-triggering is the failure mode a MUST gate produces, and a positive-only suite
+scores 100% on a router that fires for every sentence. Two rows share the utterance *"the tests are
+failing"* and differ only in seeded state; they are the sharpest test of the claim that 033's state
+snapshot makes routing controlled rather than persuasive.
 
 ## Templates
 
