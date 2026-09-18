@@ -10,6 +10,17 @@ Validate that the implementation satisfies the spec.
 
 ## Step 0 — Validate
 
+Open a phase span first, and close it when the report is written — `|| true` on both, so a broken
+stopwatch can never fail a verification:
+
+```bash
+specclaw-timer start .specclaw <change> "verify-$(date -u +%s)" --kind phase --label verify || true
+```
+
+Pass `--change .specclaw:<change>` to every `specclaw-run-long` invocation in Step 2 so the
+test/lint/build minutes — which is where verification's wall-clock actually goes — land in the same
+ledger instead of being read for pass/fail and discarded.
+
 ```bash
 specclaw-validate-change .specclaw <change> verify
 ```

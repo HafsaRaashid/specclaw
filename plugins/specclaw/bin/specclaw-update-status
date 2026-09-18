@@ -236,6 +236,8 @@ for change_name in "${ORDERED_CHANGES[@]+"${ORDERED_CHANGES[@]}"}"; do
   phase=""
   state_branch=""
   state_size=""
+  elapsed=""
+  ledger=""
   if [ -f "$state_file" ]; then
     if [ -r "$state_file" ] && state_parses "$state_file"; then
       phase="$(state_str "$state_file" phase)"
@@ -260,6 +262,21 @@ for change_name in "${ORDERED_CHANGES[@]+"${ORDERED_CHANGES[@]}"}"; do
     bounded)       size_glyph=" ▫" ;;
     architectural) size_glyph=" ▣" ;;
   esac
+
+  # Elapsed, from the change's timing ledger (change 028). A stuck change is
+  # visible at a glance rather than by opening its log.
+  elapsed=""
+  ledger="$change_dir/timeline.jsonl"
+  if [ -f "$ledger" ]; then
+    first_ts="$(sed -n 's/.*"ts":\([0-9][0-9]*\).*/\1/p' "$ledger" 2>/dev/null | head -1)"
+    last_ts="$(sed -n 's/.*"ts":\([0-9][0-9]*\).*/\1/p' "$ledger" 2>/dev/null | tail -1)"
+    if [ -n "$first_ts" ] && [ -n "$last_ts" ] && [ "$last_ts" -gt "$first_ts" ] 2>/dev/null; then
+      secs=$((last_ts - first_ts))
+      if [ "$secs" -ge 3600 ]; then elapsed=" | $((secs / 3600))h$(( (secs % 3600) / 60 ))m"
+      elif [ "$secs" -ge 60 ]; then elapsed=" | $((secs / 60))m"
+      else elapsed=" | ${secs}s"; fi
+    fi
+  fi
 
   pr_state="$(pr_state_for "$change_name" "$state_branch")"
 
@@ -291,12 +308,12 @@ for change_name in "${ORDERED_CHANGES[@]+"${ORDERED_CHANGES[@]}"}"; do
       phase_prefix=""
     fi
 
-    ACTIVE_LINES="${ACTIVE_LINES}\n- $status_emoji **$change_name**$size_glyph — $phase_prefix$t_done/$total tasks ($pct%) ${failed:+| $failed failed}${pr_state:+ | $pr_state}"
+    ACTIVE_LINES="${ACTIVE_LINES}\n- $status_emoji **$change_name**$size_glyph — $phase_prefix$t_done/$total tasks ($pct%) ${failed:+| $failed failed}${pr_state:+ | $pr_state}${elapsed}"
     ACTIVE_COUNT=$((ACTIVE_COUNT + 1))
   elif [ -n "$phase" ]; then
     # Phase recorded before tasks.md exists (mid-plan), or a PR on a change that
     # never had one. AC5: this renders without consulting the network at all.
-    ACTIVE_LINES="${ACTIVE_LINES}\n- $PHASE_EMOJI **$change_name**$size_glyph — $PHASE_TEXT${pr_state:+ | $pr_state}"
+    ACTIVE_LINES="${ACTIVE_LINES}\n- $PHASE_EMOJI **$change_name**$size_glyph — $PHASE_TEXT${pr_state:+ | $pr_state}${elapsed}"
     ACTIVE_COUNT=$((ACTIVE_COUNT + 1))
   elif [ -n "$pr_state" ]; then
     # Unplanned but already in review — in flight, not "awaiting planning" (AC15).

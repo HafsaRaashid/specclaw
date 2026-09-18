@@ -641,15 +641,21 @@ cmd_log_turn() {
   mkdir -p "$change_dir"
 
   # ── Read current state ────────────────────────────────────────────────────────
-  local turn=0 ci_turn=0 sig_hist_raw=""
+  local turn=0 ci_turn=0 sig_hist_raw="" last_turn_ts=0
   if [ -f "$state_file" ]; then
-    local t c
+    local t c lt
     t=$(grep -oE '"turn"[[:space:]]*:[[:space:]]*[0-9]+' "$state_file" 2>/dev/null \
         | head -1 | grep -oE '[0-9]+' || true)
     [ -n "$t" ] && turn="$t"
     c=$(grep -oE '"ci_turn"[[:space:]]*:[[:space:]]*[0-9]+' "$state_file" 2>/dev/null \
         | head -1 | grep -oE '[0-9]+' || true)
     [ -n "$c" ] && ci_turn="$c"
+    # When the previous turn was logged. The loop's own clock: without it a
+    # halted run says how many turns it took and nothing about how long they
+    # were, which is the number an operator deciding whether to wait needs.
+    lt=$(grep -oE '"last_turn_ts"[[:space:]]*:[[:space:]]*[0-9]+' "$state_file" 2>/dev/null \
+        | head -1 | grep -oE '[0-9]+' || true)
+    [ -n "$lt" ] && last_turn_ts="$lt"
     sig_hist_raw=$(grep -oE '"sig_history"[[:space:]]*:[[:space:]]*\[[^]]*\]' "$state_file" 2>/dev/null \
         | head -1 | sed -E 's/.*\[([^]]*)\].*/\1/' || true)
   fi
@@ -693,11 +699,30 @@ cmd_log_turn() {
   now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
   local sig_display="$failure_sig"
   [ -z "$sig_display" ] && sig_display="(none — all gates green)"
+
+  # ── Timing ledger (change 028) ───────────────────────────────────────────────
+  # One `phase` span per turn, measured from when the previous turn was logged.
+  # Entirely non-fatal: a broken stopwatch must never affect the loop's own
+  # decisions, which is why nothing below is read back.
+  local now_ts turn_elapsed=0
+  now_ts=$(date -u +%s 2>/dev/null || echo 0)
+  if [ "$last_turn_ts" -gt 0 ] 2>/dev/null && [ "$now_ts" -gt "$last_turn_ts" ]; then
+    turn_elapsed=$((now_ts - last_turn_ts))
+  fi
+  timer_bin="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/specclaw-timer"
+  if [ -x "$timer_bin" ] && [ "$turn_elapsed" -gt 0 ]; then
+    local turn_status=ok
+    [ -n "$failure_sig" ] && turn_status=retry
+    "$timer_bin" start "$specclaw_dir" "$change_name" "turn-${new_turn}" \
+      --kind phase --label "loop turn ${new_turn}" --duration "$turn_elapsed" \
+      --status "$turn_status" >/dev/null 2>&1 || true
+  fi
   # Note: printf format strings must not begin with a literal '-' (parsed as a
   # flag), so every line's format starts with '%s' carrying the leading text.
   {
     printf '%s%s\n\n' $'\n## Turn ' "$new_turn"
     printf '%s%s\n' '- **Timestamp:** ' "$now"
+    [ "$turn_elapsed" -gt 0 ] && printf '%s%ss\n' '- **Turn duration:** ' "$turn_elapsed"
     printf '%s%s\n' '- **Passing gates:** ' "${passing_count} / 4"
     printf '%s%s%s\n' '- **Failure signature:** `' "$sig_display" '`'
     printf '%s%s\n\n' '- **Decision:** ' "$action"
@@ -706,8 +731,8 @@ cmd_log_turn() {
   } >> "$log_file"
 
   # ── Rewrite loop-state.json (valid flat JSON via printf) ──────────────────────
-  printf '{"turn": %s, "passing_count": %s, "sig_history": [%s], "ci_turn": %s}\n' \
-    "$new_turn" "$passing_count" "$arr_body" "$ci_turn" > "$state_file"
+  printf '{"turn": %s, "passing_count": %s, "sig_history": [%s], "ci_turn": %s, "last_turn_ts": %s}\n' \
+    "$new_turn" "$passing_count" "$arr_body" "$ci_turn" "$now_ts" > "$state_file"
 
   echo "Logged turn ${new_turn} (passing ${passing_count}/4, action ${action})"
 }
@@ -1013,7 +1038,48 @@ cmd_escalate() {
   # Stage all working-tree changes, then commit only if the staged index differs
   # from HEAD. `git diff --cached --quiet` exits 1 when there is something staged.
   local commit_note="" commit_msg="${commit_prefix}(${change_name}): loop escalation — partial work preserved"
-  ( cd "$repo_root" && git add -A ) 2>/dev/null || warn "git add -A failed (continuing)"
+
+  # ── SCOPED ADD, never `git add -A` (change 029) ──────────────────────────────
+  # `git add -A` takes whatever is in the tree. In this repo that has meant
+  # eleven .session-id.rotated-* files, a watchdog-kills.jsonl and an untracked
+  # GOALS.md — none belonging to any change, none gitignored — and one escalation
+  # commit puts all of them in the PR.
+  #
+  # What escalation actually exists to preserve is WORK IN PROGRESS, and that
+  # lives in the change dir and in modifications to already-tracked files. So:
+  # the change dir, the paths tasks.md declares, and `git add -u` for tracked
+  # modifications. Everything else is NAMED in the escalation note and left in
+  # the working tree.
+  #
+  # An unparseable tasks.md does not restore `-A`. Losing an untracked scratch
+  # file is recoverable; a branch somebody merges carrying the filesystem is not.
+  local change_rel="${specclaw_dir}/changes/${change_name}"
+  ( cd "$repo_root" && git add -- "$change_rel" ) 2>/dev/null || true
+  local declared_paths
+  declared_paths="$(awk '
+    /^[[:space:]]*-[[:space:]]*Files:/ {
+      line = $0
+      sub(/^[[:space:]]*-[[:space:]]*Files:[[:space:]]*/, "", line)
+      n = split(line, parts, /,[[:space:]]*/)
+      for (i = 1; i <= n; i++) {
+        gsub(/^[[:space:]]+|[[:space:]]+$/, "", parts[i])
+        gsub(/^`|`$/, "", parts[i])
+        if (parts[i] != "") print parts[i]
+      }
+    }
+  ' "${change_rel}/tasks.md" 2>/dev/null | sort -u || true)"
+  if [ -n "$declared_paths" ]; then
+    while IFS= read -r dp; do
+      [ -n "$dp" ] || continue
+      ( cd "$repo_root" && git add -- "$dp" ) 2>/dev/null || true
+    done <<< "$declared_paths"
+  fi
+  ( cd "$repo_root" && git add -u ) 2>/dev/null || warn "git add -u failed (continuing)"
+
+  # Everything still outside the index — reported, never swept in.
+  local left_behind
+  left_behind="$( ( cd "$repo_root" && git status --porcelain ) 2>/dev/null \
+    | grep -E '^\?\?|^.M|^.D' | sed -E 's/^.{3}//' | head -20 || true)"
   local staged_dirty=0
   ( cd "$repo_root" && git diff --cached --quiet ) || staged_dirty=$?
   if [ "$staged_dirty" -ne 0 ]; then
@@ -1027,6 +1093,13 @@ cmd_escalate() {
     fi
   else
     commit_note="nothing to commit — working tree already clean"
+  fi
+  if [ -n "$left_behind" ]; then
+    commit_note="${commit_note}
+  Left in the working tree, NOT committed (not part of this change):
+$(printf '%s\n' "$left_behind" | sed 's/^/    /')
+  If any of these belong to the change, add them to a task's Files: list. If
+  none do, they belong in .gitignore."
   fi
 
   # ── 2. State preservation per git.strategy ───────────────────────────────────

@@ -115,6 +115,27 @@ specclaw-bf-rebuild-collect split-update .specclaw IS-### \
 
 **Never flip a split's Status yourself.** `READY-TO-RESUME` is computed by bash during `/specclaw:bf-rebuild-plan --refresh` from the blocked-until items' own declared `BUILT:` notes; `COMPLETE` requires a clean `/specclaw:bf-replay --item BL-###` run to cite, and `split-update` refuses `COMPLETE` straight from `ACTIVE`.
 
+**c3. Timing (change 028).** Open a span per wave before dispatching it, and one per task as it is
+dispatched — **every call ends in `|| true`**, because a build that fails because its stopwatch broke
+is strictly worse than the unaccountability this measures:
+
+```bash
+specclaw-timer start .specclaw <change> "W<N>" --kind wave --label "wave <N>" || true
+specclaw-timer start .specclaw <change> "<TASK_ID>" --kind task \
+  --label "<title>" --parent "W<N>" --model "<model>" --attempt "<n>" || true
+```
+
+While the wave runs, print a progress line on the heartbeat interval
+(`timing.heartbeat_seconds`, default 60):
+
+```bash
+specclaw-progress .specclaw <change> --phase build
+```
+
+That line is the whole point: it names the **active step**, its **elapsed time** and the **current
+bottleneck**, so an operator or a watchdog can judge liveness instead of guessing. A pane emitting it
+every 60s is never "no reply for 13 min" — which is the teardown this exists to prevent.
+
 **d.** Wait for all agents in the wave to complete.
 
 **e.** For each succeeded agent:
@@ -157,9 +178,11 @@ specclaw-bf-rebuild-collect split-update .specclaw IS-### \
       **A `BLOCK` retry shares the task's normal retry budget.** It does not get one of its own — a
       task that fails review and a task that fails its tests are both "this task is not done", and
       two counters would let a task alternate between them and exhaust neither.
-   3. Notify: `✅ Task Complete: <TASK_ID> — <title>`.
+   3. Close the span: `specclaw-timer stop .specclaw <change> <TASK_ID> --status ok || true`.
+   4. Notify: `✅ Task Complete: <TASK_ID> — <title>`.
 
 **f.** For each failed agent:
+   0. Close the span: `specclaw-timer stop .specclaw <change> <TASK_ID> --status fail || true`.
    1. Mark failed: `specclaw-update-task-status .specclaw/changes/<change>/tasks.md <TASK_ID> failed`.
    2. Log: `specclaw-log-error .specclaw <change> <TASK_ID> <wave> <agent_label> "<summary>"`.
    3. Update status.md with the failure reason.
@@ -224,6 +247,23 @@ by name anyway.
 
 **e.** If any pattern has recurrence ≥ 3, alert the user.
 
+## Step 5b — Render the timeline
+
+```bash
+specclaw-timer stop   .specclaw <change> "W<N>" --status ok || true
+specclaw-timer report .specclaw <change> --baseline --write || true
+```
+
+`--write` installs `timeline.md` in the change dir, where `specclaw-pr` quotes it into the PR body's
+**Time accounting** section. Fill the `Agent Runs` table from the ledger rather than from memory:
+
+```bash
+specclaw-timer agent-runs .specclaw <change>
+```
+
+That table's `Duration` column has existed since `templates/status.md` was written and no script has
+ever filled it.
+
 ## Step 6 — Update dashboard
 
 ```bash
@@ -239,8 +279,15 @@ Send a final **build summary**:
 **Change:** <change>
 **Status:** <succeeded|partial|failed>
 **Tasks:** <completed>/<total> complete, <failed> failed, <skipped> skipped
-**Branch:** specclaw/<change> → merged
+**Branch:** specclaw/<change> → pushed (not merged)
+**Next:** /specclaw:verify, then /specclaw:pr
 ```
+
+**Build never creates or announces a pull request.** It ends at "branch pushed". Every guarantee in
+`specclaw-pr` — the artifact staging, the hard constraint that the planning trail is committed, the
+staged-files gate — is unreachable when a PR is opened any other way, and a build summary that names
+a PR URL is how a hand-rolled `gh pr create` gets normalised. If a PR is wanted, run
+`/specclaw:verify` and then `/specclaw:pr`.
 
 ## Key Principles
 

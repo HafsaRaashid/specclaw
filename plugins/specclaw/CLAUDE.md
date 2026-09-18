@@ -259,6 +259,9 @@ All executable scripts live in `bin/`. Key ones:
 | `specclaw-validate-change` | Check phase prerequisites |
 | `specclaw-parse-tasks` | Parse `tasks.md` → JSON; **the only task counter** (`--count`) — see below |
 | `specclaw-bootstrap-snapshot` | The live state block the `SessionStart` hook injects: one row per active change and pending proposal, from `state.json` / `tasks.md` / `proposal.md`. Reads only — writes nothing anywhere, spawns no model, exits 0 on every path |
+| `specclaw-timer` | The timing ledger: `start` / `stop` / `report` (`--baseline`, `--write`) / `agent-runs` / `active`. Append-only JSONL, no locking, **exits 0 on every path but a usage error** |
+| `specclaw-progress` | One line naming the active step, its elapsed time and the current bottleneck — what lets an operator or a watchdog judge liveness instead of guessing |
+| `specclaw-check-staged` | The staged-files gate: four buckets, `--json`, `--strict`. Exit 1 on a BLOCK, 2 on a usage error — a caller must be able to tell "this PR is wrong" from "you called me wrong" |
 | `specclaw-build` | Build orchestration: `setup` / `commit` / `finalize` / `worktree-path` / `synth-agent` / `check-report` (**the evidence gate on `done`**) / `review-package` (prepare one task's diff for a task-scoped review; read-only w.r.t. git) |
 | `specclaw-set-size` | The one-way size ratchet (`spike → bounded → architectural`). Refuses downgrades and no-ops **by name**; does not write `state.json` itself — it re-records the current phase through `specclaw-set-phase`, which stays the only writer |
 | `specclaw-party` | Adversarial proposal panel: `panel` (resolve the roster) / `tally` (compute the verdict) / `report` (assemble `party-report.md`) / `get` (**the only reader of the `party:` block**) — see below |
@@ -385,7 +388,100 @@ Suites live in `tests/`, are bash + coreutils only (no jq in the suites themselv
 | `run-lint-meta-tests.sh` | the lint's rules, pinned against synthetic skills in a temp tree so they do not depend on what the real descriptions say today; plus the trigger fixture's shape and the runner's opt-in and fail-loud behaviour |
 | `run-trigger-tests.sh` | **opt-in, costs API calls** (`SPECCLAW_TRIGGER_EVALS=1`) — does an utterance reach the right verb. Nightly in `trigger-evals.yml`, never on push |
 | `run-task-review-tests.sh` | `check-report`'s three verdicts and the fenced-footer decoy, the last-footer-wins rule, `review-package`'s contents and its git-cleanliness, and the prompt/template/agent wiring |
+| `run-timing-tests.sh` | the span round-trip, eight concurrent writers losing nothing, the unclosed span, both report formats, `agent-runs`, enclosing spans not double-counting, the baseline present and absent, the anomaly threshold either side, `enabled: false`, a corrupt ledger line, and `run-long` with and without `--change` |
+| `run-staged-files-tests.sh` | the four buckets against real git repos: the missing artifact, the undeclared ripple under default and `--strict`, the junk sweep, both escape hatches, the size-aware artifact set, exit-code separation, the loop's scoped add against an untracked junk file, and that no PR-creation command lives in build |
 `shellcheck-gate.sh` fails CI on any shellcheck finding absent from `shellcheck-baseline.txt` (pairs of `<path> <SCxxxx>`, no line numbers, so unrelated edits do not churn it). Fix a new finding or add a targeted `# shellcheck disable=SCxxxx` with a rationale — never silence one by appending to the baseline. It skips with exit 0 when shellcheck is not installed, so the suite still runs locally.
+
+## Phase time accounting: the ledger is append-only
+
+Long phases were acceptably slow and **unaccountably** slow. Nothing recorded where the wall-clock
+went, so nobody could tell a legitimate 40-minute build from a stalled one — supervisors killed
+healthy runs, and "the build takes long" was unfalsifiable and therefore never got fixed.
+
+`specclaw-timer start|stop|report|agent-runs|active` writes `changes/<change>/timeline.jsonl`: **two
+events per span, never a rewrite**. Three consequences, all of them the point:
+
+- Build runs up to `parallel_tasks` agents at once. A ledger each of them read, modified and wrote
+  back would lose spans; a single `>>` line does not.
+- A crashed run leaves an **open span**, rendered `⏱ still running`. A ledger that dropped it
+  instead would make a hang indistinguishable from a step that never started — the exact question
+  this exists to answer.
+- Nothing needs locking, so a timer call is one `date` and one `>>`.
+
+**Every path exits 0** except a usage error. A build that failed because its *stopwatch* broke would
+be strictly worse than the unaccountability being fixed, and the call sites are inside the longest
+scripts in the plugin. Every call site ends in `|| true`, and `timing.enabled: false` short-circuits
+before any file is touched.
+
+`phase` and `wave` spans **do not** contribute to the total: they enclose the task and cmd spans
+inside them, and counting both reports a build as longer than it was.
+
+`specclaw-progress` is the deliverable, not the ledger:
+
+```
+⏱ build 18m32s · T5 in flight 6m11s (sonnet-5, attempt 2) · slowest so far: T3 9m04s
+```
+
+A watchdog tore down a healthy run with *"no reply for 13 min"* because it could not tell "thinking
+hard" from "hung". A pane emitting this every `timing.heartbeat_seconds` is never silent that long,
+and it names the **active step** and the **current bottleneck**, so the judgement it enables is
+"this is normal" or "this is not".
+
+**Baselines are project-local, and an absent one says so.** `report --baseline` takes the median for
+the same `kind`+`label` across that project's own archived changes. A table shipped with the plugin
+would be a median of somebody else's hardware, test suite and network — unfalsifiable. A project with
+no history prints the report *and* a line saying there is no baseline, because a silently missing
+column reads as "nothing was anomalous". The `⚠ N.N× median` marker is **descriptive only**: a slow
+run is not a failed one, and a timing feature that can fail a build is one people switch off.
+
+`timeline.md` (the render) is committed and quoted into the PR body's **Time accounting** section;
+`timeline.jsonl` is gitignored by `specclaw-init`.
+
+## The staged-files gate: which files, never what is in them
+
+PRs shipped the wrong file set in **both** directions, silently. Planning artifacts went missing —
+reported three separate times on one change, because `validate-change` checks that artifacts exist
+*on disk* and nothing asked whether they were *committed*. And junk got swept in: `specclaw-loop`'s
+escalation ran `git add -A`, and this repo's own tree has carried `.session-id.rotated-*` files, a
+`watchdog-kills.jsonl` and an untracked `GOALS.md`.
+
+**Layer 1 — `specclaw-check-staged`.** Deterministic, no model, no network. Four buckets:
+
+| Bucket | Rule | Verdict |
+|---|---|---|
+| `required-missing` | a mandatory artifact absent from the branch diff | **BLOCK** |
+| `declared` | declared by a task's `Files:`, or inside the change dir | ok |
+| `undeclared` | changed on the branch, declared by no task | WARN |
+| `suspicious` | matches a junk pattern | **BLOCK** |
+
+The artifact set is **size-aware** (change 036): `design.md` only for architectural, and a spike is
+measured against `findings.md` rather than a verify report.
+
+**`undeclared` never blocks on its own**, and that is a decision about false positives.
+`tasks.md` file lists are a scope *signal*, not a contract — tasks under-declare routinely, and a
+barrel export updated for a new module is a legitimate ripple that will never appear in one. **A gate
+that blocks a correct PR is worse than the silent failure it replaces.** `--strict` exists for a CI
+caller that wants no judgement calls, and it is opt-in.
+
+**Layer 2 — `staged-files-auditor`.** The model seat for the one question a script cannot answer: is
+this undeclared file a ripple or scope creep? Spawned **only when there is something to judge** — a
+non-empty `required-missing`/`suspicious`, or more than `pr.audit_undeclared_threshold` undeclared
+paths. A reviewer convened over a clean file list is a bill with no finding attached. Same report
+shape, verdict vocabulary and config gate as `code-reviewer`: a reviewer for *content* already
+existed; this is the reviewer for *file set*.
+
+**Layer 3 — closing the bypass.** A gate is worthless if `gh pr create` can be hand-rolled.
+`specclaw-build` creates no PR and its summary names none — that is pinned by a test, not just
+documented. And the loop's escalation is now a **scoped add**: the change dir, the paths `tasks.md`
+declares, and `git add -u` for tracked modifications; everything else is **named in the escalation
+note** as left in the working tree. An unparseable `tasks.md` does not restore `-A` — losing an
+untracked scratch file is recoverable, a merged branch carrying the filesystem is not.
+
+**Config** — `workflow.staged_files_audit` (true), `workflow.staged_files_block` (**false**, the
+same one-release rollout `code_review_block` took), `pr.allowed_extra_paths` (wins over every rule,
+including junk), `pr.junk_patterns` (project additions to the shipped defaults), and
+`pr.audit_undeclared_threshold` (3). The report names `.gitignore` as the real fix for a recurring
+junk pattern, because it is.
 
 ## Evidence before `done`, and the optional per-task review
 

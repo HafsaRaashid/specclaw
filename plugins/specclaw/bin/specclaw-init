@@ -51,6 +51,18 @@ _None._
 - **Completed:** 0
 EOF
 
+# Ignore the raw timing ledgers (change 028). timeline.md — the rendered view a
+# reviewer actually reads — IS committed; the per-span JSONL would churn every
+# PR with numbers nobody reads line by line. Idempotent: the block is added once.
+GITIGNORE="$PROJECT_DIR/.gitignore"
+if ! grep -qF 'timeline.jsonl' "$GITIGNORE" 2>/dev/null; then
+  {
+    printf '\n# specclaw: raw timing ledgers. timeline.md (the render) is committed.\n'
+    printf '.specclaw/changes/*/timeline.jsonl\n'
+    printf '.specclaw/changes/archive/*/timeline.jsonl\n'
+  } >> "$GITIGNORE" 2>/dev/null || true
+fi
+
 echo "OK: Initialized SpecClaw in $SPECCLAW_DIR"
 echo "  config: $SPECCLAW_DIR/config.yaml"
 echo "  status: $SPECCLAW_DIR/STATUS.md"

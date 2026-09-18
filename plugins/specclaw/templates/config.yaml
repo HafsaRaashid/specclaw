@@ -143,6 +143,19 @@ workflow:
   code_review: false               # Spawn code-reviewer agent during /specclaw:verify
   code_review_block: false         # Block /specclaw:pr if code review verdict is CHANGES_REQUESTED
 
+  # Staged-files audit — does the branch carry exactly what this change should?
+  # PRs shipped the wrong file set in BOTH directions, silently: planning
+  # artifacts missing, and junk swept in by a `git add -A`. Layer 1
+  # (specclaw-check-staged) is deterministic and free and catches both. This
+  # pair controls Layer 2, the sub-agent that judges whether an UNDECLARED file
+  # is a legitimate ripple or scope creep — the one question a script cannot
+  # answer.
+  staged_files_audit: true         # spawn the auditor when there is something to judge
+  staged_files_block: false        # true = CHANGES_REQUESTED is a hard stop for /specclaw:pr.
+                                   # Ships false: the same one-release rollout
+                                   # code_review_block took. required-missing and
+                                   # suspicious still exit non-zero either way.
+
 # Autonomous build→verify→review loop (loop engineering)
 # When enabled, build/verify/review iterate until all gates are green or a guardrail halts.
 loop:
@@ -189,6 +202,22 @@ automation:
 
 # PR creation settings
 pr:
+  # Paths that are always fine undeclared — a CHANGELOG, a generated lockfile.
+  # This wins over every other rule INCLUDING the junk patterns, so it is the
+  # operator's escape hatch when a default misfires. It is not for silencing a
+  # recurring junk pattern; that belongs in .gitignore.
+  allowed_extra_paths: []
+
+  # Project additions to the suspicious set. specclaw ships defaults for the
+  # classes seen in the wild (.session-id*, *-kills.jsonl, *.log, .env*, *.swp,
+  # .DS_Store, node_modules/). A file matching one of these is a BLOCK.
+  junk_patterns: []
+
+  # How many undeclared paths it takes to convene the auditor. Below this, the
+  # WARN stands on its own — a reviewer spawned over two ripples is a bill with
+  # no finding attached.
+  audit_undeclared_threshold: 3
+
   test_policy: ""   # Set on first `specclaw pr` run. Options: none | unit | e2e | both
                     # none  — no test checks before PR creation
                     # unit  — requires unit test evidence in verify-report + build.test_command set
@@ -329,6 +358,28 @@ quality:
     #   - "bin/**"
     #   - "src/db/Migrations/HandWrittenBackfill.cs"
     include_overrides: []
+
+# Phase time accounting — where the wall-clock actually went.
+#
+# Long phases were acceptably slow and UNACCOUNTABLY slow: nothing recorded
+# where the time went, so nobody could tell a legitimate 40-minute build from a
+# stalled one. Supervisors killed healthy runs, and "the build takes long" was
+# unfalsifiable and therefore never got fixed.
+#
+# Every timer call is non-fatal and the ledger is append-only — a broken
+# stopwatch can never fail a build. `enabled: false` makes every call a no-op.
+#
+# timeline.jsonl (the raw span records) is gitignored; timeline.md (the render)
+# is committed, and is what specclaw-pr quotes into the PR body.
+timing:
+  enabled: true          # false = no ledger, no spans, no progress lines
+  heartbeat_seconds: 60  # how often a long-running phase prints a progress line
+  anomaly_factor: 3      # mark a span at or above N× the median for its
+                         # kind+label in THIS project's archived changes.
+                         # Descriptive only — a slow run is not a failed one,
+                         # and a timing feature that can fail a build is a
+                         # timing feature people switch off.
+  progress: normal       # quiet | normal | verbose
 
 # Session bootstrap — the SessionStart hook that injects the specclaw router
 # and this project's live state at session start / clear / compact.
