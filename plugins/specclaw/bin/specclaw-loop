@@ -434,6 +434,29 @@ ${norm_errors}"
   printf '%s' "$sig"
 }
 
+# arch_question_count <errors.md> <failure_sig>
+#
+# How many investigation records on this signature ruled a cause out and found
+# nothing. A record with no hypotheses does not count (nothing was ruled out);
+# one with any upheld hypothesis does not count (something was learned, and the
+# next turn is a different problem). The scan is over the whole journal, not a
+# window, because a cause that was ruled out stays ruled out.
+arch_question_count() {
+  awk -v sig="$2" '
+    function flush() { if (inv && s == sig && h > 0 && u == 0) c++ }
+    /^## / {
+      flush()
+      inv = ($0 ~ /^## \[.*\] Investigation /) ? 1 : 0
+      s = ""; h = 0; u = 0
+      next
+    }
+    inv && /^\*\*Failure-Sig:\*\*/ { s = $0; sub(/^\*\*Failure-Sig:\*\*[[:space:]]*/, "", s) }
+    inv && /^\*\*Hypothesis [0-9]+ \(upheld\):\*\*/    { h++; u++ }
+    inv && /^\*\*Hypothesis [0-9]+ \(withdrawn\):\*\*/ { h++ }
+    END { flush(); print c + 0 }
+  ' "$1" 2>/dev/null || echo 0
+}
+
 # ─── Subcommand: decide ────────────────────────────────────────────────────────
 #
 # Read loop-state.json + config, apply halt precedence, emit
@@ -477,33 +500,69 @@ cmd_decide() {
   fi
 
   # ── Read config caps (defaults 5 / 2) ────────────────────────────────────────
-  local max_iterations="" no_progress_limit=""
+  local max_iterations="" no_progress_limit="" arch_limit=""
   if [ -f "$config_file" ]; then
     max_iterations=$(yaml_val "$config_file" "loop.max_iterations")
     no_progress_limit=$(yaml_val "$config_file" "loop.no_progress_limit")
+    arch_limit=$(yaml_val "$config_file" "loop.architecture_question_limit")
   fi
   [ -z "$max_iterations" ] && max_iterations=5
   [ -z "$no_progress_limit" ] && no_progress_limit=2
+  [ -z "$arch_limit" ] && arch_limit=2
 
   local next_turn=$((turn + 1))
 
+  # emit_decision <action> <reason> [halt_reason_slug]
+  #
+  # The slug is additive: `action` and `reason` keep their exact previous
+  # meaning and wording, so every existing reader is unaffected. It exists
+  # because prose reasons are not something a caller can branch on, and
+  # `architecture-question` is the first halt that a caller genuinely needs to
+  # handle differently from the rest.
   emit_decision() {
-    printf '{"action": "%s", "reason": "%s"}\n' "$1" "$(json_escape "$2")"
+    if [ -n "${3:-}" ]; then
+      printf '{"action": "%s", "reason": "%s", "halt_reason": "%s"}\n' \
+        "$1" "$(json_escape "$2")" "$3"
+    else
+      printf '{"action": "%s", "reason": "%s"}\n' "$1" "$(json_escape "$2")"
+    fi
   }
 
   # ── 1. CAP ────────────────────────────────────────────────────────────────────
   if [ "$next_turn" -gt "$max_iterations" ]; then
-    emit_decision "halt" "iteration cap ${max_iterations} reached"
+    emit_decision "halt" "iteration cap ${max_iterations} reached" "iteration-cap"
     return 0
   fi
 
   # ── 2. REGRESSION ─────────────────────────────────────────────────────────────
   if [ "$prev_passing" -gt 0 ] && [ "$passing_count" -lt "$prev_passing" ]; then
-    emit_decision "halt" "regression: passing gates dropped ${prev_passing}→${passing_count}"
+    emit_decision "halt" "regression: passing gates dropped ${prev_passing}→${passing_count}" "regression"
     return 0
   fi
 
-  # ── 3. NO-PROGRESS ──────────────────────────────────────────────────────────
+  # ── 3. ARCHITECTURE QUESTION ────────────────────────────────────────────────
+  # Three strikes, applied by a script. Counts investigation records (written by
+  # /specclaw:debug and by the loop's fix agent) that belong to THIS failure
+  # signature and in which every hypothesis was withdrawn — i.e. turns that
+  # ruled a cause out and found nothing.
+  #
+  # It sits ahead of NO-PROGRESS and OSCILLATION on purpose: on the evidence
+  # that trips it those two are also true, and both report a worse reason for
+  # the same facts. "Two hypotheses ruled out, here they are, the design may be
+  # wrong" is an escalation an operator can act on; "no progress in 2 turns"
+  # is not.
+  if [ -n "$failure_sig" ] && [ -f "${change_dir}/errors.md" ]; then
+    local ruled_out
+    ruled_out=$(arch_question_count "${change_dir}/errors.md" "$failure_sig")
+    if [ "$ruled_out" -ge "$arch_limit" ]; then
+      emit_decision "halt" \
+        "architecture question: ${ruled_out} hypotheses ruled out on this failure and none upheld — the design, not the code, may be wrong" \
+        "architecture-question"
+      return 0
+    fi
+  fi
+
+  # ── 4. NO-PROGRESS ──────────────────────────────────────────────────────────
   # The last (no_progress_limit) signatures — this turn's plus the tail of
   # history — all identical and non-empty → no progress.
   if [ -n "$failure_sig" ]; then
@@ -521,13 +580,13 @@ cmd_decide() {
       local all_match=""
       all_match=$(printf '%s\n' "$tail_win" | grep -v -x -F "$failure_sig" || true)
       if [ "$uniq_count" = "1" ] && [ -z "$all_match" ]; then
-        emit_decision "halt" "no progress: identical failure signature ${no_progress_limit} turns"
+        emit_decision "halt" "no progress: identical failure signature ${no_progress_limit} turns" "no-progress"
         return 0
       fi
     fi
   fi
 
-  # ── 4. OSCILLATION ────────────────────────────────────────────────────────────
+  # ── 5. OSCILLATION ────────────────────────────────────────────────────────────
   # A→B→A: this sig equals the second-to-last history entry.
   # OR the same sig has occurred >= no_progress_limit times across history.
   if [ -n "$failure_sig" ]; then
@@ -549,12 +608,12 @@ cmd_decide() {
     local occ_incl=$((occ + 1))
 
     if [ "$second_last" = "$failure_sig" ] || [ "$occ_incl" -ge "$no_progress_limit" ]; then
-      emit_decision "halt" "oscillation detected"
+      emit_decision "halt" "oscillation detected" "oscillation"
       return 0
     fi
   fi
 
-  # ── 5. continue ───────────────────────────────────────────────────────────────
+  # ── 6. continue ───────────────────────────────────────────────────────────────
   emit_decision "continue" "gates red but progress possible (turn ${next_turn}/${max_iterations})"
 }
 

@@ -155,3 +155,18 @@ specclaw-verify-context never forwards e2e evidence to the verify agent: it maps
 Add an {{e2e_output}}/e2e_state slot to specclaw-verify-context and agent-prompts.md — neither file is in this change's file map, so either extend T12 or open a follow-up
 
 ---
+
+## [L11] best_practice — specclaw-detect-patterns update_pattern uses BSD-incompat...
+
+**When:** 2026-09-18 19:30 UTC
+**Category:** best_practice
+**Priority:** medium
+**Status:** pending
+
+### Detail
+specclaw-detect-patterns update_pattern uses BSD-incompatible sed (grouped {s///} and 'a\' with text on the same line), so on macOS the recurrence bump and the occurrence line are silently skipped with sed errors on stderr. get_all_pat_ids was fixed here because clustering could not be verified without it; update_pattern was left alone as out of scope.
+
+### Action
+Fix update_pattern's sed portability in its own change, or port it to awk as specclaw-status-row already did for the same class of defect.
+
+---
