@@ -49,6 +49,12 @@ jobs:
         run: bash plugins/specclaw/tests/run-change-numbering-tests.sh
       - name: Run party-mode tests
         run: bash plugins/specclaw/tests/run-party-tests.sh
+      - name: Run prototype stack-resolver tests
+        run: bash plugins/specclaw/tests/run-prototype-stack-resolver-tests.sh
+      - name: Run prototype status-machine tests
+        run: bash plugins/specclaw/tests/run-prototype-status-machine-tests.sh
+      - name: Run prototype readiness-scope tests
+        run: bash plugins/specclaw/tests/run-prototype-readiness-scope-tests.sh
 
   shellcheck:
     name: ShellCheck bin scripts
