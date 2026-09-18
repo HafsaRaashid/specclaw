@@ -189,6 +189,54 @@ decoy block above `party:` carries every scalar key the script reads. Without th
 regression to `yaml_val` passes by luck — nothing in the fixture would collide — while the shipped
 `config.yaml` silently reads the wrong section. The decoys *are* the test; do not tidy them away.
 
+## Session bootstrap (the `SessionStart` hook)
+
+`hooks/hooks.json` registers `hooks/session-start` on `startup|clear|compact`. It injects
+`skills/using-specclaw/SKILL.md` — the intent router — plus a live state block from
+`specclaw-bootstrap-snapshot`, as `hookSpecificOutput.additionalContext`.
+
+**This is what makes the skills fire.** Without it specclaw is ~30 skill descriptions competing with
+every other installed plugin's, and the model knows nothing about what is already in flight in the
+project.
+
+Four rules the hook obeys, each because of a specific failure:
+
+1. **Inert outside specclaw projects.** No `./.specclaw/config.yaml` → emits nothing, exits 0. The
+   gate is the *config file*, not the `.specclaw/` directory: a stray directory turns up in repos
+   that once had a change dir committed, in vendored copies, and in this plugin's own fixtures.
+2. **Never breaks a session.** Every path exits 0, and there are exactly three outcomes: nothing,
+   router + state, or router alone. The snapshot is captured into a variable *before* anything is
+   printed, because a partial JSON document is worse than no document — the harness rejects it and
+   the session opens on a parse error.
+3. **Block-scoped config reads.** `bootstrap.enabled` is read from the column-0 `bootstrap:` block
+   only. A whole-file `grep enabled:` finds `build.dynamic_agents.enabled`, `loop.enabled`,
+   `party.enabled` or `notifications.enabled` — four keys of that name sit above `bootstrap:` — so
+   it would switch the bootstrap on or off by whichever block came first, silently, while the config
+   plainly said otherwise. Same defect and same fix as `party_val`.
+4. **`printf`, never a heredoc.** superpowers hit a bash 5.3 heredoc hang building exactly this
+   payload (their issue #571).
+
+**The router forces exactly one route.** `/specclaw:propose` for new work in the codebase is a MUST,
+in superpowers' own register, because it is the only route with no recovery path: a change that
+begins without a proposal has no change dir, and nothing downstream can create one retroactively.
+Every other verb is a deterministic table row and **may be declined**. Applying forcing language to
+every verb would make the router a mood rather than a table.
+
+**The state block is the part superpowers does not have, and the part that makes routing
+controlled.** "The tests are failing" routes to `/specclaw:debug` mid-build and to
+`/specclaw:propose` on a clean tree. Without the recorded phase in context the model cannot tell
+those apart. `specclaw-bootstrap-snapshot` reads `state.json`, `tasks.md` (via
+`specclaw-parse-tasks --count`, the only counter) and `proposal.md` — **from disk, never a model
+turn** — and writes nothing at all.
+
+**Config** — the `bootstrap:` block seeded by `specclaw-init`: `enabled` (true), `snapshot` (true),
+`max_lines` (15). The injected payload is capped at 8000 bytes and the cap is asserted in
+`run-bootstrap-hook-tests.sh`; it is paid for on every session start, clear and compact.
+
+**Hooks load from the installed plugin, not from the repo checkout.** A working copy that is ahead of
+the installed version still runs the old hook, and the symptom is silence rather than an error —
+`specclaw-check-update` says so in its upgrade notice.
+
 ## Scripts
 
 All executable scripts live in `bin/`. Key ones:
@@ -210,6 +258,8 @@ All executable scripts live in `bin/`. Key ones:
 | `specclaw-pr` | Create GitHub PR (enforces test policy, triggers context update) |
 | `specclaw-validate-change` | Check phase prerequisites |
 | `specclaw-parse-tasks` | Parse `tasks.md` → JSON; **the only task counter** (`--count`) — see below |
+| `specclaw-bootstrap-snapshot` | The live state block the `SessionStart` hook injects: one row per active change and pending proposal, from `state.json` / `tasks.md` / `proposal.md`. Reads only — writes nothing anywhere, spawns no model, exits 0 on every path |
+| `specclaw-set-size` | The one-way size ratchet (`spike → bounded → architectural`). Refuses downgrades and no-ops **by name**; does not write `state.json` itself — it re-records the current phase through `specclaw-set-phase`, which stays the only writer |
 | `specclaw-party` | Adversarial proposal panel: `panel` (resolve the roster) / `tally` (compute the verdict) / `report` (assemble `party-report.md`) / `get` (**the only reader of the `party:` block**) — see below |
 | `specclaw-bf-status` | Per-**phase** brownfield dashboard to stdout: one row per `bf-*` phase, the open items holding each back, and the next command. `--next` prints the same computation as the compact guidance block every lifecycle `bf-*` skill appends to its own summary — the next human **action**, the next **command**, and a short attention list. **This is the single source of the `bf-*` lifecycle ordering**; no skill may work out its own next phase. Writes nothing in either mode — no file, no cache, no archive entry. jq optional. Complements `specclaw-bf-rebuild-collect module-status`, which is the per-**module** view and *is* a written artifact |
 | `specclaw-bf-bootstrap` | Target-foundation stage: `collect` (validate + resolve the required decisions) / `gate` (foundation-only boundary) / `smoke` / `record` / `foundation-check` (the gate `/specclaw:propose` reads) / `not-applicable` |
@@ -327,6 +377,9 @@ Suites live in `tests/`, are bash + coreutils only (no jq in the suites themselv
 | `run-loop-gate-tests.sh` | `loop gates` report readers — BLOCK counting and verdict extraction |
 | `run-change-numbering-tests.sh` | `next-change-number` derivation, `renumber-changes` plan/refusals/backfill |
 | `run-party-tests.sh` | party seat resolution and clamping, the fail-loud fallback, the panel cache, the verdict tally, the report grammar, and the `party_val` config-collision regression |
+| `run-debug-protocol-tests.sh` | the investigation record's grammar and its two refusals, the `architecture-question` halt and its four counting rules, halt-reason slugs, the fix agent's root-cause payload, and cause-based pattern clustering |
+| `run-change-size-tests.sh` | the size field's round-trip and carry-over, the per-size validation matrix (including the no-size row), every ratchet refusal, the status.md row, the re-required `design.md`, and the dashboard glyph |
+| `run-bootstrap-hook-tests.sh` | the session-start hook: both silent paths, JSON validity, the router and state content, the block-scoped `bootstrap.enabled` read against decoy keys, the byte cap, `max_lines`, and the snapshot's no-write guarantee |
 `shellcheck-gate.sh` fails CI on any shellcheck finding absent from `shellcheck-baseline.txt` (pairs of `<path> <SCxxxx>`, no line numbers, so unrelated edits do not churn it). Fix a new finding or add a targeted `# shellcheck disable=SCxxxx` with a rationale — never silence one by appending to the baseline. It skips with exit 0 when shellcheck is not installed, so the suite still runs locally.
 
 ## Templates

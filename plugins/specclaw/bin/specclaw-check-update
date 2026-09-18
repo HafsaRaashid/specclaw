@@ -119,6 +119,11 @@ done
 
 if [[ "$newer" == true ]]; then
   echo "⬆ specclaw $remote_ver available (installed $LOCAL_VER) — update: /plugin update specclaw"
+  # Hooks are the one part of specclaw that a repo checkout cannot supply.
+  # They load from the INSTALLED plugin only, so a session in a repo that is
+  # ahead of the installed version still runs the OLD session-start hook — and
+  # the symptom is silence, not an error.
+  echo "  (hooks load from the installed plugin — the session-start router stays on $LOCAL_VER until you do)"
 fi
 
 exit 0

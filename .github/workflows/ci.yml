@@ -53,6 +53,8 @@ jobs:
         run: bash plugins/specclaw/tests/run-debug-protocol-tests.sh
       - name: Run change-size tests
         run: bash plugins/specclaw/tests/run-change-size-tests.sh
+      - name: Run session-bootstrap hook tests
+        run: bash plugins/specclaw/tests/run-bootstrap-hook-tests.sh
 
   shellcheck:
     name: ShellCheck bin scripts
@@ -76,6 +78,7 @@ jobs:
         run: |
           python3 -c "import json; json.load(open('.claude-plugin/marketplace.json'))"
           python3 -c "import json; json.load(open('plugins/specclaw/.claude-plugin/plugin.json'))"
+          python3 -c "import json; json.load(open('plugins/specclaw/hooks/hooks.json'))"
           PV=$(python3 -c "import json; print(json.load(open('plugins/specclaw/.claude-plugin/plugin.json'))['version'])")
           MV=$(python3 -c "import json; print(json.load(open('.claude-plugin/marketplace.json'))['plugins'][0]['version'])")
           echo "plugin.json=$PV marketplace.json=$MV"
