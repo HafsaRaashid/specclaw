@@ -160,14 +160,17 @@ fail() {
 count_fields() {
   local file="$1" out
   out=$("$PARSE_TASKS" --count "$file") || out=""
-  echo "${out:-0 0 0}"
+  echo "${out:-0 0 0 0}"
 }
 
-# Fields are "<done> <total> <failed>". Every marker other than `x` is
-# incomplete, so incomplete = total - done.
+# Fields are "<done> <total> <failed> <deferred>" (change 038 added the 4th).
+# A deferred task is correctly blocked on a sibling change, not incomplete
+# through any fault of its own, so it is excluded from the gate: incomplete =
+# total - done - deferred.
 count_total()      { count_fields "$1" | awk '{print $2+0}'; }
 count_complete()   { count_fields "$1" | awk '{print $1+0}'; }
-count_incomplete() { count_fields "$1" | awk '{print ($2+0)-($1+0)}'; }
+count_deferred()   { count_fields "$1" | awk '{print $4+0}'; }
+count_incomplete() { count_fields "$1" | awk '{print ($2+0)-($1+0)-($4+0)}'; }
 
 # --- Status subcommand ---
 if [[ "$PHASE" == "status" ]]; then
@@ -227,7 +230,12 @@ if [[ "$PHASE" == "status" ]]; then
   if [[ -f "$CHANGE_DIR/tasks.md" ]]; then
     total=$(count_total "$CHANGE_DIR/tasks.md")
     complete=$(count_complete "$CHANGE_DIR/tasks.md")
-    echo "  ✅ tasks.md ($complete/$total complete)"
+    deferred=$(count_deferred "$CHANGE_DIR/tasks.md")
+    if [[ "$deferred" -gt 0 ]]; then
+      echo "  ✅ tasks.md ($complete/$total complete, $deferred deferred)"
+    else
+      echo "  ✅ tasks.md ($complete/$total complete)"
+    fi
   else
     echo "  ❌ tasks.md"
   fi
