@@ -58,7 +58,7 @@ Skip all of this when the proposal has neither section, which is the normal case
 
    | Size | Write | Then |
    |---|---|---|
-   | **spike** | `findings.md` only, from `$CLAUDE_PLUGIN_ROOT/templates/findings.md` | present it, get an explicit *noted*, and go straight to `/specclaw:archive`. `build`, `verify` and `pr` are refused for a spike — say so rather than attempting them. |
+   | **spike** | `findings.md` only, from `$CLAUDE_PLUGIN_ROOT/templates/findings.md` | **release the concurrency lock first** (`specclaw-change-lock .specclaw release <change> \|\| true` — `archive/SKILL.md` has no lock handling of its own, so a spike that skips straight there without this step leaves step 1's lock held until it goes stale), then present the findings, get an explicit *noted*, and go straight to `/specclaw:archive`. `build`, `verify` and `pr` are refused for a spike — say so rather than attempting them. |
    | **bounded** | `spec.md` and `tasks.md` | `spec.md` carries an `## Approach` section, **≤ 10 lines**, holding the one design decision and the file map. That map is what `verify` checks scope against, so it is not optional. **Do not write `design.md`.** |
    | **architectural** | `spec.md`, `design.md`, `tasks.md` | exactly as below. |
 

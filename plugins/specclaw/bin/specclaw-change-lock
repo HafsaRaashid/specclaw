@@ -214,13 +214,23 @@ cmd_acquire() {
   return 1
 }
 
+# JSON-escape a string value (backslashes and quotes only — phase/host are
+# internal/system-derived, never attacker input, but escaping is one line and
+# cheaper than an assumption about what `hostname` can ever return).
+json_esc() {
+  local s="$1"
+  s="${s//\\/\\\\}"
+  s="${s//\"/\\\"}"
+  printf '%s' "$s"
+}
+
 write_meta() {
   local meta="$1" phase="$2"
   local started_at host
   started_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   host="$(hostname 2>/dev/null || echo unknown)"
   cat > "$meta" <<EOF
-{"pid":$$,"phase":"$phase","started_at":"$started_at","host":"$host"}
+{"pid":$$,"phase":"$(json_esc "$phase")","started_at":"$started_at","host":"$(json_esc "$host")"}
 EOF
 }
 

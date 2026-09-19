@@ -184,10 +184,14 @@ cmd_setup() {
   local specclaw_dir="$1" change_name="$2"
   local config="$specclaw_dir/config.yaml"
   [[ -f "$config" ]] || die "Config not found: $config"
+  [[ -d "$specclaw_dir/changes/$change_name" ]] || die "Change not found: $specclaw_dir/changes/$change_name"
 
   # Refuse a second dispatch against a change already locked by another live
   # build/verify/pr/plan run (change 038) — before any branch/worktree mutation.
   # The lock script's own stderr already names the held phase/start-time/host.
+  # The existence check above matters here specifically: specclaw-change-lock's
+  # `mkdir -p` would otherwise silently create changes/<change>/.lock/ for a
+  # change name that doesn't exist yet (caught by code-reviewer's change-038 review).
   "$SCRIPT_DIR/specclaw-change-lock" "$specclaw_dir" acquire "$change_name" --phase build \
     || die "cannot start build — see the change-lock error above"
 
