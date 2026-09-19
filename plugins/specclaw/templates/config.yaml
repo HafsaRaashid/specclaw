@@ -28,6 +28,9 @@ git:
   commit_prefix: "specclaw"       # Prefix for auto-commits
   branch_prefix: "specclaw/"      # Prefix for feature branches
   worktree_dir: ".specclaw/worktrees"  # Base directory for worktrees (worktree-per-change only)
+  lock_stale_minutes: 120         # A per-change dispatch lock (changes/<change>/.lock) older than
+                                  # this is reported stale and may be cleared with --force. Judged
+                                  # by wall-clock age only, never process liveness.
 
 # Grounded context discovery — auto-discover project docs (README, CLAUDE.md,
 # docs/, llms.txt, ...) and inject them into plan/build/verify payloads.
@@ -183,6 +186,10 @@ party:
   always: []               # seats forced onto every panel whatever the tier, e.g. [party-security]
   min_seats: 2             # floor — a short panel is grown along the tier order
   max_seats: 6             # ceiling — surplus seats drop from the tail (Visionary/Security before Architect/PO)
+  session_spawn_cap:       # unset = no cap (default). Set an integer (e.g. 20) to force
+                            # the "confirm before spending" ask once today's cumulative
+                            # panel spawns (.specclaw/party/session-spawns.jsonl) plus this
+                            # panel's bill would exceed it — even under `default: true`.
   models:                  # per-seat model; a seat left out falls through to its agent charter's own `model:`
     party-classifier: haiku
     party-visionary: fable
