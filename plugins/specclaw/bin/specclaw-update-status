@@ -235,10 +235,12 @@ for change_name in "${ORDERED_CHANGES[@]+"${ORDERED_CHANGES[@]}"}"; do
   state_file="$change_dir/state.json"
   phase=""
   state_branch=""
+  state_size=""
   if [ -f "$state_file" ]; then
     if [ -r "$state_file" ] && state_parses "$state_file"; then
       phase="$(state_str "$state_file" phase)"
       state_branch="$(state_str "$state_file" branch)"
+      state_size="$(state_str "$state_file" size)"
     else
       echo "specclaw-update-status: WARN: unreadable state.json for ${change_name}; falling back to task inference" >&2
     fi
@@ -247,6 +249,17 @@ for change_name in "${ORDERED_CHANGES[@]+"${ORDERED_CHANGES[@]}"}"; do
   # placement below rather than being promoted into Active by its own state file.
   [ "$phase" = "proposal" ] && phase=""
   [ -n "$phase" ] && phase_render "$state_file" "$phase"
+
+  # The size glyph (change 036) renders only when a size is actually RECORDED.
+  # `architectural` is also what an absent size reads as everywhere else, so
+  # glyphing the default would stamp a declared-looking ▣ on every change that
+  # predates sizes — a claim nobody made.
+  size_glyph=""
+  case "$state_size" in
+    spike)         size_glyph=" ⚡" ;;
+    bounded)       size_glyph=" ▫" ;;
+    architectural) size_glyph=" ▣" ;;
+  esac
 
   pr_state="$(pr_state_for "$change_name" "$state_branch")"
 
@@ -278,19 +291,19 @@ for change_name in "${ORDERED_CHANGES[@]+"${ORDERED_CHANGES[@]}"}"; do
       phase_prefix=""
     fi
 
-    ACTIVE_LINES="${ACTIVE_LINES}\n- $status_emoji **$change_name** — $phase_prefix$t_done/$total tasks ($pct%) ${failed:+| $failed failed}${pr_state:+ | $pr_state}"
+    ACTIVE_LINES="${ACTIVE_LINES}\n- $status_emoji **$change_name**$size_glyph — $phase_prefix$t_done/$total tasks ($pct%) ${failed:+| $failed failed}${pr_state:+ | $pr_state}"
     ACTIVE_COUNT=$((ACTIVE_COUNT + 1))
   elif [ -n "$phase" ]; then
     # Phase recorded before tasks.md exists (mid-plan), or a PR on a change that
     # never had one. AC5: this renders without consulting the network at all.
-    ACTIVE_LINES="${ACTIVE_LINES}\n- $PHASE_EMOJI **$change_name** — $PHASE_TEXT${pr_state:+ | $pr_state}"
+    ACTIVE_LINES="${ACTIVE_LINES}\n- $PHASE_EMOJI **$change_name**$size_glyph — $PHASE_TEXT${pr_state:+ | $pr_state}"
     ACTIVE_COUNT=$((ACTIVE_COUNT + 1))
   elif [ -n "$pr_state" ]; then
     # Unplanned but already in review — in flight, not "awaiting planning" (AC15).
-    ACTIVE_LINES="${ACTIVE_LINES}\n- 🔀 **$change_name** — $pr_state"
+    ACTIVE_LINES="${ACTIVE_LINES}\n- 🔀 **$change_name**$size_glyph — $pr_state"
     ACTIVE_COUNT=$((ACTIVE_COUNT + 1))
   elif [ -f "$change_dir/proposal.md" ]; then
-    PENDING_LINES="${PENDING_LINES}\n- 📋 **$change_name** — proposal ready, awaiting planning"
+    PENDING_LINES="${PENDING_LINES}\n- 📋 **$change_name**$size_glyph — proposal ready, awaiting planning"
   fi
 done
 

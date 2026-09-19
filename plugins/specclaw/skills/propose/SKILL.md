@@ -199,11 +199,32 @@ It prints the new `IS-###`. `Evidence` and `Replay evidence` stay `not yet merge
    **Exit 2 from `tally` prints no token and means round 2 did not run** — `findings-r2/` is missing or empty while `findings-r1/` holds findings. Do not treat that as approval and do not invent a verdict: an empty round 2 would otherwise tally as `APPROVED` over live objections on disk. Re-run step **d** for the seats that produced no round-2 file, then re-run `tally`. `report` still writes in this state, with a warning, so the round-1 findings are never lost.
 
    **f. Present and append.** Show `party-report.md` alongside the proposal in step 5, verdict first. Then make **one** edit to `proposal.md`: append the upheld findings under its existing `## Open Questions` heading, one line each, naming the seat — e.g. `- (party-security) Does a failed parse of the classifier answer fail open? — see party-report.md`. **Edit no other section.** The panel argues; it does not author: do not rewrite Problem, Proposed Solution, Scope or Impact in response to a finding. Approval stays the operator's — `CHANGES_REQUESTED` blocks nothing here. `party.block: true` makes it a hard stop for `/specclaw:plan`; it ships `false`.
+4b. **Size the change** (spike / bounded / architectural) and write it into the proposal's
+   `**Size:**` line under Impact.
+
+   | Size | It is this when… | Artifacts `plan` writes |
+   |---|---|---|
+   | **spike** | the output is an *answer*, and anything built is throwaway | `findings.md` only — `build`, `verify` and `pr` are refused |
+   | **bounded** | an existing flow in this repo is being altered — a flag, an endpoint, a one-file fix | `spec.md` (with an `## Approach` section carrying the file map) + `tasks.md`, **no `design.md`** |
+   | **architectural** | a new subsystem, or an interface others will depend on | `spec.md` + `design.md` + `tasks.md` |
+
+   **Announce the classification with its one-sentence reason** before presenting the proposal —
+   *"this alters `specclaw-verify collect`, which already exists → bounded"* — so the operator can
+   override it in the approval reply in one message rather than discovering the ceremony later.
+
+   **When party mode ran, offer its tier as the default**: `thin → bounded`,
+   `standard`/`deep` → `architectural`. The classifier has already judged depth; do not judge it
+   twice. The mapping is a *default*, not a binding — two independent judgements, one seeding the
+   other.
+
+   **The approval gate does not scale with the size.** A five-line proposal for a bounded change
+   still needs approval before `plan`. Ceremony scales; the gate never does.
+
 5. Present the proposal to the user for review.
 6. Update `.specclaw/STATUS.md` via `specclaw-update-status .specclaw`.
 7. **GitHub sync** (if `github.sync: true` in `config.yaml`): run `specclaw-gh-sync create .specclaw <change-name>` to create a GitHub Issue for the proposal. Validation (proposal.md must exist) is enforced by `specclaw-validate-change`.
 8. **Azure Boards sync** (if `azdo.boards.sync: true` in `config.yaml`): run `specclaw-azdo-issue create .specclaw <change-name>` to create a Work Item. Idempotent — safe to re-run.
-9. **Once the user approves the proposal**, record the phase: `specclaw-set-phase .specclaw <change-name> proposal approved`. `specclaw-set-phase` is the only writer of phase state — it records `state.json` and upserts the Proposal row in `status.md`. Never hand-edit those rows. Until approval the template's `🟡 Draft` row stands.
+9. **Once the user approves the proposal**, record the phase *and the size*: `specclaw-set-phase .specclaw <change-name> proposal approved --size <spike|bounded|architectural>`. If the operator overrode the classification in their approval reply, that is the size that gets recorded. A change recorded with no size reads as `architectural` everywhere — today's behaviour — so omitting the flag costs ceremony, never correctness. `specclaw-set-phase` is the only writer of phase state — it records `state.json` and upserts the Proposal row in `status.md`. Never hand-edit those rows. Until approval the template's `🟡 Draft` row stands.
 
 Do not proceed to `/specclaw:plan` until the user has approved the proposal.
 

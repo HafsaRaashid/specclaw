@@ -185,6 +185,46 @@ You are a coding agent implementing a specific task in the project "{{project_na
 
 ---
 
+## Fix Agent (loop remediation turn)
+
+> The fix agent **is** the build agent. `specclaw-build-context --failure-record`
+> (and `--reflection`) appends a `## Remediation Context (Loop Turn)` section to
+> the payload above; there is no second prompt file. The section leads with the
+> block below, and it leads deliberately: the instruction an agent reads first in
+> a remediation payload is the one that shapes the diff.
+
+```
+### Root-Cause Protocol — REQUIRED BEFORE THE DIFF
+
+State the root cause and the evidence for it BEFORE writing any code:
+
+    Hypothesis: <mechanism> because <evidence>
+
+`because` is not optional. Then make the smallest diff that REMOVES THAT CAUSE —
+not the smallest diff that turns the gate green.
+
+If the previous turn already stated a hypothesis and it was wrong, WITHDRAW it
+and form a new one. Never stack a second fix on top of the first.
+
+Your report MUST end with the investigation record — the JSON payload for
+`specclaw-log-error --investigation`.
+```
+
+**Why the target changed.** The instruction used to read *"the smallest diff that
+turns the failing gate green"*, which is an incentive to fix the symptom: a
+retry, a widened type, a bumped timeout, or a `try`/`except` around the failing
+call all turn a gate green without touching the cause, and all come back on a
+later turn under a different signature. The size discipline is unchanged — only
+the target is. See `skills/debug/SKILL.md`.
+
+**Why the report must carry the record.** The `withdrawn:` verdicts in the
+investigation record are what `specclaw-loop decide` counts to raise an
+`architecture-question` halt. A turn that fixes nothing and records nothing is
+indistinguishable from a turn that made progress, so the loop keeps spending on
+a design that is what is actually wrong.
+
+---
+
 ## Verify Agent
 
 ```

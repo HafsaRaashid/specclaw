@@ -12,7 +12,7 @@
 | Spec | ⚪ Pending | |
 | Design | ⚪ Pending | |
 | Tasks | ⚪ Pending | |
-| Build | ⚪ Pending | |
+| Build | ✅ Complete | 5/5 tasks — hook, snapshot, router skill, config, 43-case suite |
 | Verify | ⚪ Pending | |
 
 ## Task Progress

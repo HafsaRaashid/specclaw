@@ -167,6 +167,22 @@ specclaw-log-learning .specclaw <change> <category> <priority> "<detail>" "<acti
 specclaw-log-learning .specclaw <change> design_gap medium "File <path> modified but not declared in any task" "Review task file declarations"
 ```
 
+**c2. Size drift — report it, never fix it.** When a task's `files:` list grew past the file map in
+`spec.md`, or a task failed with a `design_gap` learning, the change may have outgrown its declared
+size. Say so, name the command, and **stop there**:
+
+```
+⚠ size-upgrade-needed — <change> is `bounded` but T5 touched 4 files outside the spec's map.
+  specclaw-set-size .specclaw <change> architectural --reason "<why>"
+```
+
+Detecting the drift is mechanical; acting on it is not. **An upgrade changes what the operator
+approved**, and a bounded → architectural upgrade makes `design.md` required again, so the next
+`validate-change` will stop until `/specclaw:plan --design-only` fills it. That is a decision to hand
+back, exactly as `reconcile --fix` declines downgrades and `party.block` leaves the verdict advisory.
+Never call `specclaw-set-size` on the operator's behalf, and never downgrade — the ratchet refuses it
+by name anyway.
+
 **d.** Pattern scan: `specclaw-detect-patterns .specclaw scan <change>`.
 
 **e.** If any pattern has recurrence ≥ 3, alert the user.

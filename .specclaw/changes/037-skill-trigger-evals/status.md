@@ -12,7 +12,7 @@
 | Spec | ⚪ Pending | |
 | Design | ⚪ Pending | |
 | Tasks | ⚪ Pending | |
-| Build | ⚪ Pending | |
+| Build | ✅ Complete | 5/5 tasks — lint+baseline, fixture, runner, PR wiring, CI; description rewrite deferred with evidence |
 | Verify | ⚪ Pending | |
 
 ## Task Progress

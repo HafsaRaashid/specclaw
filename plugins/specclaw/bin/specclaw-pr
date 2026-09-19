@@ -402,6 +402,32 @@ ${test_lines}
 "
   fi
 
+  # --- Skill-trigger matrix (change 037) ---
+  # A PR that edits a SKILL.md description or the router changes the ROUTING
+  # SURFACE, and routing is the one part of specclaw that nothing else measures.
+  # When a matrix newer than the base branch exists, it travels with the PR, so
+  # a reviewer sees the evidence rather than being asked to trust the rewrite.
+  # Absent, this section is omitted entirely — it is not an error.
+  local trigger_section=""
+  local results_dir="${SCRIPT_DIR}/../tests/results"
+  if [[ -d "$results_dir" ]]; then
+    local matrix
+    # find + lexical sort, not `ls -t`: the matrices are named
+    # triggers-YYYY-MM-DD.md, so lexical order IS chronological order, and it
+    # does not depend on mtimes that a checkout resets to clone time.
+    matrix="$(find "$results_dir" -maxdepth 1 -type f -name 'triggers-*.md' 2>/dev/null \
+      | LC_ALL=C sort | tail -1)"
+    if [[ -n "$matrix" && -f "$matrix" ]]; then
+      trigger_section="
+## Skill-trigger matrix
+
+_$(basename "$matrix")_
+
+$(head -30 "$matrix")
+"
+    fi
+  fi
+
   # --- GitHub Issue Link ---
   local closes_line=""
   local gh_sync=""
@@ -425,7 +451,7 @@ ${ac_text}
 **Verdict:** ${verdict}
 
 ${verify_excerpt}
-${test_section}
+${test_section}${trigger_section}
 ---
 ${closes_line}
 

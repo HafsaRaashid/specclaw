@@ -1,0 +1,9 @@
+{
+  "change": "033-session-bootstrap-router",
+  "phase": "build",
+  "branch": "",
+  "size": "architectural",
+  "phases": {
+    "build": {"status":"complete","at":"2026-09-18T19:48:24Z","tasks":{"done":5,"total":5,"failed":0}}
+  }
+}

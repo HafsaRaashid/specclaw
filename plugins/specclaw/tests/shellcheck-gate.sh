@@ -36,7 +36,10 @@ trap 'rm -f "$current" "$expected"' EXIT
 
 # LC_ALL=C on both sides: `comm` needs identical collation, and the default
 # locale sorts hyphens inconsistently across environments.
-shellcheck -f gcc plugins/specclaw/bin/specclaw-* 2>/dev/null |
+# hooks/ is linted alongside bin/: the session-start hook is bash that runs on
+# every session in every specclaw project, and it was the one executable in the
+# plugin that CI never looked at.
+shellcheck -f gcc plugins/specclaw/bin/specclaw-* plugins/specclaw/hooks/session-start 2>/dev/null |
   sed -nE 's/^([^:]+):[0-9]+:[0-9]+: [a-z]+: .*\[(SC[0-9]+)\]$/\1 \2/p' |
   LC_ALL=C sort -u > "$current" || true
 
@@ -61,7 +64,7 @@ if [[ -n "$new_findings" ]]; then
   echo
   echo "Fix them, or add a targeted '# shellcheck disable=SCxxxx' with a rationale."
   echo "Full shellcheck output follows:"
-  shellcheck plugins/specclaw/bin/specclaw-* || true
+  shellcheck plugins/specclaw/bin/specclaw-* plugins/specclaw/hooks/session-start || true
   exit 1
 fi
 

@@ -12,7 +12,7 @@
 | Spec | ⚪ Pending | |
 | Design | ⚪ Pending | |
 | Tasks | ⚪ Pending | |
-| Build | ⚪ Pending | |
+| Build | ✅ Complete | 6/6 tasks — size field, ratchet, size-aware gate, templates, glyph, 61-case suite |
 | Verify | ⚪ Pending | |
 
 ## Task Progress

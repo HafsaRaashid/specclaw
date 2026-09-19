@@ -12,7 +12,7 @@
 | Spec | ⚪ Pending | |
 | Design | ⚪ Pending | |
 | Tasks | ⚪ Pending | |
-| Build | ⚪ Pending | |
+| Build | ✅ Complete | 6/6 tasks — protocol, record, halt reason, prompts, clustering, 52-case suite |
 | Verify | ⚪ Pending | |
 
 ## Task Progress

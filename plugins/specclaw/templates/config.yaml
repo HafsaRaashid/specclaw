@@ -310,6 +310,24 @@ quality:
     #   - "src/db/Migrations/HandWrittenBackfill.cs"
     include_overrides: []
 
+# Session bootstrap — the SessionStart hook that injects the specclaw router
+# and this project's live state at session start / clear / compact.
+#
+# Without it, specclaw's skills are present on disk and never invoked: ~30
+# descriptions competing with every other installed plugin's, and no knowledge
+# of what is already in flight here. With it, "the tests are failing" routes to
+# /specclaw:debug mid-build and to /specclaw:propose on a clean tree, because
+# the recorded phase is in context rather than guessed at.
+#
+# THE HOOK IS INERT IN REPOS WITH NO .specclaw/config.yaml, and always exits 0 —
+# a broken bootstrap can never break a session. Note that hooks load from the
+# INSTALLED plugin, so a repo checkout that is ahead of the installed version
+# runs the OLD hook until the plugin is updated.
+bootstrap:
+  enabled: true     # false = nothing is injected at session start
+  snapshot: true    # false = the router only, without the live state block
+  max_lines: 15     # cap on the number of change rows in the state block
+
 # Plugin housekeeping
 plugin:
   update_check: true   # /specclaw:status checks the plugin repo for a newer published
