@@ -120,6 +120,14 @@ fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# Refuse a second dispatch against a change already locked by another live
+# build/verify/pr/plan run (change 038), before validating phase prerequisites
+# or touching git. Release via a trap so every `die` exit path still releases —
+# this script is a single monolithic invocation with many early-exit points.
+"$SCRIPT_DIR/specclaw-change-lock" "$SPECCLAW_DIR" acquire "$CHANGE_NAME" --phase pr \
+  || die "cannot start pr — see the change-lock error above"
+trap '"$SCRIPT_DIR/specclaw-change-lock" "$SPECCLAW_DIR" release "$CHANGE_NAME" || true' EXIT
+
 # ─── Phase Validation ─────────────────────────────────────────────────────────
 
 validate_phase() {
