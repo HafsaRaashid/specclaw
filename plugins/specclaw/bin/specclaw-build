@@ -185,6 +185,12 @@ cmd_setup() {
   local config="$specclaw_dir/config.yaml"
   [[ -f "$config" ]] || die "Config not found: $config"
 
+  # Refuse a second dispatch against a change already locked by another live
+  # build/verify/pr/plan run (change 038) — before any branch/worktree mutation.
+  # The lock script's own stderr already names the held phase/start-time/host.
+  "$SCRIPT_DIR/specclaw-change-lock" "$specclaw_dir" acquire "$change_name" --phase build \
+    || die "cannot start build — see the change-lock error above"
+
   # Extract values (with defaults)
   local project_name; project_name="$(yaml_val "$config" "project.name")"
   local git_strategy; git_strategy="$(yaml_val "$config" "git.strategy")"
@@ -488,13 +494,16 @@ cmd_finalize() {
   # `parse-tasks --count`, the one counter every caller shares, so the Build row
   # stops depending on a model remembering to edit prose.
   local tasks_file="$specclaw_dir/changes/$change_name/tasks.md"
-  local t_total=0 t_done=0 t_failed=0
+  local t_total=0 t_done=0 t_failed=0 t_deferred=0
   if [[ -f "$tasks_file" ]]; then
-    read -r t_done t_total t_failed \
-      <<<"$("$SCRIPT_DIR/specclaw-parse-tasks" --count "$tasks_file" || echo '0 0 0')"
+    # --count now prints a 4th field (deferred, change 038) — a 3-variable read
+    # would stuff it onto the end of t_failed, so this must read 4.
+    read -r t_done t_total t_failed t_deferred \
+      <<<"$("$SCRIPT_DIR/specclaw-parse-tasks" --count "$tasks_file" || echo '0 0 0 0')"
     t_total=${t_total:-0}
     t_done=${t_done:-0}
     t_failed=${t_failed:-0}
+    t_deferred=${t_deferred:-0}
   fi
   local build_status="done"
   if ! $tests_passed || ! $lint_passed || ! $build_passed || [[ "$t_failed" -gt 0 ]]; then
@@ -514,6 +523,10 @@ cmd_finalize() {
     done
     errors_json+="]"
   fi
+
+  # Release the dispatch lock (change 038) — best-effort. A release failure
+  # must never mask the build's real result, recorded above.
+  "$SCRIPT_DIR/specclaw-change-lock" "$specclaw_dir" release "$change_name" || true
 
   # Output summary JSON
   cat <<ENDJSON
