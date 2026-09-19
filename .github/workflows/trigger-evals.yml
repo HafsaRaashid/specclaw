@@ -35,18 +35,39 @@ jobs:
   triggers:
     name: Routing matrix
     runs-on: ubuntu-latest
-    # Without a key there is nothing to measure. The job is skipped rather than
-    # failed, because a fork PR legitimately has no secret — but the RUNNER
-    # itself fails loudly on a missing CLI, so a configured run can never report
-    # green while measuring nothing.
     if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
     steps:
       - uses: actions/checkout@v4
 
+      # WITHOUT A KEY THERE IS NOTHING TO MEASURE, and a job that goes red for
+      # that reason on every PR touching a skill is a red X people learn to
+      # ignore — which costs more than the suite is worth. So the WORKFLOW skips
+      # when the secret is absent and says so.
+      #
+      # The RUNNER does the opposite, deliberately: invoked with
+      # SPECCLAW_TRIGGER_EVALS=1 and no `claude` on PATH it exits non-zero,
+      # because a routing check reporting green while measuring nothing is the
+      # exact failure it exists to prevent. Skipping is a decision made HERE,
+      # with the information about whether the repo is configured; it is never
+      # the runner's to make.
+      - name: Is the eval key configured?
+        id: key
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::ANTHROPIC_API_KEY is not configured for this repository — the routing matrix is skipped. Add the secret to measure skill triggering, or run it locally with SPECCLAW_TRIGGER_EVALS=1."
+          fi
+
       - name: Install the Claude Code CLI
+        if: steps.key.outputs.present == 'true'
         run: npm install -g @anthropic-ai/claude-code
 
       - name: Run the trigger matrix
+        if: steps.key.outputs.present == 'true'
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           SPECCLAW_TRIGGER_EVALS: '1'
@@ -55,7 +76,7 @@ jobs:
         run: bash plugins/specclaw/tests/run-trigger-tests.sh
 
       - name: Upload the matrix
-        if: always()
+        if: always() && steps.key.outputs.present == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: trigger-matrix

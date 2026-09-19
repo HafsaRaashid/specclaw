@@ -290,7 +290,12 @@ else
 
   # 8a (AC1) — newer remote → exactly one line with both versions + update hint
   out="$(bash "$CHECK_BIN" "$UPROJ" --remote-version 99.0.0)"
-  if [[ "$(wc -l <<<"$out")" == "1" ]] && grep -q "99.0.0" <<<"$out" && grep -q "$local_ver" <<<"$out" && grep -q "/plugin update specclaw" <<<"$out"; then
+  # `tr -d ' '` is load-bearing: BSD wc pads its count ("       1"), so on macOS
+  # this comparison was ALWAYS false and case 8a failed for an environment
+  # reason rather than a real one. That masked a genuine regression — a second
+  # line added to the notice — which only CI caught, because a before/after
+  # failure COUNT is blind to a test that was already red for another reason.
+  if [[ "$(wc -l <<<"$out" | tr -d ' ')" == "1" ]] && grep -q "99.0.0" <<<"$out" && grep -q "$local_ver" <<<"$out" && grep -q "/plugin update specclaw" <<<"$out"; then
     pass "8a newer remote notifies"
   else
     fail "8a newer remote notifies (got: $out)"
