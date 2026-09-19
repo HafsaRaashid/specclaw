@@ -20,23 +20,23 @@
 # which is the exact failure this script exists to prevent.
 set -uo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-
 usage() {
   cat <<'EOF'
-Usage: specclaw-change-lock <specclaw_dir> <acquire|release|status> ...
+Usage: specclaw-change-lock <specclaw_dir> <subcommand> <change> [options]
 
 Subcommands:
-  acquire <specclaw_dir> <change> --phase <phase> [--force]
+  acquire <change> --phase <phase> [--force]
                        Claim the change's dispatch lock. Exit 0 = acquired.
                        Exit 1 = refused (a live lock is held, or a stale lock
                        exists and --force was not given).
-  release <specclaw_dir> <change>
+  release <change>
                        Release the change's lock. Idempotent — releasing an
                        absent lock is not an error.
-  status <specclaw_dir> <change>
+  status <change>
                        Print `unlocked`, or the held lock's phase, start time,
                        host, and age.
+
+Example: specclaw-change-lock .specclaw acquire my-change --phase build
 
 Options:
   -h, --help   Show this help message

@@ -266,11 +266,13 @@ cmd_collect() {
   [ -f "$spec_file" ] || die "spec.md not found at ${spec_file}"
   [ -f "$tasks_file" ] || die "tasks.md not found at ${tasks_file}"
 
-  # Refuse a second dispatch against a change already locked by another live
-  # build/verify/pr/plan run (change 038) — before running any test/lint/build
-  # command. The lock script's own stderr already names the held phase/host.
-  "$SCRIPT_DIR/specclaw-change-lock" "$specclaw_dir" acquire "$change_name" --phase verify \
-    || die "cannot start verify — see the change-lock error above"
+  # NOTE (change 038): the dispatch lock is deliberately NOT acquired here.
+  # `collect` is also used as a standalone, read-only evidence dump (see
+  # run-parser-tests.sh Case 5, which runs it against this repo's own real
+  # changes) — turning it into a lock-acquiring call would make a read-only
+  # inspection claim exclusive access and leave an orphaned lock behind for
+  # any caller that never reaches `update-status`. The lock is acquired in
+  # skills/verify/SKILL.md's Step 0 instead, at the actual dispatch boundary.
 
   # 1. Extract acceptance criteria
   # Tolerant match: optional "- [ ] " or "- "/"* " bullet, optional "**bold**",
