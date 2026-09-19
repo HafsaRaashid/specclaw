@@ -127,7 +127,11 @@ fi
 
 set_phase="${SCRIPT_DIR}/specclaw-set-phase"
 [ -x "$set_phase" ] || set_phase="$(command -v specclaw-set-phase 2>/dev/null || true)"
-[ -n "$set_phase" ] && [ -x "$set_phase" ] || die "specclaw-set-phase not found; cannot record the size"
+# An explicit `if`, not `A && B || die`: in that form `die` also fires when A is
+# true and B is false — and shellcheck (SC2015) flags it for exactly that.
+if [ -z "$set_phase" ] || [ ! -x "$set_phase" ]; then
+  die "specclaw-set-phase not found; cannot record the size"
+fi
 
 "$set_phase" "$SPECCLAW_DIR" "$CHANGE" "$CUR_PHASE" "$CUR_STATUS" --size "$NEW_SIZE" >/dev/null ||
   die "specclaw-set-phase refused the size write"

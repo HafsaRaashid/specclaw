@@ -215,6 +215,23 @@ else
   fail "T12 a missing CLI reported success — that is the failure this suite exists to prevent"
 fi
 
+# ─── T12b: skipping is the workflow's decision, never the runner's ───────────
+# Both halves matter. The runner must fail loudly when asked to measure and
+# unable to; the workflow must skip when the repo has no key, because a job that
+# goes red for a missing secret on every skills PR is a red X people learn to
+# ignore.
+WF="$PLUGIN_DIR/../../.github/workflows/trigger-evals.yml"
+if [[ -f "$WF" ]]; then
+  WFTEXT="$(cat "$WF")"
+  assert_contains "T12b the workflow checks for the key first" \
+    "Is the eval key configured?" "$WFTEXT"
+  assert_contains "T12b and gates the run on it" \
+    "steps.key.outputs.present == 'true'" "$WFTEXT"
+  assert_contains "T12b saying so rather than failing" "::notice::" "$WFTEXT"
+else
+  fail "T12b trigger-evals.yml not found at $WF"
+fi
+
 # ─── T13: specclaw-pr attaches a matrix when there is one ────────────────────
 if [[ -f "$PR_SCRIPT" ]]; then
   if grep -q 'triggers-' "$PR_SCRIPT"; then
