@@ -12,7 +12,7 @@
 | Spec | ⚪ Pending | |
 | Design | ⚪ Pending | |
 | Tasks | ⚪ Pending | |
-| Build | ⚪ Pending | |
+| Build | ✅ Complete | 5/5 tasks — four-bucket gate, auditor seat, scoped add, 55-case suite |
 | Verify | ⚪ Pending | |
 
 ## Task Progress

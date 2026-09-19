@@ -12,7 +12,7 @@
 | Spec | ⚪ Pending | |
 | Design | ⚪ Pending | |
 | Tasks | ⚪ Pending | |
-| Build | ⚪ Pending | |
+| Build | ✅ Complete | 5/5 tasks — footer gate on, review gate off, 49-case suite |
 | Verify | ⚪ Pending | |
 
 ## Task Progress

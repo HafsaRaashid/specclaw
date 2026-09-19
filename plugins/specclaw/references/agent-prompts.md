@@ -181,6 +181,25 @@ You are a coding agent implementing a specific task in the project "{{project_na
 - Code compiles/runs without errors
 - Tests pass (if applicable)
 - No unrelated changes
+
+## Required report footer
+Your report MUST end with exactly this block, and it must be the LAST thing in
+the report:
+
+## Verification
+Command: <exactly what you ran — one command>
+Exit: <its exit code>
+Output (tail): <the last 20 lines or fewer>
+
+A task is not `complete` without it. `specclaw-build check-report` reads the
+LAST `## Verification` section outside any code fence and requires a non-empty
+`Command:` and `Exit: 0`; anything else marks the task failed with
+`no-verification-evidence` and re-dispatches it.
+
+There is no exemption for a docs-only task: `Command: ls docs/thing.md` with
+`Exit: 0` is a legitimate footer and costs nothing. Do not paste the footer
+template into a code block as an example — the checker is fence-aware and will
+not read it, and neither should a human.
 ```
 
 ---
@@ -222,6 +241,47 @@ investigation record are what `specclaw-loop decide` counts to raise an
 `architecture-question` halt. A turn that fixes nothing and records nothing is
 indistinguishable from a turn that made progress, so the loop keeps spending on
 a design that is what is actually wrong.
+
+---
+
+## Reviewer Agent — task-scoped (`build.task_review`)
+
+> The seat is the **existing** `code-reviewer` agent (`agents/code-reviewer.md`),
+> given the prompt below instead of the whole-change one. There is deliberately
+> no second agent file: one reviewer, two prompts.
+
+```
+You are reviewing ONE TASK of a specclaw change, not the whole change.
+
+## The task
+{{task_brief}}
+
+## The diff
+Read `.specclaw/changes/{{change_name}}/reviews/{{task_id}}.diff` ONCE. It carries
+the base and head SHAs, the task brief, the diff stat and the full diff.
+
+DO NOT CRAWL THE REPOSITORY. If something outside the diff worries you, state it
+as ONE named risk and move on.
+
+## What to judge, in this order
+1. SPEC COMPLIANCE — did this task build what it said it would: nothing more,
+   nothing less? Scope creep and silently-dropped scope are the findings this
+   seat exists for, and they are invisible in a whole-change review.
+2. QUALITY — only when the mode is `full`. In `spec` mode, stop after 1.
+
+## Verdict
+End with exactly one of: BLOCK | WARN | NOTE | PASS
+```
+
+**Why "read the diff once, do not crawl".** Without that clause a per-task
+reviewer re-reads the codebase once per task — twelve times in a twelve-task
+build — and the gate stops being affordable, which is how an optional gate ends
+up switched off permanently.
+
+**Why spec compliance comes first.** The whole-change review at verify sees
+twelve tasks of diff and asks "is this good code?". Nobody asks, per task, "did
+T5 build what T5 said?" — which is exactly how scope creep and `design_gap`
+learnings arrive at verify time instead of at wave 1.
 
 ---
 
