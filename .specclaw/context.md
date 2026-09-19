@@ -1,6 +1,6 @@
 # Project Context
 
-_Last updated: 2026-08-10 — numbered-change-folders_
+_Last updated: 2026-09-20 — change-concurrency-lock-and-review-budget_
 
 ## Architecture Overview
 
@@ -18,14 +18,25 @@ specclaw is a Claude Code plugin that drives a spec-first change lifecycle:
 - `plugins/specclaw/tests/` — bash test suites, each registered in `.github/workflows/ci.yml`.
 - `.specclaw/` (per project) — durable on-disk record: `config.yaml`, `context.md`,
   `STATUS.md`, and `changes/<NNN>-<slug>/` holding that change's `proposal.md`, `spec.md`,
-  `design.md`, `tasks.md`, `verify-report.md`, `review-report.md`, `status.md`, `state.json`.
-  Completed changes move to `changes/archive/<NNN>-<slug>/`.
+  `design.md`, `tasks.md`, `verify-report.md`, `review-report.md`, `status.md`, `state.json`,
+  and (only while a dispatch is active) `.lock/meta.json`. Completed changes move to
+  `changes/archive/<NNN>-<slug>/`. `.specclaw/party/session-spawns.jsonl` is a separate,
+  top-level, cross-change ledger — not per-change state.
 
 Change folders carry a permanent three-digit ordinal (`001-init-repo`) assigned once at propose
 time by `specclaw-next-change-number` and preserved through archival, so `ls`,
 tab-completion, `STATUS.md`, and the GitHub file browser all read chronologically.
 `specclaw-update-status` and `specclaw-reconcile` iterate change folders in numeric order,
 with unnumbered legacy folders grouped after the numbered ones.
+
+**Per-change dispatch lock.** Every phase dispatch (`plan`, `build`, `verify`, `pr`) acquires
+`changes/<change>/.lock/meta.json` via `specclaw-change-lock` before doing any real work, and
+releases it on completion — preventing two separately-dispatched forks (a `plan` fork and a
+`build` dispatch, a `verify` fork and a `pr` fork) from racing against the same change's files.
+Staleness is judged by wall-clock age only (`git.lock_stale_minutes`, default 120), never by PID
+liveness — a lock spans a whole skill dispatch across multiple, separately-invoked `bin/`
+processes, so there is no single PID whose liveness would mean anything by the time anyone
+re-checks it. This is orthogonal to `git.strategy`.
 
 ## Coding Style & Conventions
 
@@ -42,7 +53,12 @@ with unnumbered legacy folders grouped after the numbered ones.
 - **Quote every path; never interpolate a change name into a regex.** Change names are opaque
   strings and are tested against shell/regex metacharacters.
 - **Version bump before every PR**: `plugins/specclaw/.claude-plugin/plugin.json` and
-  `.claude-plugin/marketplace.json` must stay in sync.
+  `.claude-plugin/marketplace.json` must stay in sync (`specclaw-pr` auto-bumps the patch when
+  `plugin.version_files` is configured and the version is unchanged vs. the base branch).
+- **JSON written by hand in bash is escaped, even for "trusted" values.** `specclaw-party`'s
+  `json_str` and `specclaw-change-lock`'s `json_esc` both escape backslashes/quotes before
+  interpolating a shell variable into a JSON literal — cheap, and it stops an unusual `hostname`
+  or a future caller's input from producing malformed JSON silently.
 - Where a helper function is deliberately duplicated between two standalone executables (no
   sourcing convention exists between them), the copies are kept byte-identical and a test pins
   that identity.
@@ -59,6 +75,27 @@ with unnumbered legacy folders grouped after the numbered ones.
   prose. Callers that need to change state re-invoke `set-phase` rather than editing the file
   (writes are atomic: temp file → parse check → `mv`; `at` is preserved when the record is
   otherwise unchanged, so idempotent refreshes do not churn timestamps).
+- **A dispatch lock is anchored at the point with no other legitimate read-only caller — never
+  just "a script that already exists for the phase."** `specclaw-verify`'s lock acquire was
+  originally placed inside `cmd_collect`, following the instinct "put it in the script whenever
+  there's a script to put it in." But `collect` is also invoked standalone as a read-only
+  evidence dump, and turning it into a lock-acquiring call made a read-only inspection claim
+  exclusive access, orphaning a lock in a real change directory the first time an existing test
+  exercised that path. The fix: acquire lives in the `SKILL.md`'s own dispatch-boundary step
+  instead (mirroring how `plan`, which has no dedicated binary, already does it); only the
+  idempotent `release` stays inside the script. Before anchoring a lock or other mutation to a
+  `bin/` subcommand, grep `tests/*.sh` for standalone invocations of that subcommand against real
+  data — if any exist, anchor at the `SKILL.md` dispatch boundary instead.
+- **Append-only, sum-on-read ledgers for cross-run counts.** `specclaw-timer`'s per-change
+  `timeline.jsonl` and `specclaw-party`'s cross-change `party/session-spawns.jsonl` both use the
+  same shape: one JSON line per event, no rewrite, total computed by summing matching lines on
+  read. Concurrent writers cannot lose each other's lines, and there is nothing to compact.
+- **A shared counter's output format is a contract every caller must be updated in lockstep.**
+  `specclaw-parse-tasks --count` grew a 4th field (deferred count); every one of its five existing
+  callers had to add a 4th `read` variable and update its `'0 0 0'` fallback to `'0 0 0 0'` in the
+  same change, because `read`'s overflow behavior (extra fields get appended, with their
+  separating whitespace, to the last named variable) would otherwise have silently corrupted the
+  `failed` count everywhere it wasn't.
 - **Plan → validate → execute for destructive operations.** All refusals happen before the
   first filesystem mutation, so the failure mode is "stopped early", never "clobbered halfway".
 - **Destructive tools are dry-run by default.** `specclaw-renumber-changes` prints an
@@ -94,6 +131,9 @@ with unnumbered legacy folders grouped after the numbered ones.
   *archive* date, not the change's — one bulk run stamped 24 folders with the same date, so
   ordering by it was actively misleading. The archive date lives in `state.json`.
 - **No new `config.yaml` keys for the numbering format.** It is one fixed rule.
+- **The concurrency lock uses wall-clock staleness, never PID liveness**, unlike
+  `specclaw-browser-lock`'s slot semaphore — see Key Patterns above for why the two mechanisms
+  need different liveness signals despite both using the same atomic-`mkdir` claim.
 
 ## Constraints
 
@@ -104,6 +144,8 @@ with unnumbered legacy folders grouped after the numbered ones.
   (`verdict`, `url`, `tasks`, `branch` — or rely on `set-phase`'s documented fallback read):
   `set-phase` rebuilds the record from its arguments, so an omitted field is a deleted field.
 - **Never introduce a counter, index, or cache for something the filesystem already states.**
+  (An append-only cross-run *ledger*, per Key Patterns above, is a different thing: it records
+  events that have no other home, not a derivable fact.)
 - **Never silence a shellcheck finding by appending to `shellcheck-baseline.txt`.**
 - **Never add a test suite without registering it in `.github/workflows/ci.yml`.**
 - **Never rename or migrate a user's change folders automatically.** Backfills require an
@@ -113,20 +155,32 @@ with unnumbered legacy folders grouped after the numbered ones.
 - **Never assume a change folder name starts with a letter, or has a number at all.**
 - **Do not sort change folders lexically** where chronological order is the point, and do not
   interleave unnumbered folders at position zero — they belong after the numbered ones.
+- **A `--force` flag on a safety check may only override the specific failure mode it documents,
+  never the check itself.** `specclaw-change-lock acquire --force` clears a *stale* lock; it
+  still refuses a *live* one. A `--force` that always wins just moves the false "I have exclusive
+  access" belief one step later.
 
 ## Recent Decisions
 
 <!-- Last 5 significant decisions from merged changes. Updated automatically on each PR merge. -->
 
-1. **2026-08-10 — numbered-change-folders:** change folders carry a permanent three-digit
+1. **2026-09-20 — change-concurrency-lock-and-review-budget:** a per-change dispatch lock
+   (`specclaw-change-lock`) now guards `plan`/`build`/`verify`/`pr` against concurrent dispatch,
+   anchored at each phase's real dispatch boundary (never at a `bin/` subcommand also used
+   read-only) and judged stale by wall-clock age alone.
+2. **2026-09-20 — change-concurrency-lock-and-review-budget:** `specclaw-parse-tasks` gained a
+   fifth task marker, `[>]` deferred, excluded from `specclaw-validate-change`'s incomplete-task
+   gate; its shared `--count` counter grew a 4th field, requiring every existing caller to be
+   updated in the same change to avoid `read` silently corrupting the `failed` count.
+3. **2026-09-20 — change-concurrency-lock-and-review-budget:** `party.session_spawn_cap` bounds
+   cumulative daily party-panel spawns across all changes via a new top-level, append-only
+   `party/session-spawns.jsonl` ledger; once set, it forces the "confirm before spending" ask
+   even under `party.default: true`.
+4. **2026-08-10 — numbered-change-folders:** change folders carry a permanent three-digit
    ordinal (`NNN-<slug>`) assigned at propose time and kept through archival; the number is
    derived from disk (max + 1) on every call, with no counter file, so gaps are permanent and a
    number always means the same change.
-2. **2026-08-10 — numbered-change-folders:** the backfill (`specclaw-renumber-changes`) is
+5. **2026-08-10 — numbered-change-folders:** the backfill (`specclaw-renumber-changes`) is
    opt-in — dry-run by default, `--apply` required, `--force` to renumber already-numbered
    folders and to recover from an interrupted run — and mixed numbered/unnumbered repos are a
    supported steady state.
-3. **2026-08-10 — numbered-change-folders:** renaming a change refreshes `state.json` by
-   re-invoking `specclaw-set-phase` rather than editing the file, keeping the
-   one-writer-per-state invariant intact; archived folders are skipped because `set-phase`
-   resolves `changes/<change>` and would record a path as the change identity.
