@@ -19,6 +19,7 @@
 
 **Completed:** {{completed}} / {{total}}
 **Failed:** {{failed}}
+**Deferred:** {{deferred}}
 
 {{task_details}}
 
