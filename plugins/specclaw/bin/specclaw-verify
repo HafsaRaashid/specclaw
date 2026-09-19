@@ -266,6 +266,12 @@ cmd_collect() {
   [ -f "$spec_file" ] || die "spec.md not found at ${spec_file}"
   [ -f "$tasks_file" ] || die "tasks.md not found at ${tasks_file}"
 
+  # Refuse a second dispatch against a change already locked by another live
+  # build/verify/pr/plan run (change 038) — before running any test/lint/build
+  # command. The lock script's own stderr already names the held phase/host.
+  "$SCRIPT_DIR/specclaw-change-lock" "$specclaw_dir" acquire "$change_name" --phase verify \
+    || die "cannot start verify — see the change-lock error above"
+
   # 1. Extract acceptance criteria
   # Tolerant match: optional "- [ ] " or "- "/"* " bullet, optional "**bold**",
   # then "AC" + optional "-" + a digit. Accepts e.g.
@@ -545,6 +551,11 @@ cmd_update_status() {
     partial) norm_verdict="PARTIAL"; status_word="partial" ;;
     *)       die "Invalid verdict: ${verdict}. Must be PASS, FAIL, or PARTIAL" ;;
   esac
+
+  # Release the dispatch lock (change 038) — best-effort, and first: this is
+  # verify's last bin/ call regardless of which path below it takes, and a
+  # release failure must never mask the verdict just computed.
+  "$SCRIPT_DIR/specclaw-change-lock" "$specclaw_dir" release "$change_name" || true
 
   # specclaw-set-phase is the only writer of phase state: it records the verdict
   # in state.json and upserts the Verify row through specclaw-status-row (awk —
