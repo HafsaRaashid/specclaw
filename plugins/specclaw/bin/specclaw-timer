@@ -102,7 +102,11 @@ hms() {
 }
 
 SPECCLAW_DIR="${1:-}"; CHANGE="${2:-}"
-[ -n "$SPECCLAW_DIR" ] && [ -n "$CHANGE" ] || die "need <specclaw_dir> <change>"
+# Explicit `if` rather than `A && B || die` — see SC2015: the fallback in that
+# form also fires when A holds and B does not.
+if [ -z "$SPECCLAW_DIR" ] || [ -z "$CHANGE" ]; then
+  die "need <specclaw_dir> <change>"
+fi
 CHANGE_DIR="${SPECCLAW_DIR}/changes/${CHANGE}"
 LEDGER="${CHANGE_DIR}/timeline.jsonl"
 CONFIG="${SPECCLAW_DIR}/config.yaml"
@@ -249,7 +253,7 @@ median_for() {
     while IFS=$'\037' read -r _sp k l _m _a _st s e; do
       [ "$k" = "$kind" ] || continue
       [ "$l" = "$label" ] || continue
-      [ -n "$s" ] && [ -n "$e" ] || continue
+      if [ -z "$s" ] || [ -z "$e" ]; then continue; fi
       durations="${durations}$((e - s))
 "
     done < <(spans "$led" 2>/dev/null)

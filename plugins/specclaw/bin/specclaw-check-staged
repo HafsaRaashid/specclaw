@@ -79,7 +79,12 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
-[ -n "$SPECCLAW_DIR" ] && [ -n "$CHANGE" ] || { usage >&2; exit 2; }
+# An explicit `if`, not `A && B || C`: in that form the fallback also fires when
+# A is true and B is false, which shellcheck flags as SC2015 for good reason.
+if [ -z "$SPECCLAW_DIR" ] || [ -z "$CHANGE" ]; then
+  usage >&2
+  exit 2
+fi
 
 CHANGE_DIR="${SPECCLAW_DIR}/changes/${CHANGE}"
 CONFIG="${SPECCLAW_DIR}/config.yaml"
