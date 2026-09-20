@@ -1,6 +1,6 @@
-# Status: Package SpecClaw as a Codex Skill Alongside Claude
+# Status: Package SpecClaw as an Installable Codex Plugin
 
-**Change:** 040-codex-skill-packaging
+**Change:** 040-codex-plugin-packaging
 **Started:** 2026-09-20
 **Last Updated:** 2026-09-20
 
@@ -8,13 +8,12 @@
 
 | Phase | Status | Notes |
 |-------|--------|-------|
-| Proposal | ✅ Approved | |
+| Proposal | ✅ Approved |  |
 | Spec | ✅ Done |  |
-| Design | ⚪ Pending | |
+| Design | ✅ Done |  |
 | Tasks | ✅ Done |  |
-| Build | ✅ Done | 4/4 tasks |
-| Verify | ✅ Passed | PASS |
-| PR | ✅ Raised | https://github.com/chan4lk/specclaw/pull/82 |
+| Build | ✅ Done | 5/5 tasks |
+| Verify | ⚪ Pending | |
 
 ## Task Progress
 
@@ -29,4 +28,4 @@
 
 ## Issues
 
-**GitHub Issue:** #80
+**GitHub Issue:** #83
