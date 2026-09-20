@@ -1,6 +1,6 @@
-# Status: Session-start bootstrap and intent router
+# Status: Per-task review gate and evidence-before-done in build
 
-**Change:** 033-session-bootstrap-router
+**Change:** 035-task-review-gate
 **Started:** 2026-09-19
 **Last Updated:** 2026-09-19
 
@@ -12,8 +12,9 @@
 | Spec | ⚪ Pending | |
 | Design | ⚪ Pending | |
 | Tasks | ⚪ Pending | |
-| Build | ✅ Complete | 5/5 tasks — hook, snapshot, router skill, config, 43-case suite |
+| Build | ✅ Complete | 5/5 tasks — footer gate on, review gate off, 49-case suite |
 | Verify | ⚪ Pending | |
+| Archived | ✅ Done |  |
 
 ## Task Progress
 
@@ -29,4 +30,4 @@
 ## Issues
 
 
-**GitHub Issue:** #67
+**GitHub Issue:** #69

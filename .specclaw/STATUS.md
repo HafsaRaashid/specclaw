@@ -1,20 +1,13 @@
 # 🦞 SpecClaw Dashboard
 
 **Project:** specclaw
-**Last Updated:** 2026-09-20 10:38 UTC
+**Last Updated:** 2026-09-20 10:46 UTC
 
 _4 unnumbered changes · run `/specclaw:renumber` to order them_
 
 ## Active Changes
 
-
-- 🔨 **028-phase-time-accounting** ▣ — build complete | 5/5 tasks (100%) | 0 failed
-- 🔨 **029-staged-files-auditor** ▣ — build complete | 5/5 tasks (100%) | 0 failed
-- 🔨 **033-session-bootstrap-router** ▣ — build complete | 5/5 tasks (100%) | 0 failed
-- 🔨 **034-systematic-debug-skill** — build complete | 6/6 tasks (100%) | 0 failed
-- 🔨 **035-task-review-gate** ▣ — build complete | 5/5 tasks (100%) | 0 failed
-- 🔨 **036-right-sized-change-paths** ▣ — build complete | 6/6 tasks (100%) | 0 failed
-- 🔨 **037-skill-trigger-evals** ▣ — build complete | 5/5 tasks (100%) | 0 failed
+_No active changes._
 
 ## Pending Proposals
 
@@ -50,9 +43,16 @@ _None._
 - ✅ **025-git-worktrees**
 - ✅ **026-long-running-test-orchestration**
 - ✅ **027-memory-aware-parallelism**
+- ✅ **028-phase-time-accounting**
+- ✅ **029-staged-files-auditor**
 - ✅ **030-tracker-state-integrity**
 - ✅ **031-numbered-change-folders**
 - ✅ **032-party-mode**
+- ✅ **033-session-bootstrap-router**
+- ✅ **034-systematic-debug-skill**
+- ✅ **035-task-review-gate**
+- ✅ **036-right-sized-change-paths**
+- ✅ **037-skill-trigger-evals**
 - ✅ **038-change-concurrency-lock-and-review-budget**
 - ✅ **039-model-invocation-opt-out**
 - ✅ **040-codex-plugin-packaging**
@@ -64,5 +64,5 @@ _None._
 ## Stats
 
 - **Total changes:** 44
-- **Active:** 7
-- **Completed:** 37
+- **Active:** 0
+- **Completed:** 44

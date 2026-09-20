@@ -1,8 +1,0 @@
-{
-  "change": "034-systematic-debug-skill",
-  "phase": "build",
-  "branch": "",
-  "phases": {
-    "build": {"status":"complete","at":"2026-09-18T19:30:45Z","tasks":{"done":6,"total":6,"failed":0}}
-  }
-}

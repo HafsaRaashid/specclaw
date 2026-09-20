@@ -1,9 +1,0 @@
-{
-  "change": "036-right-sized-change-paths",
-  "phase": "build",
-  "branch": "",
-  "size": "architectural",
-  "phases": {
-    "build": {"status":"complete","at":"2026-09-18T19:42:03Z","tasks":{"done":6,"total":6,"failed":0}}
-  }
-}

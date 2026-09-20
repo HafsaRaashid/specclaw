@@ -1,8 +1,8 @@
-# Status: Staged-files auditor — a gate that verifies exactly what lands in the PR
+# Status: Right-sized change paths — spike, bounded, architectural
 
-**Change:** staged-files-auditor
-**Started:** 2026-08-01
-**Last Updated:** 2026-08-01
+**Change:** 036-right-sized-change-paths
+**Started:** 2026-09-19
+**Last Updated:** 2026-09-19
 
 ## Progress
 
@@ -12,13 +12,15 @@
 | Spec | ⚪ Pending | |
 | Design | ⚪ Pending | |
 | Tasks | ⚪ Pending | |
-| Build | ✅ Complete | 5/5 tasks — four-bucket gate, auditor seat, scoped add, 55-case suite |
+| Build | ✅ Complete | 6/6 tasks — size field, ratchet, size-aware gate, templates, glyph, 61-case suite |
 | Verify | ⚪ Pending | |
+| Archived | ✅ Done |  |
 
 ## Task Progress
 
 **Completed:** 0 / 0
 **Failed:** 0
+
 
 ## Agent Runs
 
@@ -26,4 +28,6 @@
 |------|-------|-------|--------|----------|
 
 ## Issues
-**GitHub Issue:** #55
+
+
+**GitHub Issue:** #70

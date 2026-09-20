@@ -1,8 +1,8 @@
-# Status: Phase time accounting — justify and explain long-running phases
+# Status: Skill-trigger evals and description lint
 
-**Change:** phase-time-accounting
-**Started:** 2026-08-01
-**Last Updated:** 2026-08-01
+**Change:** 037-skill-trigger-evals
+**Started:** 2026-09-19
+**Last Updated:** 2026-09-19
 
 ## Progress
 
@@ -12,13 +12,15 @@
 | Spec | ⚪ Pending | |
 | Design | ⚪ Pending | |
 | Tasks | ⚪ Pending | |
-| Build | ✅ Complete | 5/5 tasks — timer, progress, instrumentation, PR section, 55-case suite |
+| Build | ✅ Complete | 5/5 tasks — lint+baseline, fixture, runner, PR wiring, CI; description rewrite deferred with evidence |
 | Verify | ⚪ Pending | |
+| Archived | ✅ Done |  |
 
 ## Task Progress
 
 **Completed:** 0 / 0
 **Failed:** 0
+
 
 ## Agent Runs
 
@@ -26,4 +28,6 @@
 |------|-------|-------|--------|----------|
 
 ## Issues
-**GitHub Issue:** #54
+
+
+**GitHub Issue:** #71

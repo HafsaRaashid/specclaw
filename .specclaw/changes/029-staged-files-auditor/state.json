@@ -1,9 +1,0 @@
-{
-  "change": "029-staged-files-auditor",
-  "phase": "build",
-  "branch": "",
-  "size": "architectural",
-  "phases": {
-    "build": {"status":"complete","at":"2026-09-18T20:29:51Z","tasks":{"done":5,"total":5,"failed":0}}
-  }
-}

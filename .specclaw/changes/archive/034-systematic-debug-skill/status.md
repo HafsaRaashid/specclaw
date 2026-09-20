@@ -1,6 +1,6 @@
-# Status: Right-sized change paths — spike, bounded, architectural
+# Status: specclaw debug — root-cause-first debugging protocol
 
-**Change:** 036-right-sized-change-paths
+**Change:** 034-systematic-debug-skill
 **Started:** 2026-09-19
 **Last Updated:** 2026-09-19
 
@@ -12,8 +12,9 @@
 | Spec | ⚪ Pending | |
 | Design | ⚪ Pending | |
 | Tasks | ⚪ Pending | |
-| Build | ✅ Complete | 6/6 tasks — size field, ratchet, size-aware gate, templates, glyph, 61-case suite |
+| Build | ✅ Complete | 6/6 tasks — protocol, record, halt reason, prompts, clustering, 52-case suite |
 | Verify | ⚪ Pending | |
+| Archived | ✅ Done |  |
 
 ## Task Progress
 
@@ -29,4 +30,4 @@
 ## Issues
 
 
-**GitHub Issue:** #70
+**GitHub Issue:** #68
