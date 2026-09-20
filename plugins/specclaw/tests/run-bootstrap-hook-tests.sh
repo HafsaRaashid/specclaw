@@ -208,6 +208,23 @@ assert_contains "T4 the pending proposal"   "028-phase-time" "$CTX"
 assert_contains "T4 states the routing consequence" \
   "not /specclaw:propose" "$CTX"
 
+# ─── T4b: a deferred task ([>], change 038) does not corrupt the task-count
+# line — the 4th `--count` field must not spill into the failed count. ───────
+ROOT="$(make_project t4b)"
+D4B="$ROOT/.specclaw/changes/deferred-check"
+mkdir -p "$D4B"
+printf '# Proposal\n' > "$D4B/proposal.md"
+{
+  printf '# Tasks\n\n'
+  printf -- '- [x] `T1` — done\n'
+  printf -- '- [>] `T2` — deferred\n'
+  printf -- '  - Deferred-Reason: waiting\n'
+} > "$D4B/tasks.md"
+( cd "$ROOT" && "$SET_PHASE" .specclaw deferred-check build in_progress ) >/dev/null 2>&1
+SNAP_OUT="$( cd "$ROOT" && "$SNAPSHOT" .specclaw 2>/dev/null )"
+assert_contains "T4b deferred task reads as 1/2 tasks, 0 failed (not corrupted)" \
+  "1/2 tasks, 0 failed" "$SNAP_OUT"
+
 # ─── T5: the byte cap ────────────────────────────────────────────────────────
 # It is paid on every session start, clear and compact. 12 changes is a busy
 # project, not a pathological one.

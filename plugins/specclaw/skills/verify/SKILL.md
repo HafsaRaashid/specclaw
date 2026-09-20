@@ -27,6 +27,8 @@ specclaw-validate-change .specclaw <change> verify
 
 If it fails (tasks not all complete), report and stop.
 
+**Acquire the concurrency lock (change 038):** `specclaw-change-lock .specclaw acquire <change> --phase verify`. If it refuses (a live or unexpired-stale lock from another plan/build/verify/pr dispatch on this change), report its stderr message and stop — do not proceed to Step 1. Deliberately **not** inside `specclaw-verify collect` itself: `collect` is also used standalone as a read-only evidence dump, and turning it into a lock-acquiring call would make a read-only inspection claim exclusive access. The lock is released at Step 5, below — best-effort, so it is never held past a verify run for any reason.
+
 **If `.specclaw/context.md` exists**, read it before evaluating — the verifier must check that the implementation respects the project's coding rules, patterns, and constraints documented there, in addition to the spec's acceptance criteria.
 
 ## Step 1 — Collect evidence

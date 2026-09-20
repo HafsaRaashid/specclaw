@@ -1,7 +1,7 @@
 # 🦞 SpecClaw Dashboard
 
 **Project:** specclaw
-**Last Updated:** 2026-09-18 18:52 UTC
+**Last Updated:** 2026-09-19 21:27 UTC
 
 _4 unnumbered changes · run `/specclaw:renumber` to order them_
 
@@ -9,9 +9,17 @@ _4 unnumbered changes · run `/specclaw:renumber` to order them_
 
 
 - ✅ **027-memory-aware-parallelism** — 5/5 tasks (100%) | 0 failed
+- 🔨 **028-phase-time-accounting** — build complete | 5/5 tasks (100%) | 0 failed
+- 🔨 **029-staged-files-auditor** — build complete | 5/5 tasks (100%) | 0 failed
 - 🔀 **030-tracker-state-integrity** — pr raised | 7/7 tasks (100%) | 0 failed | PR #57 merged
 - 🔀 **031-numbered-change-folders** — pr raised | 6/6 tasks (100%) | 0 failed | PR #60 merged
 - 🔨 **032-party-mode** — build in-progress | 8/8 tasks (100%) | 0 failed | PR #63 merged
+- 🔨 **033-session-bootstrap-router** — build complete | 5/5 tasks (100%) | 0 failed
+- 🔨 **034-systematic-debug-skill** — build complete | 6/6 tasks (100%) | 0 failed
+- 🔨 **035-task-review-gate** — build complete | 5/5 tasks (100%) | 0 failed
+- 🔨 **036-right-sized-change-paths** — build complete | 6/6 tasks (100%) | 0 failed
+- 🔨 **037-skill-trigger-evals** — build complete | 5/5 tasks (100%) | 0 failed
+- 🔍 **038-change-concurrency-lock-and-review-budget** — verify PASS | 15/15 tasks (100%) | 0 failed
 - ✅ **analyze-command** — 5/5 tasks (100%) | 0 failed
 - ✅ **architecture-command** — 6/6 tasks (100%) | 0 failed
 - ✅ **domain-command** — 6/6 tasks (100%) | 0 failed
@@ -19,14 +27,7 @@ _4 unnumbered changes · run `/specclaw:renumber` to order them_
 
 ## Pending Proposals
 
-
-- 📋 **028-phase-time-accounting** — proposal ready, awaiting planning
-- 📋 **029-staged-files-auditor** — proposal ready, awaiting planning
-- 📋 **033-session-bootstrap-router** — proposal ready, awaiting planning
-- 📋 **034-systematic-debug-skill** — proposal ready, awaiting planning
-- 📋 **035-task-review-gate** — proposal ready, awaiting planning
-- 📋 **036-right-sized-change-paths** — proposal ready, awaiting planning
-- 📋 **037-skill-trigger-evals** — proposal ready, awaiting planning
+_None._
 
 ## Recently Completed
 
@@ -60,6 +61,6 @@ _4 unnumbered changes · run `/specclaw:renumber` to order them_
 
 ## Stats
 
-- **Total changes:** 34
-- **Active:** 8
+- **Total changes:** 42
+- **Active:** 16
 - **Completed:** 26

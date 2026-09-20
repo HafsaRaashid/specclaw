@@ -185,3 +185,18 @@ Proposal 037 step 4 (rewrite ~35 skill descriptions to trigger-first form) was N
 Clear description-lint-baseline.txt entries skill-by-skill, each with a before/after matrix from SPECCLAW_TRIGGER_EVALS=1 run-trigger-tests.sh. The bf-* family is the bulk of the debt and no fixture row covers it — add rows first.
 
 ---
+
+## [L13] design_gap — Placing a dispatch-lock acquire inside a bin/ subcommand ...
+
+**When:** 2026-09-19 20:46 UTC
+**Category:** design_gap
+**Priority:** medium
+**Status:** pending
+
+### Detail
+Placing a dispatch-lock acquire inside a bin/ subcommand that is also called standalone as a read-only diagnostic (specclaw-verify collect, exercised directly by run-parser-tests.sh Case 5) turned a read-only call into a lock-acquiring one and left an orphaned lock in a real change directory.
+
+### Action
+Before anchoring a lock/mutation to a bin/ subcommand, grep tests/*.sh for standalone invocations of that subcommand against the real repo; if any exist, anchor in the SKILL.md dispatch boundary instead.
+
+---

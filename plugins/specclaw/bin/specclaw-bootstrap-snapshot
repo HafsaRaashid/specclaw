@@ -96,8 +96,10 @@ while IFS= read -r change_dir; do
     # --count is the ONLY task counter in specclaw (see the plugin CLAUDE.md).
     # Its stderr summary line is suppressed HERE and only here: this output goes
     # into a session-start payload, where a stray line is a malformed hook.
-    read -r t_done t_total t_failed <<<"$("$PARSE_TASKS" --count "${change_dir}/tasks.md" 2>/dev/null || echo '0 0 0')"
-    t_total="${t_total:-0}"; t_done="${t_done:-0}"; t_failed="${t_failed:-0}"
+    # 4th field (deferred, change 038) must still be read even though it's
+    # unused here — a 3-var read would fold it into t_failed instead.
+    read -r t_done t_total t_failed t_deferred <<<"$("$PARSE_TASKS" --count "${change_dir}/tasks.md" 2>/dev/null || echo '0 0 0 0')"
+    t_total="${t_total:-0}"; t_done="${t_done:-0}"; t_failed="${t_failed:-0}"; t_deferred="${t_deferred:-0}"
     [ "$t_total" -gt 0 ] && counts="${t_done}/${t_total} tasks, ${t_failed} failed"
   fi
 

@@ -284,10 +284,13 @@ for change_name in "${ORDERED_CHANGES[@]+"${ORDERED_CHANGES[@]}"}"; do
     # `t_done`, not `done`: `read -r done ...` reads to shellcheck as the `done`
     # loop keyword (SC1010), and a variable that shadows a keyword is a trap
     # waiting for the next editor of this block.
-    read -r t_done total failed <<<"$("$PARSE_TASKS" --count "$change_dir/tasks.md" || echo '0 0 0')"
+    # 4th field (deferred, change 038) must still be read even though it's
+    # unused here — a 3-var read would fold it into `failed` instead.
+    read -r t_done total failed deferred <<<"$("$PARSE_TASKS" --count "$change_dir/tasks.md" || echo '0 0 0 0')"
     total=${total:-0}
     t_done=${t_done:-0}
     failed=${failed:-0}
+    deferred=${deferred:-0}
 
     if [ "$total" -gt 0 ]; then
       pct=$((t_done * 100 / total))

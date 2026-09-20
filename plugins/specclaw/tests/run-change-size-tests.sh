@@ -237,6 +237,26 @@ assert_eq "T15 unparseable state.json does not error the gate" "1" "$(gate "$ROO
 assert_contains "T15 it falls back to architectural (design.md demanded)" \
   "design.md" "$(gate_msg "$ROOT" build)"
 
+# ─── T19: a deferred task ([>], change 038) does not block the verify gate ───
+# count_incomplete = total - done - deferred, so a change with one done task
+# and one correctly-deferred task reads as "verify ready", not "1 incomplete".
+ROOT="$(make_change t19 bounded spec.md tasks.md)"
+CD19="$ROOT/.specclaw/changes/demo"
+{
+  printf '# Tasks\n\n### Wave 1\n\n'
+  printf -- '- [x] `T1` — done\n\n'
+  printf -- '- [>] `T2` — deferred\n'
+  printf -- '  - Deferred-Reason: waiting on a sibling change\n'
+} > "$CD19/tasks.md"
+assert_eq "T19a a deferred task does not block the verify gate" "0" "$(gate "$ROOT" verify)"
+assert_contains "T19b the status view names it deferred, not incomplete" \
+  "1 deferred" "$(cd "$ROOT" && "$VALIDATE" .specclaw demo status 2>/dev/null)"
+
+# A genuinely incomplete (pending) task must still block — the exclusion is
+# specific to deferred, not a general loosening of the gate.
+printf -- '- [ ] `T3` — not started\n' >> "$CD19/tasks.md"
+assert_eq "T19c a real pending task still blocks the verify gate" "1" "$(gate "$ROOT" verify)"
+
 # ─── T16: the dashboard glyphs a recorded size and only a recorded size ──────
 ROOT="$WORK/t16"; mkdir -p "$ROOT/.specclaw/changes"
 printf 'project:\n  name: "demo"\n' > "$ROOT/.specclaw/config.yaml"
