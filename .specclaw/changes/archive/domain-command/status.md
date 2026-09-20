@@ -14,6 +14,7 @@
 | Tasks | ✅ Complete | 6 tasks, 4 waves |
 | Build | ✅ Complete | 6/6 tasks complete, 0 failed. Normal specclaw flow — branch `specclaw/domain-command`, per-task commits. **Paused before `specclaw-build finalize`** (test run + merge to `main`) pending operator review, per this change's git-discipline note ("I review before merge"). |
 | Verify | ✅ Passed |  |
+| Archived | ✅ Done |  |
 
 ## Task Progress
 

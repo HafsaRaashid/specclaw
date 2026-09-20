@@ -1,7 +1,7 @@
 # 🦞 SpecClaw Dashboard
 
 **Project:** specclaw
-**Last Updated:** 2026-09-20 10:36 UTC
+**Last Updated:** 2026-09-20 10:38 UTC
 
 _4 unnumbered changes · run `/specclaw:renumber` to order them_
 
@@ -15,10 +15,6 @@ _4 unnumbered changes · run `/specclaw:renumber` to order them_
 - 🔨 **035-task-review-gate** ▣ — build complete | 5/5 tasks (100%) | 0 failed
 - 🔨 **036-right-sized-change-paths** ▣ — build complete | 6/6 tasks (100%) | 0 failed
 - 🔨 **037-skill-trigger-evals** ▣ — build complete | 5/5 tasks (100%) | 0 failed
-- ✅ **analyze-command** — 5/5 tasks (100%) | 0 failed
-- ✅ **architecture-command** — 6/6 tasks (100%) | 0 failed
-- ✅ **domain-command** — 6/6 tasks (100%) | 0 failed
-- ✅ **rebuild-plan-bridge** — 8/8 tasks (100%) | 0 failed
 
 ## Pending Proposals
 
@@ -60,9 +56,13 @@ _None._
 - ✅ **038-change-concurrency-lock-and-review-budget**
 - ✅ **039-model-invocation-opt-out**
 - ✅ **040-codex-plugin-packaging**
+- ✅ **analyze-command**
+- ✅ **architecture-command**
+- ✅ **domain-command**
+- ✅ **rebuild-plan-bridge**
 
 ## Stats
 
 - **Total changes:** 44
-- **Active:** 11
-- **Completed:** 33
+- **Active:** 7
+- **Completed:** 37
