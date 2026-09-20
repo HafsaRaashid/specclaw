@@ -4,15 +4,15 @@
 
 ## By kind
 
-- **phase** — 7m55s across 2 span(s)
+- **phase** — 31m22s across 3 span(s)
 - **task** — 53m39s across 7 span(s)
 - **wave** — 40m01s across 3 span(s)
 
 ## Slowest
 
+- `verify-1789881582` (phase) — verify — **23m27s**
 - `W3` (wave) — wave 3 — **19m14s**
 - `T6` (task) — Test suite for the narration gate — **18m07s**
-- `W2` (wave) — wave 2 — **13m48s**
 
 ## Spans
 
@@ -30,5 +30,6 @@
 | `W3` | wave | wave 3 | - | - | ok | 19m14s |
 | `T6` | task | Test suite for the narration gate | anthropic/claude-sonnet-5 | 1 | ok | 18m07s |
 | `T7` | task | Register the suite and bump the version | inline | 1 | ok | 36s |
+| `verify-1789881582` | phase | verify | - | - | ok | 23m27s |
 
 _No baseline: this project has no archived timelines to compare against yet._
