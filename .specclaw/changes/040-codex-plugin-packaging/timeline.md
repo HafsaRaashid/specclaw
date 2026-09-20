@@ -1,6 +1,6 @@
 # Timeline: 040-codex-plugin-packaging
 
-**Total measured (leaf spans):** 2m48s  ·  **Retries:** 0
+**Total measured (leaf spans):** 2m48s  ·  **Retries:** 0  ·  **Open spans:** 2 ⏱ still running
 
 ## By kind
 
@@ -28,5 +28,7 @@
 | `T3` | task | Document marketplace installation and checkout-local Codex use | anthropic/claude-sonnet-5 | 1 | ok | 33s |
 | `T4` | task | Register Codex package checks in continuous integration | anthropic/claude-sonnet-5 | 1 | ok | 23s |
 | `T5` | task | Validate package behavior and regression boundaries | anthropic/claude-sonnet-5 | 1 | ok | 37s |
+| `verify-1789891822` | phase | verify | - | - | - | ⏱ still running |
+| `verify` | - | - | - | - | ok | ⏱ still running |
 
 _No baseline: this project has no archived timelines to compare against yet._
