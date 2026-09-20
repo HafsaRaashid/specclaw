@@ -1,6 +1,6 @@
 {
   "change": "039-model-invocation-opt-out",
-  "phase": "build",
+  "phase": "verify",
   "branch": "specclaw/039-model-invocation-opt-out",
   "size": "architectural",
   "phases": {
@@ -8,6 +8,7 @@
     "spec": {"status":"done","at":"2026-09-20T03:58:32Z"},
     "design": {"status":"done","at":"2026-09-20T03:59:20Z"},
     "tasks": {"status":"done","at":"2026-09-20T03:59:51Z"},
-    "build": {"status":"done","at":"2026-09-20T05:14:32Z","tasks":{"done":9,"total":9,"failed":0}}
+    "build": {"status":"done","at":"2026-09-20T05:14:32Z","tasks":{"done":9,"total":9,"failed":0}},
+    "verify": {"status":"passed","at":"2026-09-20T05:41:24Z","verdict":"PASS"}
   }
 }

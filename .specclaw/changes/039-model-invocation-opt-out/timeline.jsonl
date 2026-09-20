@@ -22,3 +22,5 @@
 {"ev":"start","span":"T7","kind":"task","label":"Register the suite and bump the version","parent":"W3","model":"inline","attempt":"1","at":"2026-09-20T05:13:52Z","ts":1789881232}
 {"ev":"stop","span":"T7","at":"2026-09-20T05:14:27Z","ts":1789881268,"status":"ok"}
 {"ev":"stop","span":"W3","at":"2026-09-20T05:14:28Z","ts":1789881268,"status":"ok"}
+{"ev":"start","span":"verify-1789881582","kind":"phase","label":"verify","at":"2026-09-20T05:19:42Z","ts":1789881582}
+{"ev":"stop","span":"verify-1789881582","at":"2026-09-20T05:43:09Z","ts":1789882989,"status":"ok"}
