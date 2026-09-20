@@ -45,7 +45,22 @@ Requires [Claude Code](https://claude.com/claude-code) v2.1 or later.
 
 Future plugins by the same owner ship in the same `chan4lk` marketplace — you only register it once.
 
-### Codex (repository-local)
+### Codex (marketplace install)
+
+Codex can install the native package from this repository's marketplace:
+
+```
+codex plugin marketplace add chan4lk/specclaw --sparse .agents/plugins
+codex plugin add specclaw@chan4lk
+```
+
+The marketplace entry resolves `plugins/specclaw/` from the repository root and
+packages its canonical `skills/` tree. For a local checkout, replace
+`chan4lk/specclaw` with the checkout path in the first command. Use an isolated
+Codex home when testing a package so local validation does not alter your usual
+marketplace configuration.
+
+### Codex (repository-local adapter)
 
 Codex discovers the adapter included in this checkout at
 `.agents/skills/specclaw/`. Start Codex from the repository root (or a
@@ -263,10 +278,12 @@ This repo is the `chan4lk` plugin marketplace. The specclaw plugin lives at `plu
 ```
 specclaw/                            ← chan4lk marketplace root
 ├── .claude-plugin/marketplace.json
+├── .agents/plugins/marketplace.json ← Codex marketplace catalog
 ├── .agents/skills/specclaw/SKILL.md ← Codex repository-local adapter
 └── plugins/
     └── specclaw/
         ├── .claude-plugin/plugin.json
+        ├── .codex-plugin/plugin.json
         ├── skills/<verb>/SKILL.md   ← 15 namespaced skills
         ├── bin/specclaw-*           ← lifecycle scripts on $PATH
         ├── templates/               ← proposal.md, spec.md, etc.
