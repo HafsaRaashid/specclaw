@@ -278,9 +278,18 @@ if [ "$mode" = "delta" ]; then
   doc="$(substitute "$doc" '{{target_date}}' "$target_date")"
   doc="$(substitute "$doc" '{{date}}' "$compared_date")"
 
+  # {{scan_scope}} is NOT narration. templates/quality-delta.md documents it as
+  # one mechanical line taken from scan_scope.config_hash, and the collector's
+  # own stdout summary already renders that exact sentence (see
+  # specclaw-bf-quality-collect's compare summary). A comparison REFUSES to run
+  # across differing scopes, so there is no mismatch case to narrate — stamping
+  # the marker here would hide a fact the artifact already states.
+  scan_scope_val="$(jq -r '"identical on both sides — exclusion config " + (.scan_scope.config_hash // "none")' "$qjson")"
+  doc="$(substitute "$doc" '{{scan_scope}}' "$scan_scope_val")"
+
   # quality-delta.md carries no report_blocks/anchors (Step 3 of the skill
   # skips the lint for compare mode) — every remaining section is narration.
-  for tok in scan_scope verdict summary not_comparable regressed improved unchanged methodology provenance; do
+  for tok in verdict summary not_comparable regressed improved unchanged methodology provenance; do
     doc="$(substitute "$doc" "{{${tok}}}" "$MARKER")"
   done
 else

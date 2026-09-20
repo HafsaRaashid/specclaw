@@ -449,6 +449,45 @@ else
   fail "G3 a canonical helper extraction came back empty — G1/G2 proved nothing"
 fi
 
+# ═══════════════════════════════════════════════════════════════════════════
+# GROUP H — the audit's line citations still point at real spawn sites.
+#
+# references/model-invocation-map.md cites a SKILL.md:<line> per row. Those
+# numbers went stale inside the change that created the table: T4 inserted an
+# `mkdir -p` line and an exit-status sentence at each of fifteen sites, moving
+# every citation below them by one to three lines, and nothing noticed until a
+# reviewer checked by hand. The quoted evidence is the real anchor, but a wrong
+# line number sends the next reader to a blank line and costs their trust in
+# the whole table.
+# ═══════════════════════════════════════════════════════════════════════════
+MAP="$PLUGIN_DIR/references/model-invocation-map.md"
+if [[ -f "$MAP" ]]; then
+  # Only the SPAWN-COLUMN citations, which are written without the `skills/`
+  # prefix. Prose evidence citations carry that prefix and no line number: their
+  # anchor is the quoted sentence, which no edit can silently move.
+  cites="$(grep -oE '(^|[^/])bf-[a-z0-9-]+/SKILL\.md:[0-9]+' "$MAP" | grep -oE 'bf-[a-z0-9-]+/SKILL\.md:[0-9]+' | sort -u)"
+  cite_n="$(printf '%s\n' "$cites" | grep -c . || true)"
+  bad=""
+  while IFS= read -r c; do
+    [[ -n "$c" ]] || continue
+    f="$PLUGIN_DIR/skills/${c%%:*}"
+    l="${c##*:}"
+    if [[ ! -f "$f" ]] || ! sed -n "${l}p" "$f" 2>/dev/null | grep -q 'subagent_type'; then
+      bad="$bad $c"
+    fi
+  done <<< "$cites"
+
+  if [[ "$cite_n" -lt 19 ]]; then
+    fail "H1 the audit cites all 19 spawn sites (found $cite_n — did the table shrink, or did a name with a digit slip a [a-z-] class again?)"
+  elif [[ -z "$bad" ]]; then
+    pass "H1 all $cite_n cited SKILL.md lines still hold a subagent_type spawn"
+  else
+    fail "H1 stale citation(s) in model-invocation-map.md:$bad"
+  fi
+else
+  fail "H1 references/model-invocation-map.md is missing"
+fi
+
 echo
 echo "─────────────────────────────"
 echo "PASS: $PASS   FAIL: $FAIL   SKIP: $SKIP"
