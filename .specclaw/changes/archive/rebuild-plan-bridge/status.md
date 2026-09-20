@@ -14,6 +14,7 @@
 | Tasks | ✅ Done | 8 tasks / 4 waves |
 | Build | ✅ Complete | 8/8 tasks, merged to main locally |
 | Verify | ✅ Passed | 8/8 ACs, 1 non-blocking doc gap found and fixed |
+| Archived | ✅ Done |  |
 
 ## Task Progress
 
