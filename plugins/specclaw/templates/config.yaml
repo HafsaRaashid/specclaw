@@ -108,6 +108,22 @@ build:
     fable_max_fraction: 0.2                     # cap Fable share of tasks per build
     cache: true                                 # persist synthesized specs under changes/<change>/agents/
 
+# Brownfield (bf-*) command settings
+bf:
+  # Narration agents — the bf spawns whose artifact is ALREADY FINAL before the
+  # agent runs (see references/model-invocation-map.md for which ones those are).
+  # false = skip the spawn; the report is rendered deterministically from the
+  # collector's own output, with every un-narrated section marked as such.
+  #
+  # This saves tokens, money and wall clock. It does NOT save main-session
+  # context: a subagent's prompt never enters the orchestrator's window. The
+  # context saving comes from the collector handoff, which needs no switch.
+  #
+  # Anything other than the literal `false` means narration stays on — a
+  # misread key that silently skips a model produces a report nobody knows
+  # was unwritten.
+  narration: true
+
 # Verify settings
 verify:
   # When the slow tier (build.e2e_command) runs. Absent → "last".
