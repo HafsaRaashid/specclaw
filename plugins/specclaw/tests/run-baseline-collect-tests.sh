@@ -341,6 +341,114 @@ assert_not_contains "$(rules_of "$OUT" "MOD-002")" "DR-001" \
   "an annotation with no rule id to its left still attributes nothing"
 
 echo
+echo "-- an annotation off the 'Business rules' line confers nothing --"
+
+# The citing module already does not own a DR-### cited in its own "Depends on"
+# rationale — that is what scoping the per-module rule grep to the "Business
+# rules" line buys. The annotation scan has to agree: a `(co-owned with …)` on
+# that SAME sentence used to hand the rule to the named module anyway, so one
+# sentence meant "just a citation" for its author and "a real ownership claim"
+# for its subject. Both halves are asserted here, because fixing the leak by
+# ignoring annotations outright would silently drop the one-sided form the
+# analyst charter explicitly permits (agents/bf-domain-analyst.md).
+R="$WORK/annotation-off-rules-line"; new_project "$R"
+cat > "$R/.specclaw/analysis/module-map.md" <<'EOF'
+# Module Map
+
+**Status:** CONFIRMED by H, 2026-08-07
+
+### MOD-001 — Invoicing
+- **Business rules:** DR-001, DR-007 (co-owned with MOD-002)
+- **Depends on:** None
+
+### MOD-002 — Payments
+- **Business rules:** DR-004
+- **Depends on:** MOD-001 (needs the invoice balance, DR-001 (co-owned with MOD-003))
+
+### MOD-003 — Customer Accounts
+- **Business rules:** DR-006
+- **Depends on:** None
+EOF
+OUT="$(bash "$BASELINE_BIN" collect "$R/.specclaw" 2>&1)"
+assert_not_contains "$(rules_of "$OUT" "MOD-003")" "DR-001" \
+  "a co-ownership note on a 'Depends on' line confers nothing"
+assert_not_contains "$(rules_of "$OUT" "MOD-002")" "DR-001" \
+  "and the citing module still does not own the rule it merely cited"
+assert_contains "$(rules_of "$OUT" "MOD-002")" "DR-007" \
+  "while a note on the 'Business rules' line still confers reciprocally"
+assert_contains "$(rules_of "$OUT" "MOD-003")" "DR-006" \
+  "and the named module keeps its own declared rule"
+
+echo
+echo "-- an absent field reads as empty, never as a failed run --"
+
+# scenario_block_field's grep exits 1 on no match, and under `set -euo pipefail`
+# that status used to propagate out of the unguarded command substitutions in
+# collect (Seam layer) and record (Seam / Business rules pinned / Verifies
+# backlog item), killing the run before it printed anything at all.
+#
+# Both halves are pinned, because guarding only the tombstone case would fix
+# `collect` and leave `record` dying on a live scenario — record already skips
+# tombstones before it reads any field.
+R="$WORK/absent-field-tombstone"; new_project "$R"
+mkdir -p "$R/.specclaw/baseline"
+cat > "$R/.specclaw/baseline/scenarios.md" <<'EOF'
+## Scenarios
+
+### GM-001 — a live scenario
+
+- **Seam:** Svc.Do
+- **Seam layer:** service
+- **Business rules pinned:** DR-001
+- **Verifies backlog item:** not yet backlog-linked
+
+### GM-008 — WITHDRAWN 2026-09-12, folded into GM-001
+
+_This scenario is no longer designed. Its id stays claimed forever._
+
+## Rule Coverage Check
+
+Nothing to report.
+EOF
+if OUT="$(bash "$BASELINE_BIN" collect "$R/.specclaw" 2>&1)"; then
+  ok "a WITHDRAWN tombstone no longer kills collect (it declares no Seam layer)"
+else
+  bad "a WITHDRAWN tombstone no longer kills collect (it declares no Seam layer)" \
+      "collect exited non-zero; output was [${OUT}]"
+fi
+assert_contains "$OUT" '"status": "withdrawn"' \
+  "and the tombstone is still reported as withdrawn, not skipped silently"
+assert_contains "$OUT" '"next_gm_id": "GM-009"' \
+  "and its id stays claimed — the next free id counts past it"
+
+# A LIVE scenario missing the same field must still be REFUSED, with the message
+# record has always carried for it. That check sits after the field read, so the
+# unguarded version was precisely what kept it from ever running: the guard
+# restores this error rather than suppressing it.
+R="$WORK/absent-field-live"; new_project "$R"
+mkdir -p "$R/.specclaw/baseline/fixtures"
+cat > "$R/.specclaw/baseline/scenarios.md" <<'EOF'
+### GM-001 — a live scenario that declares no seam layer
+
+- **Seam:** Svc.Do
+- **Business rules pinned:** DR-001
+- **Verifies backlog item:** not yet backlog-linked
+EOF
+cat > "$R/.specclaw/baseline/fixtures/GM-001.json" <<'EOF'
+{"scenario_id":"GM-001","captured_at":"2026-08-07T10:15:00Z","anchor_date":"2026-08-07",
+ "legacy_commit_sha":"abc","runtime_version":"1","normalized_fields":[],
+ "input":{},"output":{"outcome":"OK","error_code":null,"threw":false,"result":{"x":1}}}
+EOF
+ERR="$(bash "$BASELINE_BIN" record "$R/.specclaw" 2>&1 >/dev/null || true)"
+if [ -f "$R/.specclaw/baseline/manifest.json" ]; then
+  bad "a live scenario with no Seam layer is still refused" "a manifest was written anyway"
+else
+  ok "a live scenario with no Seam layer is still refused"
+fi
+assert_contains "$ERR" "declares no '- **Seam layer:**' field" \
+  "and it says so out loud, instead of dying with no output at all"
+
+echo
 echo "=================================================="
 echo "Passed: $PASS   Failed: $FAIL"
 [ "$FAIL" -eq 0 ] || exit 1
