@@ -421,8 +421,14 @@ fi
 # for; it names no command to run in this repo, so the suppressed Phase A
 # verbs are not reinstated by the back door. Same copy set the post-Phase-A
 # action below cites.
+# Routed through add_attention, not set_next_action directly: NEXT_ACTION is
+# rendered ONLY by render_next, so a direct call reaches `--next` and never the
+# dashboard — which then said "what they need is in Needs attention above" over
+# an empty section. add_attention fills both channels and still promotes the
+# short form, so the two views agree.
 if [ "$PHASE_A_SUPPRESSED" -eq 1 ]; then
-  set_next_action "Phase A's analysis documents are absent here. They are produced in the **legacy** repo — not this one — and brought across: run Phase A there, then copy its artifacts into this repo (see \`docs/rebuild-workflow.md\`'s Phase B copy set)"
+  add_attention "**Phase A's analysis documents are absent here.** They are produced in the **legacy** repo — not this one — and brought across: run Phase A there, then copy its artifacts into this repo (see \`docs/rebuild-workflow.md\`'s Phase B copy set)." \
+    action "Phase A's analysis documents are absent here. They are produced in the **legacy** repo — not this one — and brought across: run Phase A there, then copy its artifacts into this repo (see \`docs/rebuild-workflow.md\`'s Phase B copy set)"
 fi
 
 # ─── Phase A5 — bf-ui (optional workstream) ───────────────────────────────────
@@ -677,8 +683,11 @@ elif [ -f "$BACKLOG" ]; then
   # application source, and it runs ONLY in the new repo. So this names the
   # human step that resolves the ambiguity and leaves the command to the human
   # who knows which repo they are standing in.
+  # Same routing as the Phase A advisory above, for the same reason: a direct
+  # set_next_action never reaches the dashboard.
   if [ -f "$MANIFEST" ]; then
-    set_next_action "Phase A is complete here. In the **rebuild** repo — not this one, unless this is it — copy the Phase A artifacts across (see \`docs/rebuild-workflow.md\`'s Phase B copy set) and scaffold the foundation" "/specclaw:bf-bootstrap"
+    add_attention "**Phase A is complete here, but no foundation is scaffolded.** In the **rebuild** repo — not this one, unless this is it — copy the Phase A artifacts across (see \`docs/rebuild-workflow.md\`'s Phase B copy set) and run \`/specclaw:bf-bootstrap\`." \
+      action "Phase A is complete here. In the **rebuild** repo — not this one, unless this is it — copy the Phase A artifacts across (see \`docs/rebuild-workflow.md\`'s Phase B copy set) and scaffold the foundation" "/specclaw:bf-bootstrap"
   fi
 else
   add_row "Target foundation" "/specclaw:bf-bootstrap" "N/A" "no rebuild-backlog.md — not a rebuild target"
