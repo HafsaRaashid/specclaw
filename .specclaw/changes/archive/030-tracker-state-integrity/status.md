@@ -15,6 +15,7 @@
 | Build | ✅ Done | 7/7 tasks |
 | Verify | ✅ Passed | PASS — 12/12 ACs, CI run 30701583431 |
 | PR | ✅ Raised | https://github.com/chan4lk/specclaw/pull/57 — PASS |
+| Archived | ✅ Done |  |
 
 ## Task Progress
 

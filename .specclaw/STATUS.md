@@ -1,27 +1,20 @@
 # 🦞 SpecClaw Dashboard
 
 **Project:** specclaw
-**Last Updated:** 2026-09-20 08:16 UTC
+**Last Updated:** 2026-09-20 10:36 UTC
 
 _4 unnumbered changes · run `/specclaw:renumber` to order them_
 
 ## Active Changes
 
 
-- ✅ **027-memory-aware-parallelism** — 5/5 tasks (100%) | 0 failed
 - 🔨 **028-phase-time-accounting** ▣ — build complete | 5/5 tasks (100%) | 0 failed
 - 🔨 **029-staged-files-auditor** ▣ — build complete | 5/5 tasks (100%) | 0 failed
-- 🔀 **030-tracker-state-integrity** — pr raised | 7/7 tasks (100%) | 0 failed | PR #57 merged
-- 🔀 **031-numbered-change-folders** — pr raised | 6/6 tasks (100%) | 0 failed | PR #60 merged
-- 🔨 **032-party-mode** — build in-progress | 8/8 tasks (100%) | 0 failed | PR #63 merged
 - 🔨 **033-session-bootstrap-router** ▣ — build complete | 5/5 tasks (100%) | 0 failed
 - 🔨 **034-systematic-debug-skill** — build complete | 6/6 tasks (100%) | 0 failed
 - 🔨 **035-task-review-gate** ▣ — build complete | 5/5 tasks (100%) | 0 failed
 - 🔨 **036-right-sized-change-paths** ▣ — build complete | 6/6 tasks (100%) | 0 failed
 - 🔨 **037-skill-trigger-evals** ▣ — build complete | 5/5 tasks (100%) | 0 failed
-- 🔍 **038-change-concurrency-lock-and-review-budget** — verify PASS | 15/15 tasks (100%) | 0 failed | PR #78 merged
-- 🔍 **039-model-invocation-opt-out** ▣ — verify PASS | 9/9 tasks (100%) | 0 failed | 1h35m
-- 🔀 **040-codex-plugin-packaging** ▣ — pr raised | 5/5 tasks (100%) | 0 failed | 1h59m
 - ✅ **analyze-command** — 5/5 tasks (100%) | 0 failed
 - ✅ **architecture-command** — 6/6 tasks (100%) | 0 failed
 - ✅ **domain-command** — 6/6 tasks (100%) | 0 failed
@@ -29,8 +22,7 @@ _4 unnumbered changes · run `/specclaw:renumber` to order them_
 
 ## Pending Proposals
 
-
-- 📋 **040-codex-skill-packaging** — proposal ready, awaiting planning
+_None._
 
 ## Recently Completed
 
@@ -61,9 +53,16 @@ _4 unnumbered changes · run `/specclaw:renumber` to order them_
 - ✅ **024-dynamic-subagents-for-build**
 - ✅ **025-git-worktrees**
 - ✅ **026-long-running-test-orchestration**
+- ✅ **027-memory-aware-parallelism**
+- ✅ **030-tracker-state-integrity**
+- ✅ **031-numbered-change-folders**
+- ✅ **032-party-mode**
+- ✅ **038-change-concurrency-lock-and-review-budget**
+- ✅ **039-model-invocation-opt-out**
+- ✅ **040-codex-plugin-packaging**
 
 ## Stats
 
-- **Total changes:** 43
-- **Active:** 17
-- **Completed:** 26
+- **Total changes:** 44
+- **Active:** 11
+- **Completed:** 33

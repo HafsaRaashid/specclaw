@@ -14,6 +14,7 @@
 | Tasks | ⚪ Pending | |
 | Build | ⚪ Pending | |
 | Verify | ✅ Passed |  |
+| Archived | ✅ Done |  |
 
 ## Task Progress
 
