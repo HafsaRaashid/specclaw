@@ -16,5 +16,6 @@
     "github",
     "azure-devops",
     "jira"
-  ]
+  ],
+  "skills": "./skills/"
 }
