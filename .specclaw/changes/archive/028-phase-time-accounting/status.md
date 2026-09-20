@@ -1,8 +1,8 @@
-# Status: specclaw debug — root-cause-first debugging protocol
+# Status: Phase time accounting — justify and explain long-running phases
 
-**Change:** 034-systematic-debug-skill
-**Started:** 2026-09-19
-**Last Updated:** 2026-09-19
+**Change:** phase-time-accounting
+**Started:** 2026-08-01
+**Last Updated:** 2026-08-01
 
 ## Progress
 
@@ -12,14 +12,14 @@
 | Spec | ⚪ Pending | |
 | Design | ⚪ Pending | |
 | Tasks | ⚪ Pending | |
-| Build | ✅ Complete | 6/6 tasks — protocol, record, halt reason, prompts, clustering, 52-case suite |
+| Build | ✅ Complete | 5/5 tasks — timer, progress, instrumentation, PR section, 55-case suite |
 | Verify | ⚪ Pending | |
+| Archived | ✅ Done |  |
 
 ## Task Progress
 
 **Completed:** 0 / 0
 **Failed:** 0
-
 
 ## Agent Runs
 
@@ -27,6 +27,4 @@
 |------|-------|-------|--------|----------|
 
 ## Issues
-
-
-**GitHub Issue:** #68
+**GitHub Issue:** #54

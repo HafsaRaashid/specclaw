@@ -1,9 +1,0 @@
-{
-  "change": "037-skill-trigger-evals",
-  "phase": "build",
-  "branch": "",
-  "size": "architectural",
-  "phases": {
-    "build": {"status":"complete","at":"2026-09-18T19:55:12Z","tasks":{"done":5,"total":5,"failed":0}}
-  }
-}

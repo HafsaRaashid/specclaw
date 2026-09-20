@@ -20,4 +20,3 @@ Verified 2026-09-20 against `spec.md`, completed `tasks.md` (6/6), and delivered
 The implementation remains optional/fail-open for legacy error logging and uses the required Bash
 and coreutils-compatible path. No E2E tier is configured; the offline protocol suite is the
 acceptance evidence.
-

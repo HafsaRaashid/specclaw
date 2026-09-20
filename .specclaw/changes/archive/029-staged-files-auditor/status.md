@@ -1,8 +1,8 @@
-# Status: Skill-trigger evals and description lint
+# Status: Staged-files auditor — a gate that verifies exactly what lands in the PR
 
-**Change:** 037-skill-trigger-evals
-**Started:** 2026-09-19
-**Last Updated:** 2026-09-19
+**Change:** staged-files-auditor
+**Started:** 2026-08-01
+**Last Updated:** 2026-08-01
 
 ## Progress
 
@@ -12,14 +12,14 @@
 | Spec | ⚪ Pending | |
 | Design | ⚪ Pending | |
 | Tasks | ⚪ Pending | |
-| Build | ✅ Complete | 5/5 tasks — lint+baseline, fixture, runner, PR wiring, CI; description rewrite deferred with evidence |
+| Build | ✅ Complete | 5/5 tasks — four-bucket gate, auditor seat, scoped add, 55-case suite |
 | Verify | ⚪ Pending | |
+| Archived | ✅ Done |  |
 
 ## Task Progress
 
 **Completed:** 0 / 0
 **Failed:** 0
-
 
 ## Agent Runs
 
@@ -27,6 +27,4 @@
 |------|-------|-------|--------|----------|
 
 ## Issues
-
-
-**GitHub Issue:** #71
+**GitHub Issue:** #55

@@ -20,4 +20,3 @@ Verified 2026-09-20 against `spec.md`, completed `tasks.md` (5/5), and delivered
 
 The current implementation retains the intended Bash/coreutils, fail-open hook behaviour and has a
 focused CI gate. No E2E tier is configured; the offline contract suite is the acceptance evidence.
-

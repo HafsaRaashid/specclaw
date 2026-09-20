@@ -1,6 +1,6 @@
 # Verification Report: 028-phase-time-accounting
 
-**Verified:** 2026-09-20  
+**Verified:** 2026-09-20
 **Verdict:** PASS
 
 ## Acceptance Criteria
@@ -28,6 +28,6 @@ None. The ShellCheck gate notes that one obsolete baseline entry could be pruned
 
 ## Summary
 
-**Passed:** 15/15 criteria  
-**Failed:** 0/15 criteria  
+**Passed:** 15/15 criteria
+**Failed:** 0/15 criteria
 **Verdict:** PASS
