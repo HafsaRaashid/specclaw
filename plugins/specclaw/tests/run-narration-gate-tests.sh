@@ -405,6 +405,50 @@ IDEM_COUNT="$(grep -c '\.specclaw/analysis/\.collect/' "$IDEM_PROJECT/.gitignore
 IDEM_COUNT="${IDEM_COUNT:-0}"
 assert_eq "F2 the .collect/ ignore line appears exactly once — init added nothing" "1" "$IDEM_COUNT"
 
+# ═══════════════════════════════════════════════════════════════════════════
+# GROUP G — the duplicated helpers stay byte-identical.
+#
+# This repo deliberately copies helper functions between standalone executables
+# (there is no sourcing convention between them) and keeps the copies identical
+# so a fix in one is a visible, greppable fix in all. specclaw-bf-quality-render
+# carries two such copies: `substitute` from specclaw-bf-quality-collect and
+# `yaml_val` from specclaw-build.
+#
+# This is pinned because the drift already happened once, during this very
+# change: the first cut of the renderer "tidied" its yaml_val copy — dropped the
+# comments, swapped `echo` for `printf '%s'`, collapsed the quote-stripping onto
+# one line — while its own comment still claimed it was copied verbatim. Nothing
+# would have caught that. The function bodies are compared, not the SC2295
+# disable directive that sits ABOVE the definition and is deliberately local.
+# ═══════════════════════════════════════════════════════════════════════════
+extract_fn() { sed -n "/^$1() {/,/^}/p" "$2"; }
+
+extract_fn yaml_val "$BIN_DIR/specclaw-build"             > "$WORK/yv-canonical.sh"
+extract_fn yaml_val "$BIN_DIR/specclaw-bf-quality-render" > "$WORK/yv-render.sh"
+if diff -q "$WORK/yv-canonical.sh" "$WORK/yv-render.sh" >/dev/null 2>&1; then
+  pass "G1 yaml_val in specclaw-bf-quality-render is byte-identical to specclaw-build's"
+else
+  fail "G1 yaml_val in specclaw-bf-quality-render has drifted from specclaw-build's"
+  diff "$WORK/yv-canonical.sh" "$WORK/yv-render.sh" | head -20
+fi
+
+extract_fn substitute "$BIN_DIR/specclaw-bf-quality-collect" > "$WORK/sub-canonical.sh"
+extract_fn substitute "$BIN_DIR/specclaw-bf-quality-render"  > "$WORK/sub-render.sh"
+if diff -q "$WORK/sub-canonical.sh" "$WORK/sub-render.sh" >/dev/null 2>&1; then
+  pass "G2 substitute in specclaw-bf-quality-render is byte-identical to the collector's"
+else
+  fail "G2 substitute in specclaw-bf-quality-render has drifted from the collector's"
+  diff "$WORK/sub-canonical.sh" "$WORK/sub-render.sh" | head -20
+fi
+
+# The canonical copy must be non-empty, or a typo'd function name would make
+# both sides empty and the comparison would pass by matching nothing.
+if [[ -s "$WORK/yv-canonical.sh" && -s "$WORK/sub-canonical.sh" ]]; then
+  pass "G3 both canonical helper extractions are non-empty (the comparison is real)"
+else
+  fail "G3 a canonical helper extraction came back empty — G1/G2 proved nothing"
+fi
+
 echo
 echo "─────────────────────────────"
 echo "PASS: $PASS   FAIL: $FAIL   SKIP: $SKIP"

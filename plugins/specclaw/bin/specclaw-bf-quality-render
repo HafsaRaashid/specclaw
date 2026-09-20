@@ -93,6 +93,19 @@ substitute() {
 # ─── config.yaml reader (copied verbatim from bin/specclaw-build, per the
 # repo's standing rule that a helper deliberately duplicated between two
 # standalone executables is kept byte-identical) ──────────────────────────────
+# Byte-identical to the yaml_val in specclaw-build — and to the copies in
+# specclaw-pr, specclaw-gh-sync, specclaw-validate-change, specclaw-discover-context,
+# specclaw-azdo-pr and specclaw-jira-issue. This repo deliberately duplicates the
+# helper between standalone executables (no sourcing convention exists between
+# them) and keeps the copies identical; run-narration-gate-tests.sh pins that.
+#
+# SC2295 fires on `${value%${BASH_REMATCH[0]}}` below and is BASELINED for all
+# seven existing copies. It is disabled here rather than fixed, because fixing it
+# in this copy alone would break the identity the convention exists to protect,
+# and fixing it in all eight is a repo-wide change that does not belong here.
+# The expansion is a run of whitespace matched by the regex above it, so there is
+# no pattern for the unquoted form to misinterpret.
+# shellcheck disable=SC2295
 yaml_val() {
   local file="$1" key="$2"
   local section field
@@ -136,15 +149,22 @@ yaml_val() {
     fi
   done < "$file"
 
+  # Strip inline `#` comments (must come BEFORE quote-stripping because
+  # values like `branch_prefix: "specclaw/"   # comment` would otherwise
+  # carry the comment into the result).
   if [[ "$value" =~ ([[:space:]]+#) ]]; then
     value="${value%%"${BASH_REMATCH[1]}"*}"
   fi
+  # Strip trailing whitespace
   if [[ "$value" =~ [[:space:]]+$ ]]; then
-    value="${value%"${BASH_REMATCH[0]}"}"
+    value="${value%${BASH_REMATCH[0]}}"
   fi
-  value="${value#\"}"; value="${value%\"}"
-  value="${value#\'}"; value="${value%\'}"
-  printf '%s' "$value"
+  # Strip surrounding quotes
+  value="${value#\"}"
+  value="${value%\"}"
+  value="${value#\'}"
+  value="${value%\'}"
+  echo "$value"
 }
 
 # project_title (copied verbatim from specclaw-bf-quality-collect) — same
