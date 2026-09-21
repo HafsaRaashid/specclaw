@@ -19,9 +19,7 @@
 
 ## Test Scripts Generated
 
-| File | Flow/Scenario Covered | Evidence |
-|---|---|---|
-{{test_scripts_rows}}
+{{test_scripts_list}}
 
 ## Execution Results
 
