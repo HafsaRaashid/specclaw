@@ -503,7 +503,7 @@ generate_html_report() {
   ex_pct="$(er_field "$exec_sec" "Pass Percentage")"
   ex_time="$(er_field "$exec_sec" "Execution Time")"
 
-  local total_display pass_display fail_display pct_num pct_display not_run_banner skip_n
+  local total_display pass_display fail_display pct_display not_run_banner skip_n
   not_run_banner=""
   if [[ "$ex_pass" =~ ^[0-9]+$ ]] && [[ "$ex_fail" =~ ^[0-9]+$ ]]; then
     skip_n=0
@@ -516,10 +516,8 @@ generate_html_report() {
     not_run_banner="1"
   fi
   if [[ "$ex_pct" =~ ^([0-9]+)% ]]; then
-    pct_num="${BASH_REMATCH[1]}"
     pct_display="$ex_pct"
   else
-    pct_num=0
     pct_display="N/A"
   fi
 
