@@ -1,0 +1,396 @@
+#!/usr/bin/env bash
+# specclaw-bf-e2e-run — executes the E2E tests bf-e2e-architect just generated
+# and mechanically patches the Execution Results section of
+# .specclaw/e2e/e2e-report.md with real Pass/Fail/Skipped counts, a pass
+# percentage, and wall-clock execution time. Also collects whatever on-failure
+# screenshots/video the run produced (run-config.json's "artifacts_dir") into
+# .specclaw/e2e/artifacts/ and lists them in the report's Artifacts section.
+#
+# Before the test command runs, it also brings up every background service
+# run-config.json declares (dependency/backend/frontend) that its own
+# check_cmd says is not already running — a database, a backend API, a
+# frontend dev server, whatever the E2E surface actually needs — one at a
+# time, waiting for each to report ready before starting the next. Anything
+# already running when this script starts is left alone; only what this
+# script itself started is torn down when it exits.
+#
+# Why this is bash, not the agent: the agent that wrote e2e-report.md has no
+# test results to report — the tests it just generated have not run yet.
+# Writing a "predicted" pass/fail count would be exactly the kind of fabricated
+# verdict this plugin refuses to produce elsewhere (see bf-quality-collect's
+# report_blocks). So the Execution Results section is bash-owned: this script
+# is the only thing that ever writes between its two anchors, and it does so
+# by actually running the generated command and reading what happened.
+#
+# Never fabricates: a test-runner output this script cannot parse is reported
+# as "NOT MEASURED", never as a guessed zero. A service that never becomes
+# ready is a recorded "not executed" reason, never a guess at whether the
+# tests would have passed anyway.
+#
+# Bash + coreutils. jq required to read run-config.json — its absence degrades
+# to a recorded "not executed" reason rather than failing the run, matching
+# this plugin's existing jq-optional degradation pattern (see specclaw-bf-status).
+set -uo pipefail
+
+BEGIN_ANCHOR="<!-- e2e-report:execution-results:begin -->"
+END_ANCHOR="<!-- e2e-report:execution-results:end -->"
+ARTIFACTS_BEGIN="<!-- e2e-report:artifacts:begin -->"
+ARTIFACTS_END="<!-- e2e-report:artifacts:end -->"
+
+usage() {
+  cat <<'EOF'
+Usage: specclaw-bf-e2e-run run <specclaw_dir> [--timeout SECONDS]
+
+Reads <specclaw_dir>/e2e/run-config.json (written by bf-e2e-architect),
+runs install_cmd, brings up every declared service not already running
+(services[], each gated by its own check_cmd), then runs test_cmd and
+patches the Execution Results section of <specclaw_dir>/e2e/e2e-report.md
+with the real Pass/Fail/Skipped counts, a Pass Percentage, and the
+wall-clock Execution Time. Every service this script itself started is torn
+down before it exits; anything already running beforehand is left alone.
+
+Also collects whatever on-failure screenshots/video the run produced
+(run-config.json's "artifacts_dir") into <specclaw_dir>/e2e/artifacts/ and
+lists them in the report's Artifacts section.
+
+Run from the repository root — commands in run-config.json are relative to
+its own "working_dir" field, which is itself relative to the current directory.
+
+Never fails the caller's run over a test failure or a missing precondition:
+a non-zero exit here means this script itself could not proceed (bad
+arguments, no report to patch). An E2E suite that fails, or that cannot be
+run at all, is still recorded in the report and this script still exits 0.
+
+Options:
+  --timeout SECONDS   Kill the test command after this many seconds (default: 900).
+  -h, --help          Show this help message.
+EOF
+}
+
+die() { echo "ERROR: $*" >&2; exit 1; }
+warn() { echo "WARN: $*" >&2; }
+
+case "${1:-}" in
+  -h|--help) usage; exit 0 ;;
+  run) shift ;;
+  "") usage >&2; echo >&2; echo "ERROR: subcommand 'run' is required." >&2; exit 2 ;;
+  *) die "Unknown subcommand: $1. Run specclaw-bf-e2e-run --help for usage." ;;
+esac
+
+SPECCLAW_DIR="${1:-}"
+[ -n "$SPECCLAW_DIR" ] || { usage >&2; echo >&2; die "<specclaw_dir> is required."; }
+shift
+
+TIMEOUT_SECONDS=900
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --timeout)
+      TIMEOUT_SECONDS="${2:-}"
+      [ -n "$TIMEOUT_SECONDS" ] || die "--timeout requires a value."
+      shift 2 ;;
+    *) die "Unknown option: $1" ;;
+  esac
+done
+
+[ -d "$SPECCLAW_DIR" ] || die "'$SPECCLAW_DIR' does not exist or is not a directory."
+
+RUN_CONFIG="$SPECCLAW_DIR/e2e/run-config.json"
+REPORT="$SPECCLAW_DIR/e2e/e2e-report.md"
+
+[ -f "$REPORT" ] || die "no report at ${REPORT}. Run /specclaw:bf-e2e first — this script only executes what that command already generated."
+
+grep -qF "$BEGIN_ANCHOR" "$REPORT" ||
+  die "no Execution Results anchors in ${REPORT} — it may predate this feature. Re-run /specclaw:bf-e2e to regenerate it."
+
+# ─── Report patching ──────────────────────────────────────────────────────────
+
+# Replace everything strictly between <begin> and <end> (both anchor lines
+# themselves are kept, untouched) with the contents of <content_file>. Plain
+# POSIX awk (getline < file), so this runs the same under gawk, mawk, and the
+# awk Git-for-Windows bundles — no external templating dependency. Used for
+# both anchored regions (Execution Results, Artifacts) via the anchor pair
+# passed in, so the two can never drift into two different substitution rules.
+inject_block() {
+  local file="$1" begin="$2" end="$3" content_file="$4"
+  awk -v b="$begin" -v e="$end" -v rf="$content_file" '
+    BEGIN { while ((getline line < rf) > 0) rep = rep line "\n" }
+    index($0, b) == 1 { print; printf "%s", rep; inb=1; next }
+    index($0, e) == 1 { inb=0; print; next }
+    inb { next }
+    { print }
+  ' "$file" > "${file}.tmp" && mv "${file}.tmp" "$file"
+}
+
+# write_result <executed_line> <pass> <fail> <skip> <pct> <time>
+write_result() {
+  local tmp; tmp="$(mktemp)"
+  {
+    echo "**Executed:** $1"
+    echo "**Pass Count:** $2"
+    echo "**Fail Count:** $3"
+    echo "**Skipped Count:** $4"
+    echo "**Pass Percentage:** $5"
+    echo "**Execution Time:** $6"
+  } > "$tmp"
+  inject_block "$REPORT" "$BEGIN_ANCHOR" "$END_ANCHOR" "$tmp"
+  rm -f "$tmp"
+}
+
+# write_artifacts <content_file> — a report predating this feature (no
+# Artifacts anchors) degrades to a warning rather than a hard failure; the
+# Execution Results patch above still succeeds either way.
+write_artifacts() {
+  if grep -qF "$ARTIFACTS_BEGIN" "$REPORT" 2>/dev/null; then
+    inject_block "$REPORT" "$ARTIFACTS_BEGIN" "$ARTIFACTS_END" "$1"
+  else
+    warn "no Artifacts anchors in ${REPORT} (older report?) — skipping artifact section update"
+  fi
+}
+
+write_artifacts_none() {
+  local tmp; tmp="$(mktemp)"
+  echo "None — $1" > "$tmp"
+  write_artifacts "$tmp"
+  rm -f "$tmp"
+}
+
+not_executed() {
+  local reason="$1"
+  write_result "no — ${reason}" "—" "—" "—" "—" "—"
+  write_artifacts_none "no tests ran (${reason})"
+  echo "NOT EXECUTED: ${reason}" >&2
+  exit 0
+}
+
+[ -f "$RUN_CONFIG" ] || not_executed "no .specclaw/e2e/run-config.json was generated for this run"
+
+command -v jq >/dev/null 2>&1 || not_executed "jq is not installed — cannot read run-config.json"
+
+jq -e . "$RUN_CONFIG" >/dev/null 2>&1 || die "${RUN_CONFIG} is not valid JSON."
+
+WORKING_DIR="$(jq -r '.working_dir // "."' "$RUN_CONFIG")"
+INSTALL_CMD="$(jq -r '.install_cmd // ""' "$RUN_CONFIG")"
+TEST_CMD="$(jq -r '.test_cmd // ""' "$RUN_CONFIG")"
+ARTIFACTS_DIR="$(jq -r '.artifacts_dir // ""' "$RUN_CONFIG")"
+
+[ -n "$TEST_CMD" ] || not_executed "run-config.json has no test_cmd"
+[ -d "$WORKING_DIR" ] || die "working_dir '${WORKING_DIR}' from run-config.json does not exist."
+
+# ─── Install ──────────────────────────────────────────────────────────────────
+
+if [ -n "$INSTALL_CMD" ]; then
+  echo "Running install: ${INSTALL_CMD}" >&2
+  INSTALL_LOG="$(mktemp)"
+  if ! ( cd "$WORKING_DIR" && eval "$INSTALL_CMD" ) >"$INSTALL_LOG" 2>&1; then
+    warn "install command failed — last 30 lines of its output:"
+    tail -30 "$INSTALL_LOG" >&2
+    rm -f "$INSTALL_LOG"
+    not_executed "install command failed (\`${INSTALL_CMD}\`)"
+  fi
+  rm -f "$INSTALL_LOG"
+fi
+
+# ─── Services (dependencies, backend APIs, frontend apps — optional) ────────
+#
+# Each entry in .specclaw/e2e/run-config.json's "services" array is started in
+# array order, one at a time, only if its own check_cmd says it is not already
+# running — a dependency a human already has running locally (a local
+# postgres, an already-running dev server) is left exactly as it is. Only
+# services THIS script started are ever torn down, and only ones this script
+# itself started go into STARTED_PIDS.
+#
+# check_cmd does double duty: "is it already up" before starting, and "has it
+# become ready yet" while polling after starting. A service with no check_cmd
+# cannot be verified either way — it gets an unconditional fixed wait instead
+# of a poll, which is strictly worse, hence the agent is told to always supply
+# one where the service exposes any observable signal.
+
+STARTED_PIDS=()
+STARTED_NAMES=()
+
+cleanup_services() {
+  local i
+  for (( i=${#STARTED_PIDS[@]}-1; i>=0; i-- )); do
+    kill "${STARTED_PIDS[$i]}" >/dev/null 2>&1 || true
+    wait "${STARTED_PIDS[$i]}" 2>/dev/null || true
+  done
+}
+trap cleanup_services EXIT
+
+# Run <cmd> from <dir>, capped at a short wall-clock ceiling so a hanging
+# check_cmd (e.g. a curl against a filtered port) cannot stall the whole
+# service-startup loop indefinitely.
+run_check() {
+  local dir="$1" cmd="$2"
+  if command -v timeout >/dev/null 2>&1; then
+    ( cd "$dir" 2>/dev/null && timeout 5 bash -c "$cmd" ) >/dev/null 2>&1
+  else
+    ( cd "$dir" 2>/dev/null && eval "$cmd" ) >/dev/null 2>&1
+  fi
+}
+
+SERVICE_FAILURE=""
+SERVICES_JSON="$(jq -c '.services[]? // empty' "$RUN_CONFIG" 2>/dev/null || true)"
+if [ -n "$SERVICES_JSON" ]; then
+  while IFS= read -r SVC; do
+    [ -n "$SVC" ] || continue
+
+    SVC_NAME="$(jq -r '.name // "service"' <<<"$SVC")"
+    SVC_START="$(jq -r '.start_cmd // ""' <<<"$SVC")"
+    SVC_CHECK="$(jq -r '.check_cmd // ""' <<<"$SVC")"
+    SVC_DIR="$(jq -r '.working_dir // empty' <<<"$SVC")"
+    [ -n "$SVC_DIR" ] || SVC_DIR="$WORKING_DIR"
+    SVC_TIMEOUT="$(jq -r 'if (.ready_timeout_seconds | type) == "number" then .ready_timeout_seconds else 30 end' <<<"$SVC")"
+    SVC_POLL="$(jq -r 'if (.poll_interval_seconds | type) == "number" then .poll_interval_seconds else 2 end' <<<"$SVC")"
+
+    if [ -z "$SVC_START" ]; then
+      warn "service '${SVC_NAME}' has no start_cmd — skipping it"
+      continue
+    fi
+    if [ ! -d "$SVC_DIR" ]; then
+      SERVICE_FAILURE="service '${SVC_NAME}': working_dir '${SVC_DIR}' does not exist"
+      break
+    fi
+
+    if [ -n "$SVC_CHECK" ] && run_check "$SVC_DIR" "$SVC_CHECK"; then
+      echo "Service '${SVC_NAME}' is already running — not starting it." >&2
+      continue
+    fi
+
+    echo "Starting service '${SVC_NAME}': ${SVC_START}" >&2
+    ( cd "$SVC_DIR" && eval "$SVC_START" ) >/dev/null 2>&1 &
+    STARTED_PIDS+=("$!")
+    STARTED_NAMES+=("$SVC_NAME")
+
+    if [ -n "$SVC_CHECK" ]; then
+      SVC_ELAPSED=0
+      SVC_READY=0
+      while [ "$SVC_ELAPSED" -lt "$SVC_TIMEOUT" ]; do
+        if run_check "$SVC_DIR" "$SVC_CHECK"; then SVC_READY=1; break; fi
+        sleep "$SVC_POLL"
+        SVC_ELAPSED=$((SVC_ELAPSED + SVC_POLL))
+      done
+      if [ "$SVC_READY" -eq 0 ]; then
+        SERVICE_FAILURE="service '${SVC_NAME}' did not become ready within ${SVC_TIMEOUT}s (check_cmd: \`${SVC_CHECK}\`)"
+        break
+      fi
+      echo "Service '${SVC_NAME}' is ready (after up to ${SVC_ELAPSED}s)." >&2
+    else
+      warn "service '${SVC_NAME}' has no check_cmd — waiting ${SVC_TIMEOUT}s unconditionally; readiness not confirmed"
+      sleep "$SVC_TIMEOUT"
+    fi
+  done <<< "$SERVICES_JSON"
+fi
+
+if [ -n "$SERVICE_FAILURE" ]; then
+  not_executed "$SERVICE_FAILURE"
+fi
+
+# ─── Test ─────────────────────────────────────────────────────────────────────
+
+OUT_LOG="$(mktemp)"
+START_TS=$(date +%s)
+RC=0
+if command -v timeout >/dev/null 2>&1; then
+  ( cd "$WORKING_DIR" && timeout "$TIMEOUT_SECONDS" bash -c "$TEST_CMD" ) >"$OUT_LOG" 2>&1 || RC=$?
+else
+  ( cd "$WORKING_DIR" && eval "$TEST_CMD" ) >"$OUT_LOG" 2>&1 || RC=$?
+fi
+END_TS=$(date +%s)
+ELAPSED=$((END_TS - START_TS))
+
+cleanup_services
+trap - EXIT
+
+# ─── Parse pass/fail/skip from the captured output ──────────────────────────
+#
+# Best-effort across common runners:
+#   Playwright / Jest / pytest / Cypress: "N passed" / "N failed" / "N skipped"
+#   Mocha:                                "N passing" / "N failing" / "N pending"
+#   dotnet test:                          "Passed: N" / "Failed: N" / "Skipped: N"
+# A count this cannot find is reported as NOT MEASURED, never fabricated as 0 —
+# the same rule the rest of this plugin applies to every other bash-computed
+# figure.
+extract_count() {
+  local log="$1"; shift
+  local pat m
+  for pat in "$@"; do
+    m="$(grep -oE "$pat" "$log" 2>/dev/null | tail -1 | grep -oE '[0-9]+' | tail -1 || true)"
+    if [ -n "$m" ]; then printf '%s' "$m"; return 0; fi
+  done
+  return 1
+}
+
+PASS="$(extract_count "$OUT_LOG" '[0-9]+[[:space:]]+(passed|passing)' 'Passed:[[:space:]]*[0-9]+' || true)"
+FAIL="$(extract_count "$OUT_LOG" '[0-9]+[[:space:]]+(failed|failing)' 'Failed:[[:space:]]*[0-9]+' || true)"
+SKIP="$(extract_count "$OUT_LOG" '[0-9]+[[:space:]]+(skipped|pending)' 'Skipped:[[:space:]]*[0-9]+' || true)"
+
+if [ -z "$PASS" ] && [ -z "$FAIL" ]; then
+  PASS="NOT MEASURED — could not parse the test runner's output"
+  FAIL="NOT MEASURED"
+  SKIP="NOT MEASURED"
+  PCT="NOT MEASURED"
+else
+  [ -n "$PASS" ] || PASS=0
+  [ -n "$FAIL" ] || FAIL=0
+  [ -n "$SKIP" ] || SKIP=0
+  TOTAL=$((PASS + FAIL + SKIP))
+  if [ "$TOTAL" -gt 0 ]; then
+    PCT="$(( (PASS * 100 + TOTAL / 2) / TOTAL ))%"
+  else
+    PCT="NOT MEASURED — 0 tests reported"
+  fi
+fi
+
+rm -f "$OUT_LOG"
+
+# ─── Collect on-failure screenshots/video, if any ────────────────────────────
+#
+# artifacts_dir is wherever bf-e2e-architect configured the selected framework
+# to write on-failure captures (Failure Capture, its Task 3) — relative to
+# WORKING_DIR. Whatever is actually found there is copied, whole-tree, into a
+# timestamped folder under .specclaw/e2e/artifacts/ so a later run can never
+# silently overwrite an earlier one's evidence. An empty/missing directory is
+# not an error — it is the expected shape of a fully-passing run, or of a
+# framework/platform with no failure-capture capability — so it is reported as
+# "None" with the reason, never left blank and never treated as a failure.
+if [ -z "$ARTIFACTS_DIR" ]; then
+  write_artifacts_none "no artifacts_dir declared in run-config.json"
+else
+  ARTIFACTS_SRC="$WORKING_DIR/$ARTIFACTS_DIR"
+  if [ ! -d "$ARTIFACTS_SRC" ] || [ -z "$(find "$ARTIFACTS_SRC" -type f 2>/dev/null)" ]; then
+    write_artifacts_none "nothing found in \`${ARTIFACTS_DIR}\` — every test passed, or the selected framework/platform has no failure-capture capability"
+  else
+    ARTIFACTS_STAMP="$(date +%Y%m%d-%H%M%S)"
+    ARTIFACTS_DEST="$SPECCLAW_DIR/e2e/artifacts/$ARTIFACTS_STAMP"
+    mkdir -p "$ARTIFACTS_DEST"
+    cp -r "$ARTIFACTS_SRC/." "$ARTIFACTS_DEST/"
+    ROWS_TMP="$(mktemp)"
+    {
+      echo "| Type | Path |"
+      echo "|---|---|"
+      while IFS= read -r f; do
+        REL="${f#"$ARTIFACTS_DEST"/}"
+        case "$REL" in
+          *.png|*.jpg|*.jpeg|*.gif|*.bmp) TYPE="Screenshot" ;;
+          *.webm|*.mp4|*.mov|*.avi)       TYPE="Video" ;;
+          *)                              TYPE="Other" ;;
+        esac
+        echo "| ${TYPE} | \`.specclaw/e2e/artifacts/${ARTIFACTS_STAMP}/${REL}\` |"
+      done < <(find "$ARTIFACTS_DEST" -type f | LC_ALL=C sort)
+    } > "$ROWS_TMP"
+    write_artifacts "$ROWS_TMP"
+    rm -f "$ROWS_TMP"
+    ARTIFACTS_COUNT="$(find "$ARTIFACTS_DEST" -type f | wc -l | tr -d '[:space:]')"
+    echo "Captured ${ARTIFACTS_COUNT} artifact file(s) under .specclaw/e2e/artifacts/${ARTIFACTS_STAMP}/" >&2
+  fi
+fi
+
+write_result "yes (exit ${RC})" "$PASS" "$FAIL" "$SKIP" "$PCT" "${ELAPSED}s"
+
+if [ "${#STARTED_NAMES[@]}" -gt 0 ]; then
+  echo "Services started and torn down for this run: ${STARTED_NAMES[*]}" >&2
+fi
+echo "E2E execution finished: exit ${RC}, ${ELAPSED}s. Pass=${PASS} Fail=${FAIL} Skip=${SKIP} Pass%=${PCT}"
+[ "$RC" -eq 0 ] || warn "the E2E test command exited non-zero (${RC})."
+exit 0

@@ -176,9 +176,10 @@ NEXT_ACTION_AFTER=""
 # Count of phases this dashboard SEQUENCES whose own artifact is absent —
 # computed from the rows bash actually emitted, never inferred from NEXT_CMD
 # being empty. Deliberately excludes /specclaw:bf-ui (optional; reports N/A
-# when unstarted) and /specclaw:bf-e2e (declares no `.specclaw/` artifact at
-# all, so its row reads "—" in every repo for ever). Those two are precisely
-# why "no command is recommended" cannot be rendered as "nothing left to do".
+# when unstarted) and /specclaw:bf-e2e (not part of the sequenced lifecycle
+# ordering, so its row reads "—" until someone chooses to run it). Those two
+# are precisely why "no command is recommended" cannot be rendered as
+# "nothing left to do".
 UNRUN_SEQUENCED=0
 mark_unrun_sequenced() { UNRUN_SEQUENCED=$((UNRUN_SEQUENCED + 1)); }
 
@@ -635,6 +636,61 @@ else
   fi
 fi
 
+# ─── Phase A9 — bf-prototype (REINTERPRET only, and then mandatory) ───────────
+#
+# Entirely absent from the dashboard under every other UI fidelity policy. A
+# project that answered FAITHFUL, THEME-ONLY, or nothing at all never sees this
+# row, because for it the stage does not exist.
+#
+# When it DOES apply it is not optional and it is not last-minute: it stands
+# between the legacy analysis and the whole new repo. So a REINTERPRET project
+# with no prototype yet gets this as its next step, ahead of bf-bootstrap —
+# recommending bootstrap there would name a command whose first check is this
+# one.
+
+PROTO_DIR="$SPECCLAW_DIR/prototype"
+PROTO_MANIFEST="$PROTO_DIR/prototype-manifest.json"
+FIDELITY=""
+if [ -f "$DECISIONS" ]; then
+  FIDELITY="$({ awk '/^### SQ-013[[:space:]]/{c=1;next} c&&/^### /{c=0} c' "$DECISIONS" 2>/dev/null \
+    | grep -m1 -- '^- \*\*Decision:\*\*' | sed -E 's/^- \*\*Decision:\*\* *//'; } || true)"
+fi
+case "$FIDELITY" in
+  *REINTERPRET*)
+    if [ -f "$PROTO_MANIFEST" ] && command -v jq >/dev/null 2>&1 && jq -e . "$PROTO_MANIFEST" >/dev/null 2>&1; then
+      PROTO_READY="$(jq -r '.prototype_ready // false' "$PROTO_MANIFEST" 2>/dev/null | tr -d '\r')"
+      PROTO_TOTAL="$(jq -r '[.screens[]?] | length' "$PROTO_MANIFEST" 2>/dev/null | tr -d '\r')"
+      PROTO_APPR="$(jq -r '[.screens[]? | select(.status == "APPROVED")] | length' "$PROTO_MANIFEST" 2>/dev/null | tr -d '\r')"
+      PROTO_WHY="$(jq -r '(.not_ready_reasons // []) | join(", ")' "$PROTO_MANIFEST" 2>/dev/null | tr -d '\r')"
+      if [ "$PROTO_READY" = "true" ]; then
+        add_row "Prototype approval" "/specclaw:bf-prototype" "DONE" "READY — ${PROTO_APPR}/${PROTO_TOTAL} screen(s) approved"
+      else
+        add_row "Prototype approval" "/specclaw:bf-prototype" "ATTN" "NOT-READY — ${PROTO_APPR}/${PROTO_TOTAL} screen(s) approved${PROTO_WHY:+; ${PROTO_WHY}}"
+        add_attention "**The redesign is not approved yet${PROTO_WHY:+ — ${PROTO_WHY}}.** Nothing in the new repo may start until \`/specclaw:bf-prototype --record\` prints \`PROTOTYPE: READY\`: \`/specclaw:bf-bootstrap\` refuses to scaffold and \`/specclaw:propose\` refuses every item. A screen reading STALE needs re-approving against the current prototype; one reading PROVISIONAL is waiting on a question a human has to decide." \
+          action "The redesign is not approved yet${PROTO_WHY:+ — ${PROTO_WHY}}" "/specclaw:bf-prototype --record"
+        set_next "/specclaw:bf-prototype --record" "SQ-013 is REINTERPRET and the prototype is not recorded READY — the whole new repo is gated on it"
+      fi
+    elif [ -f "$PROTO_MANIFEST" ]; then
+      add_row "Prototype approval" "/specclaw:bf-prototype" "ATTN" "\`prototype-manifest.json\` present but unreadable"
+      add_attention "\`.specclaw/prototype/prototype-manifest.json\` could not be parsed. Until it can be, nothing here can say which screens the client approved — and the new repo's gates fail closed on exactly that, so bootstrap and propose will both refuse." \
+        action "\`.specclaw/prototype/prototype-manifest.json\` is unreadable — inspect it, or re-record" "/specclaw:bf-prototype --record"
+    elif [ -d "$PROTO_DIR" ]; then
+      add_row "Prototype approval" "/specclaw:bf-prototype" "ATTN" "briefed; nothing recorded"
+      add_attention "A prototype has been briefed but never recorded. Put it in front of the client, capture one screenshot per \`PS-###\` into \`.specclaw/prototype/screens/\`, and have a named stakeholder write their verdict into \`prototype-approvals.md\` — that file is written by a human and by nobody else. Then run \`--record\`." \
+        action "Prototype briefed but never recorded — capture the screenshots and collect the client's approvals" "/specclaw:bf-prototype --record"
+      set_next "/specclaw:bf-prototype --record" "SQ-013 is REINTERPRET and a prototype has been briefed but never recorded"
+    else
+      add_row "Prototype approval" "/specclaw:bf-prototype" "—" "not started (SQ-013 is REINTERPRET, so this stage is required)"
+      if [ -f "$TARGET_ARCH" ]; then
+        set_next "/specclaw:bf-prototype" "SQ-013 is REINTERPRET, so the redesign has to be approved by a named client stakeholder before any of the new repo is built"
+      fi
+    fi
+    ;;
+  *)
+    : # Not a REINTERPRET project. This stage does not exist for it.
+    ;;
+esac
+
 # ─── Phase B1 — bf-bootstrap (runs in the NEW repo) ───────────────────────────
 
 BOOT_MANIFEST="$BOOTSTRAP/bootstrap-manifest.json"
@@ -807,13 +863,39 @@ fi
 
 # ─── Phase B3 — bf-e2e ────────────────────────────────────────────────────────
 #
-# Deliberately reported as untracked rather than omitted. /specclaw:bf-e2e
-# writes page objects and test scripts wherever the target repo's own
-# conventions put them — it declares no .specclaw/ artifact at all — so there is
-# nothing here to read. Guessing from a test directory would invent a signal
-# that command does not emit, and dropping the row would read as "no such
-# phase" to anyone scanning the table for it.
-add_row "E2E coverage" "/specclaw:bf-e2e" "—" "not tracked — writes no \`.specclaw/\` artifact"
+# /specclaw:bf-e2e writes page objects and test scripts wherever the target
+# repo's own conventions put them, but it also persists a summary report at a
+# fixed, predictable path — .specclaw/e2e/e2e-report.md — so this phase reads
+# that artifact the same way every other phase row does. The report's
+# Execution Results section (specclaw-bf-e2e-run) is a one-off recorded run,
+# never a lifecycle verdict, so DONE here means "the report was generated" —
+# same as every other phase row — not "the generated tests are accepted".
+# /specclaw:verify remains the one authoritative pass/fail gate.
+# A single **<Label>:** line's value, verbatim — same doc_date convention
+# (grep | sed, guarded with `|| true` so a missing line under `set -o
+# pipefail` reads as empty rather than aborting the whole dashboard).
+e2e_report_field() {
+  local file="$1" label="$2"
+  { grep -m1 -- "^\\*\\*${label}:\\*\\*" "$file" 2>/dev/null \
+    | sed -E "s/^\\*\\*${label}:\\*\\* *//" | sed -E 's/[[:space:]]+$//'; } || true
+}
+
+E2E_REPORT="$SPECCLAW_DIR/e2e/e2e-report.md"
+if [ -f "$E2E_REPORT" ]; then
+  E2E_DETAIL="generated $(doc_date "$E2E_REPORT")"
+  E2E_PASS="$(e2e_report_field "$E2E_REPORT" "Pass Count")"
+  E2E_FAIL="$(e2e_report_field "$E2E_REPORT" "Fail Count")"
+  if [ -n "$E2E_PASS" ] && [ -n "$E2E_FAIL" ] && [[ "$E2E_PASS" =~ ^[0-9]+$ ]] && [[ "$E2E_FAIL" =~ ^[0-9]+$ ]]; then
+    E2E_DETAIL="${E2E_DETAIL}; last recorded run: ${E2E_PASS} passed, ${E2E_FAIL} failed"
+    if [ "$E2E_FAIL" -gt 0 ]; then
+      add_attention "**The E2E suite's last recorded run had ${E2E_FAIL} failure(s)** (\`.specclaw/e2e/e2e-report.md\`). This was a one-off run for the report, not a lifecycle gate — read the report, fix what's failing, and re-run \`specclaw-bf-e2e-run run .specclaw\` to refresh it." \
+        action "The E2E suite's last recorded run had ${E2E_FAIL} failure(s) — read \`.specclaw/e2e/e2e-report.md\`"
+    fi
+  fi
+  add_row "E2E coverage" "/specclaw:bf-e2e" "DONE" "${E2E_DETAIL} — see \`.specclaw/e2e/e2e-report.md\`"
+else
+  add_row "E2E coverage" "/specclaw:bf-e2e" "—" "not yet run"
+fi
 
 # ─── Render ───────────────────────────────────────────────────────────────────
 
@@ -897,10 +979,10 @@ if [ -n "$NEXT_CMD" ]; then
   fi
 else
   # NOT "no phase is unstarted", which this used to say and which was simply
-  # false: /specclaw:bf-ui is optional and /specclaw:bf-e2e declares no artifact
-  # at all, so both can sit at "—" forever while this line claims otherwise.
-  # What is true is the narrower statement — every phase this dashboard knows
-  # how to sequence has run.
+  # false: /specclaw:bf-ui is optional and /specclaw:bf-e2e is not part of the
+  # sequenced lifecycle ordering (see NEXT_CMD above), so both can sit at "—"
+  # forever while this line claims otherwise. What is true is the narrower
+  # statement — every phase this dashboard knows how to sequence has run.
   # Same gate as render_next: only the row count can tell "finished" apart from
   # "nothing to recommend HERE".
   if [ "$UNRUN_SEQUENCED" -eq 0 ]; then

@@ -208,6 +208,43 @@ OUT="$(run_status "$R")"
 assert_contains "$OUT" "missing: domain-model.md functional-spec.md module-map.md" \
   "a backlog citing MOD-001 never implies bf-domain has run"
 
+# ── 2b. E2E coverage reads from its own persisted report ─────────────────────
+echo
+echo "-- E2E coverage: read from e2e-report.md, not assumed untracked --"
+
+R="$WORK/e2e-not-run"; new_empty "$R"
+OUT="$(run_status "$R")"
+assert_not_contains "$OUT" "not tracked" "the old 'not tracked — writes no artifact' wording is gone"
+assert_contains "$OUT" "| E2E coverage | \`/specclaw:bf-e2e\` | — | not yet run |" \
+  "no report yet reads as 'not yet run'"
+
+R="$WORK/e2e-run"; new_empty "$R"
+mkdir -p "$R/.specclaw/e2e"
+printf '**Date generated:** 2026-08-15\n' > "$R/.specclaw/e2e/e2e-report.md"
+OUT="$(run_status "$R")"
+assert_contains "$OUT" "| E2E coverage | \`/specclaw:bf-e2e\` | DONE | generated 2026-08-15 — see \`.specclaw/e2e/e2e-report.md\` |" \
+  "a written report flips the row to DONE with its own generation date"
+
+# A report carrying a recorded execution (specclaw-bf-e2e-run's Execution
+# Results section) surfaces the pass/fail counts in the row, and a failure
+# raises attention — but never as a lifecycle verdict (PD-01 stays intact:
+# this is still just "the report exists", nothing here blocks or gates).
+R="$WORK/e2e-run-clean"; new_empty "$R"
+mkdir -p "$R/.specclaw/e2e"
+printf '**Date generated:** 2026-08-16\n**Pass Count:** 10\n**Fail Count:** 0\n' > "$R/.specclaw/e2e/e2e-report.md"
+OUT="$(run_status "$R")"
+assert_contains "$OUT" "generated 2026-08-16; last recorded run: 10 passed, 0 failed" \
+  "a clean recorded run surfaces its counts in the row"
+assert_not_contains "$OUT" "last recorded run had" "and raises no attention when nothing failed"
+
+R="$WORK/e2e-run-failing"; new_empty "$R"
+mkdir -p "$R/.specclaw/e2e"
+printf '**Date generated:** 2026-08-16\n**Pass Count:** 8\n**Fail Count:** 2\n' > "$R/.specclaw/e2e/e2e-report.md"
+OUT="$(run_status "$R")"
+assert_contains "$OUT" "last recorded run: 8 passed, 2 failed" "a failing recorded run surfaces its counts too"
+assert_contains "$OUT" "The E2E suite's last recorded run had 2 failure(s)" \
+  "and is raised as attention, not silently folded into DONE"
+
 # ── 3. The module-map confirmation gate ──────────────────────────────────────
 echo
 echo "-- module map confirmation --"
@@ -855,7 +892,8 @@ assert_eq "2" "$RC" "--next with no directory at all exits 2"
 # PD-01 as a structural assertion rather than a promise. Every lifecycle skill
 # reaches the recommendation through this script, and the three that are not
 # lifecycle commands do not carry one at all: bf-status IS this output,
-# bf-quality has no phase row, and bf-e2e declares no .specclaw/ artifact.
+# bf-quality has no phase row, and bf-e2e has a phase row (reading its own
+# persisted e2e-report.md) but is not sequenced into the ordering below.
 echo
 echo "-- single source of truth, across the skills --"
 
