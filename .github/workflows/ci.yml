@@ -53,6 +53,8 @@ jobs:
         run: bash plugins/specclaw/tests/run-party-tests.sh
       - name: Run prototype stack-resolver tests
         run: bash plugins/specclaw/tests/run-prototype-stack-resolver-tests.sh
+      - name: Run prototype screen-coverage tests
+        run: bash plugins/specclaw/tests/run-prototype-screen-coverage-tests.sh
       - name: Run prototype status-machine tests
         run: bash plugins/specclaw/tests/run-prototype-status-machine-tests.sh
       - name: Run prototype readiness-scope tests

@@ -322,7 +322,9 @@ decision_title_of() {
 #      whose Sanctioning decision cell cites SQ-006. (That citation is what
 #      makes it the frontend row — the role of the question identifies it, so
 #      no framework name is needed to find it.)
-#   Both resolved and disagreeing is a hard stop naming both, never a pick.
+#   decisions.md wins outright when present; the target-architecture.md row is
+#   a derived summary used ONLY as a fallback when SQ-006 is absent there, never
+#   a co-equal authority whose wording can trigger a disagreement stop.
 #
 # Resolution order, language:
 #   1. decisions.md's decided SQ-015.
@@ -335,7 +337,9 @@ decision_title_of() {
 #   3. A decided CQ/UQ whose TITLE names the frontend-language role. Again a
 #      role match, not a value match.
 #   4. target-architecture.md's DECIDED row citing SQ-015.
-#   Two sources disagreeing is a hard stop naming both.
+#   SQ-015 wins outright when present; the rest are fallbacks for a still-open
+#   slot, tried in order (role → arch → parenthetical), never rival authorities
+#   cross-checked against each other for equality.
 #
 # Nothing here ever resolves to a value that is absent from the record, and the
 # language is never defaulted — not from the framework, not from convention.
@@ -415,19 +419,18 @@ resolve_frontend_stack() {
   STACK_STOP_REASON=""
 
   # ── Framework ──────────────────────────────────────────────────────────
+  # decisions.md's decided SQ-006 is AUTHORITATIVE when present. target-
+  # architecture.md is a readability artifact that /specclaw:bf-blueprint
+  # regenerates FROM decisions.md; its mapping-cell holds a concise summary of
+  # the same decision, never an independent one, so its wording will differ
+  # from the decision's full prose. It MUST NOT be treated as a co-equal
+  # authority that can hard-stop on a wording difference — two records derived
+  # from one decision hold two WORDINGS of it, not two decisions. The arch row
+  # is therefore consulted only as a fallback when decisions.md does not
+  # resolve SQ-006 at all.
   local fw_dec fw_arch
   fw_dec="$(decision_text_of "$decisions_file" "$FRAMEWORK_SQ_ID")"
   fw_arch="$(arch_row_value_of "$arch_file" "$FRAMEWORK_SQ_ID")"
-
-  if [ -n "$fw_dec" ] && [ -n "$fw_arch" ] && [ "$(norm_key "$fw_dec")" != "$(norm_key "$fw_arch")" ]; then
-    STACK_STOP_REASON="framework: ${decisions_rel} and ${arch_rel} disagree.
-  ${decisions_rel} (${FRAMEWORK_SQ_ID}): ${fw_dec}
-  ${arch_rel} (DECIDED row citing ${FRAMEWORK_SQ_ID}): ${fw_arch}
-Two records of one decision cannot both be right, and picking one would be this
-command deciding the stack. Correct whichever is stale — re-run
-/specclaw:bf-clarify --resolve, then /specclaw:bf-blueprint — and re-run."
-    return 1
-  fi
 
   if [ -n "$fw_dec" ]; then
     STACK_FW_VALUE="$fw_dec"; STACK_FW_ID="$FRAMEWORK_SQ_ID"; STACK_FW_SOURCE="$decisions_rel"
@@ -449,10 +452,23 @@ the client's) -> answer it by name -> /specclaw:bf-clarify --resolve ->
   fi
 
   # ── Language ───────────────────────────────────────────────────────────
-  # Every source that resolves is collected, then compared. A disagreement is
-  # a stop; agreement collapses to one value with the first source's citation.
+  # SQ-015 is the DEDICATED frontend-language decision and is AUTHORITATIVE
+  # when present: taken outright, and never cross-checked against the derived
+  # target-architecture.md summary or the framework parenthetical. Those are
+  # weaker readings of the SAME decision — a wording difference between a
+  # decision and its own derived summary is not two rival languages, and the
+  # framework parenthetical in particular can read a component library such as
+  # "(MUI)" as if it were a language. Only when SQ-015 is undecided do the
+  # fallbacks below apply, each a weaker reading of one still-open slot rather
+  # than a rival authority.
   local lang_dec lang_paren lang_role="" lang_role_id="" lang_arch
   lang_dec="$(decision_text_of "$decisions_file" "$LANGUAGE_SQ_ID")"
+  if [ -n "$lang_dec" ]; then
+    STACK_LANG_VALUE="$lang_dec"; STACK_LANG_ID="$LANGUAGE_SQ_ID"; STACK_LANG_SOURCE="$decisions_rel"
+    STACK_LANG_BY="$(decision_field_of "$decisions_file" "$LANGUAGE_SQ_ID" "Decided by")"
+    STACK_LANG_DATE="$(decision_field_of "$decisions_file" "$LANGUAGE_SQ_ID" "Date")"
+    return 0
+  fi
   lang_paren="$(single_word_parenthetical "$STACK_FW_VALUE")"
   lang_arch="$(arch_row_value_of "$arch_file" "$LANGUAGE_SQ_ID")"
 
@@ -467,43 +483,32 @@ the client's) -> answer it by name -> /specclaw:bf-clarify --resolve ->
     fi
   done < <(decided_ids_of "$decisions_file")
 
-  # Candidates as value/id/source/description quads, highest-authority first.
-  # The winner keeps its own citation; any later candidate that disagrees is a
-  # stop, so the order below decides which citation is recorded, never which
-  # value is believed.
-  local seen_val="" seen_desc="" conflict=""
-  local cand_val cand_id cand_src cand_desc quad
+  # SQ-015 was undecided (handled above), so these are ordered fallbacks for a
+  # still-open slot, not rival authorities: the first that resolves wins and
+  # keeps its own citation. They are NOT cross-checked against each other — a
+  # decisions.md role decision, the framework parenthetical, and the derived
+  # target-architecture.md row are weaker readings of one unanswered question,
+  # and comparing their free-form wordings for equality is exactly the false
+  # "disagreement" this resolver must not raise. Order: role → arch → paren
+  # (the leading "dec" slot is always empty here — SQ-015 short-circuited above
+  # — and is kept only so the citation table stays aligned with the resolution-
+  # order comment at the top of this function).
+  local seen_val="" cand_val cand_id cand_src quad
   for quad in \
     "dec" "role" "arch" "paren"
   do
     case "$quad" in
-      dec)   cand_val="$lang_dec";   cand_id="$LANGUAGE_SQ_ID"; cand_src="$decisions_rel"
-             cand_desc="${decisions_rel} (${LANGUAGE_SQ_ID})" ;;
-      role)  cand_val="$lang_role";  cand_id="$lang_role_id";   cand_src="$decisions_rel"
-             cand_desc="${decisions_rel} (${lang_role_id})" ;;
-      arch)  cand_val="$lang_arch";  cand_id="$LANGUAGE_SQ_ID"; cand_src="$arch_rel"
-             cand_desc="${arch_rel} (DECIDED row citing ${LANGUAGE_SQ_ID})" ;;
-      paren) cand_val="$lang_paren"; cand_id="$STACK_FW_ID";    cand_src="$decisions_rel"
-             cand_desc="${decisions_rel} (${STACK_FW_ID}, parenthetical)" ;;
+      dec)   cand_val="$lang_dec";   cand_id="$LANGUAGE_SQ_ID"; cand_src="$decisions_rel" ;;
+      role)  cand_val="$lang_role";  cand_id="$lang_role_id";   cand_src="$decisions_rel" ;;
+      arch)  cand_val="$lang_arch";  cand_id="$LANGUAGE_SQ_ID"; cand_src="$arch_rel" ;;
+      paren) cand_val="$lang_paren"; cand_id="$STACK_FW_ID";    cand_src="$decisions_rel" ;;
     esac
     [ -n "$cand_val" ] || continue
     if [ -z "$seen_val" ]; then
-      seen_val="$cand_val"; seen_desc="$cand_desc"
+      seen_val="$cand_val"
       STACK_LANG_ID="$cand_id"; STACK_LANG_SOURCE="$cand_src"
-    elif [ "$(norm_key "$cand_val")" != "$(norm_key "$seen_val")" ]; then
-      conflict="${conflict}${conflict:+
-}  ${cand_desc}: ${cand_val}"
     fi
   done
-
-  if [ -n "$conflict" ]; then
-    STACK_STOP_REASON="language: the decision record names more than one frontend language.
-  ${seen_desc}: ${seen_val}
-${conflict}
-Two records of one decision cannot both be right, and picking one would be this
-command deciding the stack. Correct whichever is stale and re-run."
-    return 1
-  fi
 
   if [ -z "$seen_val" ]; then
     STACK_STOP_REASON="language: no decided SQ/CQ names the frontend language.
@@ -608,6 +613,41 @@ backlog_out_of_scope_scr() {
         sub(/^.*out of scope:[[:space:]]*/, "", reason)
         printf "%s\t%s\n", id, reason
       }
+    }
+  ' "$backlog" 2>/dev/null || true
+}
+
+# The IN-SCOPE half of the same bash-computed UI Screen Coverage section: each
+# screen the rebuild WILL build, mapped to the backlog item(s) that render it,
+# emitted as "SCR-NNN<TAB>BL-NNN,BL-NNN". Under a REINTERPRET policy the backlog
+# carries NO per-item SCR-### citation in the item body (no UI fidelity line is
+# rendered there), so this generated section is the canonical place the
+# item→screen join lives — read it rather than the item bodies, the same
+# source-of-truth discipline backlog_out_of_scope_scr uses for the other half.
+# A line counts as in-scope only if it carries at least one BL-### and is NOT an
+# out-of-scope line; the two halves are mutually exclusive by construction. BL
+# ids are de-duplicated within a line. Nothing here is inferred — a screen with
+# no mapping line simply does not appear.
+backlog_in_scope_scr() {
+  local backlog="$1"
+  [ -f "$backlog" ] || return 0
+  awk '
+    /^### UI Screen Coverage/ { ins=1; next }
+    ins && /^#{1,3} / && $0 !~ /^### UI Screen Coverage/ { ins=0 }
+    ins && $0 ~ /SCR-[0-9]/ && $0 ~ /BL-[0-9]/ && $0 !~ /out of scope:/ {
+      line = $0
+      sub(/\r$/, "", line)
+      if (!match(line, /SCR-[0-9]+/)) next
+      sid = substr(line, RSTART, RLENGTH)
+      rest = line
+      bids = ""
+      while (match(rest, /BL-[0-9]+/)) {
+        bid = substr(rest, RSTART, RLENGTH)
+        if (index("," bids ",", "," bid ",") == 0)
+          bids = bids (bids == "" ? "" : ",") bid
+        rest = substr(rest, RSTART + RLENGTH)
+      }
+      if (bids != "") printf "%s\t%s\n", sid, bids
     }
   ' "$backlog" 2>/dev/null || true
 }
@@ -724,6 +764,29 @@ Nothing was written."
     ITEM_SCR["$bid"]="$(block_of "$backlog_file" "$bid" | grep -oE 'SCR-[0-9]{3}' | awk '!seen[$0]++' | paste -sd',' - || true)"
   done < "$workdir/items.tsv"
 
+  # Fold the generated UI Screen Coverage section's in-scope mappings into
+  # ITEM_SCR, so the reverse index below resolves the item→screen join under
+  # EVERY policy — including REINTERPRET, where the item bodies carry no SCR-###
+  # token at all. Under FAITHFUL/THEME-ONLY (or any project whose items cite
+  # SCR-### in their body) this agrees with what was parsed above, and the
+  # de-dup keeps a doubly-recorded screen from being counted twice. FAIL-CLOSED:
+  # a mapping to a BL id this backlog does not carry as an item is ignored here
+  # (never entered into ITEM_SCR for an unknown key), and a mapping to a
+  # non-active item still fails the active check in the reverse index below, so
+  # a stale or wrong coverage line can never conjure an in-scope screen.
+  local cov_sid cov_bids cov_bid
+  while IFS=$'\t' read -r cov_sid cov_bids; do
+    [ -n "$cov_sid" ] || continue
+    for cov_bid in ${cov_bids//,/ }; do
+      [ -n "$cov_bid" ] || continue
+      [ -n "${ITEM_STATUS[$cov_bid]:-}" ] || continue   # unknown BL id → ignore (fail-closed)
+      case ",${ITEM_SCR[$cov_bid]:-}," in
+        *",${cov_sid},"*) ;;                             # already recorded → de-dup
+        *) ITEM_SCR["$cov_bid"]="${ITEM_SCR[$cov_bid]:+${ITEM_SCR[$cov_bid]},}${cov_sid}" ;;
+      esac
+    done
+  done < <(backlog_in_scope_scr "$backlog_file")
+
   declare -A OOS_REASON=()
   local oid oreason
   while IFS=$'\t' read -r oid oreason; do
@@ -731,7 +794,7 @@ Nothing was written."
     OOS_REASON["$oid"]="$oreason"
   done < "$workdir/oos.tsv"
 
-  local screens_json="" sid stitle
+  local screens_json="" sid stitle conflicts=""
   first=true
   while IFS=$'\t' read -r sid stitle; do
     [ -n "$sid" ] || continue
@@ -763,13 +826,27 @@ Nothing was written."
     done
 
     local scope="uncovered"
-    if [ -n "$citing_active" ]; then scope="in-scope"
+    if [ -n "$citing_active" ] && [ -n "${OOS_REASON[$sid]:-}" ]; then
+      # Recorded BOTH in scope and out of scope. Never silently pick one — a
+      # screen cannot be both built and deliberately dropped, and choosing
+      # either way hides a real contradiction in the backlog.
+      scope="conflict"
+      conflicts="${conflicts}${conflicts:+; }${sid} (in scope via ${citing_active}; also recorded out of scope)"
+    elif [ -n "$citing_active" ]; then scope="in-scope"
     elif [ -n "${OOS_REASON[$sid]:-}" ]; then scope="out-of-scope"
     fi
 
     if $first; then first=false; else screens_json="${screens_json}, "; fi
     screens_json="${screens_json}{\"scr\": \"$(json_escape "$sid")\", \"title\": \"$(json_escape "$stitle")\", \"scope\": \"${scope}\", \"backlog_items\": \"$(json_escape "$citing_active")\", \"backlog_items_all\": \"$(json_escape "$citing")\", \"modules\": \"$(json_escape "$mods")\", \"rules\": \"$(json_escape "$rules")\", \"out_of_scope_reason\": \"$(json_escape "${OOS_REASON[$sid]:-}")\"}"
   done < "$workdir/screens.tsv"
+
+  # A screen recorded both in scope and out of scope is a contradiction in the
+  # backlog's own coverage record; surface it and stop rather than emit a
+  # screen_counts that quietly resolved it. Fail-closed, and it names every
+  # offending screen so the fix (re-run /specclaw:bf-rebuild-plan) is obvious.
+  if [ -n "$conflicts" ]; then
+    die "UI Screen Coverage conflict — screen(s) recorded BOTH in scope and out of scope in rebuild-backlog.md. A screen cannot be both built and deliberately dropped; fix the UI Screen Coverage section (re-run /specclaw:bf-rebuild-plan) so each screen is one or the other: ${conflicts}"
+  fi
 
   # ── T3: how much of the inventory has no join at all. The agent raises a
   # PQ per screen; bash reports the proportion so the agent can stop when
