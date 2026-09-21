@@ -267,8 +267,30 @@ Fill it from your own Task 1-4 findings — never re-derive or re-detect anythin
 * **Detection Summary** — the same platform/stack/surface/tooling/selection findings as chat response item 1.
 * **Setup / Execution Commands** — the same install/start/test commands as chat response item 2.
 * **Page Objects Generated** — one row per page/screen (or service/API) object you wrote in Task 3: its file path, and which real user-facing surface (or API boundary, for a genuinely API-only target) it encapsulates. This is a summary table, not the source again — the code files you wrote are the source of truth.
-* **Test Scripts Generated** — one row per test script you wrote: its file path, and which flow/scenario it covers, with the evidence (file + what it showed, per Task 4) its expected outcome rests on.
-* **Gaps** — the flows that could not be converted to E2E, reusing the same reasoning as Task 4 ("cannot be driven through the required E2E surface" / not-yet-implemented target flow / no traceable business rule found, etc).
+* **Test Scripts Generated** — grouped by **module/feature area**, never a flat file listing. A raw file path (`src/e2e/tests/login.spec.ts`) means nothing to a non-technical reader; a business-feature grouping ("User Authentication", "Checkout", "Account Settings") does. Format:
+
+  ```markdown
+  ### Module: <plain business-feature name, e.g. "User Authentication">
+
+  - <one-line scenario summary, in plain language, no file path>
+    - <specific check/assertion 1, in plain language>
+    - <specific check/assertion 2, in plain language>
+    - Evidence: `<file:line or citation>` — <what it showed, per Task 4>
+    - Test file: `<file path>`
+
+  ### Module: <next module>
+
+  - <next scenario>
+    - ...
+  ```
+
+  Rules:
+
+  * Every scenario sits under a `### Module: <name>` heading — never a bare scenario with no module above it. Derive the module name from the real business feature the flow belongs to (informed by directory structure, route names, or `domain-model.md`/`codebase-report.md` if present) — never a raw folder or file name verbatim. Group multiple test scripts under the same module heading when they genuinely belong to the same feature area; a small target may legitimately have only one module.
+  * The scenario's own top-level bullet is the plain-language summary only — the file path never appears there. It moves to its own `Test file:` sub-bullet, last, so a developer can still trace it without it dominating what a non-technical reader sees first.
+  * List every check the test script actually makes as its own sub-bullet — not a paraphrase of "asserts several things," the real individual assertions (e.g. "shows a validation message," "keeps the submit button disabled," "does not call the login API"). This is what lets a reader reconcile a test-runner's own aggregate pass count (which counts individual assertions/checks) against the number of scenarios shown here (which counts test files) — if a `Total Tests` count of 32 sits above only 12 scenario bullets with no sub-bullets, that mismatch reads as a bug in the report, not as "one test script asserts several things."
+  * End each scenario's sub-bullets with an `Evidence:` line citing the file/line the expected outcome rests on (per Task 4), then a `Test file:` line — in that order, last. A test script with only one real assertion still gets exactly one check sub-bullet plus its `Evidence:`/`Test file:` lines; never invent extra checks to pad the count.
+* **Gaps** — the flows that could not be converted to E2E, reusing the same reasoning as Task 4 ("cannot be driven through the required E2E surface" / not-yet-implemented target flow / no traceable business rule found, etc). Write each gap as its own top-level markdown bullet (`- <flow>: <reason>`) — this section is mechanically counted for the HTML report's Gaps stat card, so a paragraph of prose instead of bullets undercounts it. If there are none, write exactly `- None — every considered flow was converted to an E2E test.` as the sole bullet.
 * **Execution Results** — leave the text **exactly** as it appears between the template's `<!-- e2e-report:execution-results:begin -->` / `:end -->` anchors, including the anchors themselves. Do not fill this section, compute a count, or write a placeholder of your own. It is bash-owned: `specclaw-bf-e2e-run` overwrites everything between those two anchors after actually running the generated tests, in a separate step outside your control. Writing anything here yourself — even a well-intentioned guess — would only be silently discarded or, worse, read as a real result before the tests have run.
 * **Artifacts** — leave the text **exactly** as it appears between the template's `<!-- e2e-report:artifacts:begin -->` / `:end -->` anchors, including the anchors themselves, for the same reason as Execution Results: you have no captured screenshots/video to report at write time. `specclaw-bf-e2e-run` fills this in mechanically after running the tests and finding whatever `artifacts_dir` (Task 6) actually contains.
 

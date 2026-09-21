@@ -41,6 +41,22 @@
 #     "None" with a reason, never a blank section; a "not executed" run clears
 #     Artifacts the same way it clears Execution Results.
 #
+#   - THE HTML REPORT IS A MECHANICAL TRANSFORM OF THE FINISHED MARKDOWN, NEVER
+#     A SEPARATE SOURCE OF TRUTH. Its stat cards must agree with the markdown
+#     numbers exactly, and it is regenerated (never appended to) on every run.
+#
+#   - THE TEST SCENARIOS LIST IS FOR EVERYONE, IN FRONT OF THE FOLD, GROUPED BY
+#     MODULE — NEVER BY RAW FILE PATH. A scenario's headline is its
+#     plain-language summary only; the file path is real but de-emphasized,
+#     moved to a small "Test file:" metadata line alongside "Evidence:" —
+#     never the thing a non-technical reader sees first. Positioned before the
+#     collapsed Technical Details, not inside it.
+#
+#   - AGENT-AUTHORED CONTENT CAN NEVER REACH THE SHELL. A title/section
+#     containing `$(...)`, backticks, or `<script>` must render as inert
+#     escaped text in the HTML — never get evaluated while this script builds
+#     the file, and never break out of its HTML context.
+#
 # Bash + coreutils. jq required (this script degrades gracefully without it;
 # this suite still needs it to author the run-config.json fixtures compactly,
 # so it skips with a note when jq is absent).
@@ -368,6 +384,162 @@ COPIED="$(find "$R/.specclaw/e2e/artifacts" -type f 2>/dev/null | wc -l | tr -d 
 assert_eq "2" "$COPIED" "both files actually landed on disk under .specclaw/e2e/artifacts/"
 AFTER_REST="$(rest_of_report "$R")"
 assert_eq "$BEFORE_REST" "$AFTER_REST" "and every other section of the report is still untouched"
+
+# ── 17. HTML report: verdict banner, donut, stat cards, and tables match ────
+echo
+echo "-- HTML report: verdict banner, donut chart, stat cards and tables agree with the markdown --"
+
+# A fully custom report (not the raw {{placeholder}} template) so Detection
+# Summary / Page Objects / Test Scripts / Gaps have real content to render.
+seed_filled_report() {
+  local root="$1" title="$2" gaps_block="$3"
+  mkdir -p "$root/.specclaw/e2e" "$root/app"
+  cp "$TEMPLATE" "$root/.specclaw/e2e/e2e-report.md"
+  cat > "$root/.specclaw/e2e/e2e-report.md" <<MDEOF
+# E2E Test Report: ${title}
+
+**Path analyzed:** .
+**Date generated:** 2026-09-21
+
+## Detection Summary
+
+Platform: **Web (SPA)**. Stack: React, from \`package.json\`.
+
+## Setup / Execution Commands
+
+\`\`\`bash
+npm install
+npx playwright test
+\`\`\`
+
+## Page Objects Generated
+
+| File | Real Surface Encapsulated |
+|---|---|
+| src/e2e/pages/LoginPage.ts | Login screen |
+
+## Test Scripts Generated
+
+### Module: User Authentication
+
+- Login rejects empty password
+  - Shows a validation message when the password field is empty
+  - Keeps the submit button disabled
+  - Evidence: \`src/validators/login.ts:12\`
+  - Test file: \`src/e2e/tests/login.spec.ts\`
+
+### Module: Checkout
+
+- Checkout blocks an empty cart
+  - Shows an error when checkout is attempted with zero items
+  - Evidence: \`src/components/Cart.tsx:44\`
+  - Test file: \`src/e2e/tests/checkout.spec.ts\`
+
+## Execution Results
+
+<!-- e2e-report:execution-results:begin -->
+{{execution_results}}
+<!-- e2e-report:execution-results:end -->
+
+## Artifacts
+
+<!-- e2e-report:artifacts:begin -->
+{{artifacts}}
+<!-- e2e-report:artifacts:end -->
+
+## Gaps
+
+${gaps_block}
+MDEOF
+}
+
+R="$WORK/html-stats"; rm -rf "$R"
+seed_filled_report "$R" "Acme Storefront" \
+  "- Admin bulk-delete flow: not reachable from the public UI.
+- Legacy CSV export: feature flag disabled, cannot be driven through the E2E surface."
+jq -n '{working_dir:"app", install_cmd:"", test_cmd:"echo \"12 passed\"; echo \"2 failed\"; echo \"1 skipped\""}' \
+  > "$R/.specclaw/e2e/run-config.json"
+(cd "$R" && bash "$BIN" run .specclaw) >/dev/null 2>&1
+HTML="$R/.specclaw/e2e/e2e-report.html"
+[ -f "$HTML" ] && ok "e2e-report.html is written" || bad "e2e-report.html is written" "file missing"
+H="$(cat "$HTML" 2>/dev/null || true)"
+assert_contains "$H" "Acme Storefront" "the title is carried through"
+assert_contains "$H" "<div class=\"stat-value stat-total\">15</div>" "Total = Pass + Fail + Skipped (12+2+1)"
+assert_contains "$H" "<div class=\"stat-value stat-pass\">12</div>" "Passed matches the markdown's Pass Count"
+assert_contains "$H" "<div class=\"stat-value stat-fail\">2</div>" "Failed matches the markdown's Fail Count"
+assert_contains "$H" "<div class=\"stat-value stat-gaps\">2</div>" "Gaps counts the two bullet items"
+assert_contains "$H" "verdict-banner shadow-sm mb-4 bg-warning text-dark" "a mostly-passing run gets the amber 'Needs Attention' banner"
+assert_contains "$H" "12 of 15 checks passed, but 2 failed." "the banner states the result in one plain-English sentence"
+assert_contains "$H" "conic-gradient(#198754 0% 80%, #dc3545 80% 93%, #adb5bd 93% 100%)" "the pass-rate donut's slices match the real Pass/Fail/Skipped split"
+assert_contains "$H" "<div class=\"fs-4 fw-bold\">80%</div>" "the donut's own centre label matches the Pass Percentage"
+assert_contains "$H" "cdn.jsdelivr.net/npm/bootstrap" "styling is pulled from a CDN, not vendored"
+assert_contains "$H" "<th>File</th><th>Real Surface Encapsulated</th>" "the Page Objects table survives the transform"
+assert_contains "$H" "Admin bulk-delete flow" "gap bullets are listed in the Gaps card, not just counted"
+assert_contains "$H" "<details class=\"tech-details" "developer-only content (stack, run commands) sits behind a single collapsible section"
+assert_contains "$H" "Technical Details (for developers)" "labelled plainly, so a non-technical reader knows it's optional"
+assert_not_contains "$H" "Tests Written" "the old technical-only test table is gone — Test Scenarios is now the one place this content lives"
+
+# The plain-language Test Scenarios list, grouped by module/feature (never by
+# raw file path), with the individual checks each script makes nested
+# underneath — this is what lets a reader reconcile a test-runner's own
+# aggregate pass count against the (smaller) number of named scenarios, and
+# it's the thing this whole feature exists for.
+assert_contains "$H" "Test Scenarios <span class=\"badge bg-primary\">2 scenario(s) · 7 checks</span>" \
+  "the badge shows both the scenario count and the individual-check count"
+assert_contains "$H" "module-title\">📦 User Authentication</h3>" "scenarios are grouped under a plain-language module heading"
+assert_contains "$H" "module-title\">📦 Checkout</h3>" "one heading per module, not just the first"
+assert_contains "$H" "scenario-headline\"><span class=\"scenario-icon\">🎯</span> Login rejects empty password</div>" \
+  "the scenario headline is the plain-language summary — no raw file path in it"
+assert_not_contains "$H" "scenario-headline\"><span class=\"scenario-icon\">🎯</span> <strong>src/" \
+  "confirmed: the file path never leads the headline a non-technical reader sees first"
+assert_contains "$H" "<li>Shows a validation message when the password field is empty</li>" \
+  "the individual checks under each scenario are listed as sub-bullets, not collapsed into the headline"
+assert_contains "$H" "<li class=\"meta-item\">Evidence: <code>src/validators/login.ts:12</code></li>" \
+  "the evidence citation is still present, inline code preserved, but styled as de-emphasized metadata"
+assert_contains "$H" "<li class=\"meta-item\">Test file: <code>src/e2e/tests/login.spec.ts</code></li>" \
+  "the file path itself survives too, just moved out of the headline and into the same de-emphasized metadata line"
+SCENARIOS_POS="$(printf '%s' "$H" | grep -bo 'Test Scenarios' | head -1 | cut -d: -f1)"
+DETAILS_POS="$(printf '%s' "$H" | grep -bo '<details class="tech-details' | head -1 | cut -d: -f1)"
+if [ -n "$SCENARIOS_POS" ] && [ -n "$DETAILS_POS" ] && [ "$SCENARIOS_POS" -lt "$DETAILS_POS" ]; then
+  ok "Test Scenarios sits in front of the collapsed Technical Details, not inside it"
+else
+  bad "Test Scenarios sits in front of the collapsed Technical Details, not inside it" \
+    "scenarios at byte ${SCENARIOS_POS:-?}, details at byte ${DETAILS_POS:-?}"
+fi
+
+# ── 18. HTML report: not-executed state degrades to placeholders, not errors ─
+echo
+echo "-- HTML report: a not-executed run shows placeholders and a banner --"
+
+R="$WORK/html-not-executed"; rm -rf "$R"
+seed_filled_report "$R" "No Config Yet" "- None — every considered flow was converted to an E2E test."
+(cd "$R" && bash "$BIN" run .specclaw) >/dev/null 2>&1
+H="$(cat "$R/.specclaw/e2e/e2e-report.html" 2>/dev/null || true)"
+assert_contains "$H" "<div class=\"stat-value stat-total\">—</div>" "Total shows an em-dash, never a fabricated 0"
+assert_contains "$H" "verdict-banner shadow-sm mb-4 bg-secondary text-white" "a not-executed run gets the neutral grey 'Not Run Yet' banner"
+assert_contains "$H" "Not Run Yet" "with a plain-English headline, not just a technical field"
+assert_contains "$H" "<div class=\"stat-value stat-gaps\">0</div>" "a lone 'None' gap bullet counts as zero"
+assert_contains "$H" "Every flow that was considered could be turned into an automated test." \
+  "and the Gaps card shows a friendly all-clear message, not the raw 'None —' bullet"
+
+# ── 19. HTML report never executes or corrupts on hostile agent content ─────
+echo
+echo "-- HTML report: \$(...), backticks and <script> in agent content are inert --"
+
+R="$WORK/html-injection"; rm -rf "$R"
+seed_filled_report "$R" 'Sketchy $(touch INJECTED.marker) `id` <script>alert(1)</script>' \
+  "- Uses \$HOME and \`\$(whoami)\` in its own description: must render as text."
+jq -n '{working_dir:"app", install_cmd:"", test_cmd:"echo \"1 passed\""}' \
+  > "$R/.specclaw/e2e/run-config.json"
+OUT="$(cd "$R" && bash "$BIN" run .specclaw 2>&1)"; RC=$?
+assert_eq "0" "$RC" "exits 0 even with hostile content in the report"
+[ -f "$R/app/INJECTED.marker" ] && bad "the \$(...) in the title is never executed" \
+  "found INJECTED.marker — command substitution ran" \
+  || ok "the \$(...) in the title is never executed"
+H="$(cat "$R/.specclaw/e2e/e2e-report.html" 2>/dev/null || true)"
+assert_not_contains "$H" "<script>alert(1)</script>" "a literal <script> tag never survives into the HTML"
+assert_contains "$H" "&lt;script&gt;alert(1)&lt;/script&gt;" "it is escaped to inert text instead"
+assert_contains "$H" "\$(touch INJECTED.marker)" "the \$(...) text itself is preserved, just not evaluated"
 
 echo
 echo "=================================================="
