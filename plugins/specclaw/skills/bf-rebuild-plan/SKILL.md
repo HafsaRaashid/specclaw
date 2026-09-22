@@ -13,10 +13,11 @@ Determine the invocation mode from the user's message: **refresh mode** if it co
 ## Step 1 — Collect
 
 ```bash
-specclaw-bf-rebuild-collect collect .specclaw [--refresh] [--module MOD-###]
+mkdir -p .specclaw/analysis/.collect
+specclaw-bf-rebuild-collect collect .specclaw [--refresh] [--module MOD-###] > .specclaw/analysis/.collect/rebuild-plan.json
 ```
 
-Pass `--refresh` only in refresh mode, and `--module MOD-###` only if the user named a module. This single step:
+Pass `--refresh` only in refresh mode, and `--module MOD-###` only if the user named a module. **Check the exit status before spawning anything below**, and never hand the agent a path to a half-written file. This single step:
 
 - Checks that all five `.specclaw/analysis/*.md` documents exist — the four analysis documents plus `module-map.md`, which declares the `MOD-###` modules every backlog item is grouped under. **If it exits non-zero for this reason, surface its stderr message to the user verbatim and stop** — it names exactly which document(s) are missing and which command produces each (`module-map.md` comes from `/specclaw:bf-domain`). Don't retry, don't attempt a partial backlog from partial input, and never invent a grouping to work around a missing map.
 - **Fails if `--module` names no active module in the map**, listing the ones that do exist. A withdrawn module cannot be planned — its id stays claimed as a tombstone.
@@ -27,7 +28,7 @@ Pass `--refresh` only in refresh mode, and `--module MOD-###` only if the user n
 
 `Agent` tool, `subagent_type: "bf-rebuild-planner"`, on the model from `config.yaml` `models.review` (default: `anthropic/claude-sonnet-4-5`) — same model family as its sibling analysis agents, since this is still read-only analysis of already-written documents, not spec/design authoring for a change. Pass as context:
 
-- The collected JSON from Step 1.
+- The path `.specclaw/analysis/.collect/rebuild-plan.json` — it reads that file directly.
 - The resolved paths of the five analysis documents, plus whichever optional inputs are present (from `optional_inputs` in the JSON), for the agent to `Read` directly.
 - **Tell the agent explicitly which mode it is running**: `first-run` (the JSON's `mode` field will read `"first-run"`) or `refresh` (`"refresh"`).
 - **Tell it explicitly whether this run is module-scoped**, and to which `MOD-###` (the JSON's `module_scope`). In a scoped run the agent drafts only that module's items, directives, and coverage lines — see its own Behaviour 7.

@@ -1,5 +1,5 @@
 ---
-description: Mandatory design-approval stage for a brownfield rebuild that decided SQ-013 REINTERPRET — and inert for every other project. Produces a prototype brief (one redesigned screen per legacy screen, cited to SCR-###/DR-###/BL-### evidence, with the decided frontend framework and language each carrying its citation), hands it to the UI/prototype skill named in config.yaml, allocates permanent PS-### ids, raises every proposed behaviour change as a PQ-### instead of building it, and records the human's screenshots and named approvals into a tamper-evident manifest whose PROTOTYPE: READY line is the gate into the new repo. specclaw contains no UI generator: it owns the records and the gates, never the prototype. The prototype is thrown away after approval — never copied to the new repo, never adopted as the production foundation. Run in the legacy repo after /specclaw:bf-blueprint; nothing in the new repo may start until it prints READY.
+description: Mandatory design-approval stage for a brownfield rebuild that decided SQ-013 REINTERPRET; inert otherwise. Briefs a redesigned prototype and gates the new repo on the client's approval (PROTOTYPE: READY). Run after /specclaw:bf-blueprint, when SQ-013 is REINTERPRET.
 ---
 
 # specclaw bf-prototype
@@ -27,10 +27,11 @@ Determine the mode from the user's message:
 ### 1. Collect
 
 ```bash
-specclaw-bf-prototype collect .specclaw
+mkdir -p .specclaw/analysis/.collect
+specclaw-bf-prototype collect .specclaw > .specclaw/analysis/.collect/prototype.json
 ```
 
-Deterministic, no agent, writes nothing. It resolves the preconditions in order and **stops on the first one that fails, naming the exact id or file**:
+Deterministic, no agent, writes nothing beyond that collected-facts file. **Check the exit status before spawning anything below, and never hand the agent a path to a half-written file.** It resolves the preconditions in order and **stops on the first one that fails, naming the exact id or file**:
 
 - `SQ-013` decided `REINTERPRET` — otherwise this stage does not apply.
 - The **frontend framework** and the **frontend language**, each resolved from the decision record with a citation (`SQ-006` and `SQ-015`, or a `DECIDED` frontend row in `target-architecture.md`, or both in one answer written `<framework> (<language>)`).
@@ -45,7 +46,7 @@ If `config.yaml` has no `prototype.skill`, or the named skill cannot be located:
 
 ### 2. Spawn the agent
 
-`Agent` tool, `subagent_type: "bf-prototype-architect"`. Pass the collected JSON, the project root, and the two paths it may write: `.specclaw/prototype/prototype-brief.md` and (append-only) `.specclaw/analysis/pending-questions.md`.
+`Agent` tool, `subagent_type: "bf-prototype-architect"`. Pass the path `.specclaw/analysis/.collect/prototype.json` — it reads that file directly — the project root, and the two paths it may write: `.specclaw/prototype/prototype-brief.md` and (append-only) `.specclaw/analysis/pending-questions.md`.
 
 Tell it explicitly that it may not choose a framework or a language, may not allocate a `CQ-###`, and may not write `prototype-approvals.md`.
 
