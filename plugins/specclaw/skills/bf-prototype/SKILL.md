@@ -1,5 +1,5 @@
 ---
-description: Mandatory design-approval stage for a brownfield rebuild that decided SQ-013 REINTERPRET — and inert for every other project. Produces a prototype brief (one redesigned screen per legacy screen, cited to SCR-###/DR-###/BL-### evidence, with the decided frontend framework and language each carrying its citation), hands it to the UI/prototype skill named in config.yaml, allocates permanent PS-### ids, raises every proposed behaviour change as a PQ-### instead of building it, and records the human's screenshots and named approvals into a tamper-evident manifest whose PROTOTYPE: READY line is the gate into the new repo. specclaw contains no UI generator: it owns the records and the gates, never the prototype. The prototype is thrown away after approval — never copied to the new repo, never adopted as the production foundation. Run in the legacy repo after /specclaw:bf-blueprint; nothing in the new repo may start until it prints READY.
+description: Mandatory design-approval stage for a brownfield rebuild that decided SQ-013 REINTERPRET; inert otherwise. Briefs a redesigned prototype and gates the new repo on the client's approval (PROTOTYPE: READY). Run after /specclaw:bf-blueprint, when SQ-013 is REINTERPRET.
 ---
 
 # specclaw bf-prototype
