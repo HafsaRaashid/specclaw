@@ -156,13 +156,22 @@ J="$(collect_json "$WORK/e")"
 assert_eq "Runescript" "$(printf '%s' "$J" | jq -r '.stack.language.value')" "CQ route: language resolved"
 assert_eq "CQ-031" "$(printf '%s' "$J" | jq -r '.stack.language.sanctioned_by')" "CQ route: language cites the CQ"
 
-# ── 6. The two sources disagree. A stop naming BOTH, never a pick. ─────────
-make_repo "$WORK/f" "$(fw_block 'Kestrelize')" '| Legacy shell | Tessera | SQ-006 | DECIDED |'
-OUT="$(collect_out "$WORK/f")"; RC=$?
-assert_eq "1" "$RC" "sources disagree on framework: collect exits non-zero"
-assert_contains "$OUT" "Kestrelize" "…and names the value decisions.md holds"
-assert_contains "$OUT" "Tessera" "…and names the value target-architecture.md holds"
-assert_contains "$OUT" "disagree" "…and calls it a disagreement rather than resolving it"
+# ── 6. decisions.md is AUTHORITATIVE over a differing target-architecture.md
+# row. The arch row is a summary /specclaw:bf-blueprint derives FROM the same
+# decision, never a co-equal human source, so when decisions.md resolves SQ-006
+# its value wins outright and the arch row is ignored — no "disagree" stop,
+# whatever the arch row's wording. (A language is supplied so the run reaches a
+# clean resolution rather than stopping on the missing language.) ────────────
+make_repo "$WORK/f" "$(fw_block 'Kestrelize')
+$(lang_block 'Runescript')" '| Legacy shell | Tessera | SQ-006 | DECIDED |'
+J="$(collect_json "$WORK/f")"; RC=$?
+assert_eq "0" "$RC" "decisions.md decides framework, arch row differs: collect succeeds"
+assert_eq "Kestrelize" "$(printf '%s' "$J" | jq -r '.stack.framework.value')" \
+  "…and decisions.md's value wins outright"
+assert_eq ".specclaw/analysis/decisions.md" "$(printf '%s' "$J" | jq -r '.stack.framework.source')" \
+  "…and the source recorded is decisions.md, not the architecture doc"
+assert_not_contains "$J" "Tessera" \
+  "…and the differing derived arch value is never adopted"
 
 # ── 7. Framework from target-architecture alone, when decisions.md is silent
 # on SQ-006 but a DECIDED row cites it. ───────────────────────────────────
@@ -226,6 +235,47 @@ sed -i 's/^- \*\*Decision:\*\* REINTERPRET.*$/- **Decision:** FAITHFUL — repro
 OUT="$(collect_out "$WORK/m")"
 assert_contains "$OUT" "not REINTERPRET" "FAITHFUL repo: stops on the policy, before the stack"
 assert_not_contains "$OUT" "SQ-006 undecided" "…and never mentions a stack question it did not need"
+
+echo
+echo "== PD-03a regression — derived summaries are not rival authorities =="
+
+# ── 14. THE REGRESSION THIS FIX EXISTS FOR (scenario 1): decisions.md holds
+# SQ-006 as full human prose while target-architecture.md carries a SHORTER
+# derived summary of the same choice, citing SQ-006. Before the fix these
+# normalised-unequal strings raised a false "disagree" stop; now decisions.md
+# is authoritative, its full text is the framework value, and the run proceeds.
+make_repo "$WORK/n" "$(fw_block 'Kestrelize web client with the Foundry component kit as the primary library; exact packaging fixed in an implementation ADR.')
+$(lang_block 'Runescript')" '| Legacy client | Kestrelize web client (Foundry) | SQ-006 | DECIDED |'
+J="$(collect_json "$WORK/n")"; RC=$?
+assert_eq "0" "$RC" "full-prose decision + shorter arch summary: collect succeeds (no false disagreement)"
+assert_contains "$(printf '%s' "$J" | jq -r '.stack.framework.value')" "Kestrelize web client with the Foundry component kit" \
+  "…and the framework value is decisions.md's full text, verbatim"
+assert_eq ".specclaw/analysis/decisions.md" "$(printf '%s' "$J" | jq -r '.stack.framework.source')" \
+  "…and decisions.md is the recorded source"
+
+# ── 15. (scenario 2) A component library in the framework text's parenthetical
+# — "(MUI)" — must never be read as the frontend language. SQ-015 decides the
+# language and is authoritative; the parenthetical is not even consulted. Uses
+# the real names from the bug that motivated this fix. ──────────────────────
+make_repo "$WORK/o" "$(fw_block 'Next.js + TypeScript with Material UI (MUI) as the primary component library')
+$(lang_block 'TypeScript')"
+J="$(collect_json "$WORK/o")"; RC=$?
+assert_eq "0" "$RC" "framework text contains (MUI), language decided by SQ-015: collect succeeds"
+assert_eq "TypeScript" "$(printf '%s' "$J" | jq -r '.stack.language.value')" \
+  "…and the language is TypeScript from SQ-015"
+assert_eq "SQ-015" "$(printf '%s' "$J" | jq -r '.stack.language.sanctioned_by')" \
+  "…and it cites SQ-015, not the framework's parenthetical"
+assert_not_contains "$(printf '%s' "$J" | jq -r '.stack.language.value')" "MUI" \
+  "…and the component library (MUI) is never mistaken for the language"
+
+# ── 16. (scenario 3) Byte-identical framework wording in both records still
+# resolves cleanly — the fix did not turn genuine agreement into a problem. ──
+make_repo "$WORK/p" "$(fw_block 'Kestrelize')
+$(lang_block 'Runescript')" '| Legacy shell | Kestrelize | SQ-006 | DECIDED |'
+J="$(collect_json "$WORK/p")"; RC=$?
+assert_eq "0" "$RC" "identical framework wording in both records: collect succeeds"
+assert_eq "Kestrelize" "$(printf '%s' "$J" | jq -r '.stack.framework.value')" \
+  "…and the framework resolves to that value"
 
 echo
 echo "prototype stack-resolver suite: ${PASS} passed, ${FAIL} failed"
