@@ -75,7 +75,7 @@ cross-reference it (`see PQ-002`) instead of drafting a duplicate.
 
 ## Inputs
 
-The collected JSON from `specclaw-bf-prototype collect`:
+A **file path** (`.specclaw/analysis/.collect/prototype.json`) you read yourself with your `Read` tool, not inline JSON in the prompt — the output of `specclaw-bf-prototype collect`:
 
 - `stack.framework` and `stack.language` — each with `value`, `sanctioned_by`,
   `source`, `decided_by`, `date`. **These are the stack. Restate them; never

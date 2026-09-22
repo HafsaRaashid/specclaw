@@ -27,10 +27,11 @@ Determine the mode from the user's message:
 ### 1. Collect
 
 ```bash
-specclaw-bf-prototype collect .specclaw
+mkdir -p .specclaw/analysis/.collect
+specclaw-bf-prototype collect .specclaw > .specclaw/analysis/.collect/prototype.json
 ```
 
-Deterministic, no agent, writes nothing. It resolves the preconditions in order and **stops on the first one that fails, naming the exact id or file**:
+Deterministic, no agent, writes nothing beyond that collected-facts file. **Check the exit status before spawning anything below, and never hand the agent a path to a half-written file.** It resolves the preconditions in order and **stops on the first one that fails, naming the exact id or file**:
 
 - `SQ-013` decided `REINTERPRET` — otherwise this stage does not apply.
 - The **frontend framework** and the **frontend language**, each resolved from the decision record with a citation (`SQ-006` and `SQ-015`, or a `DECIDED` frontend row in `target-architecture.md`, or both in one answer written `<framework> (<language>)`).
@@ -45,7 +46,7 @@ If `config.yaml` has no `prototype.skill`, or the named skill cannot be located:
 
 ### 2. Spawn the agent
 
-`Agent` tool, `subagent_type: "bf-prototype-architect"`. Pass the collected JSON, the project root, and the two paths it may write: `.specclaw/prototype/prototype-brief.md` and (append-only) `.specclaw/analysis/pending-questions.md`.
+`Agent` tool, `subagent_type: "bf-prototype-architect"`. Pass the path `.specclaw/analysis/.collect/prototype.json` — it reads that file directly — the project root, and the two paths it may write: `.specclaw/prototype/prototype-brief.md` and (append-only) `.specclaw/analysis/pending-questions.md`.
 
 Tell it explicitly that it may not choose a framework or a language, may not allocate a `CQ-###`, and may not write `prototype-approvals.md`.
 
