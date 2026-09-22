@@ -28,7 +28,9 @@ Both files must stay in sync. Commit the bump as a separate commit (`chore: bump
 
 If you need to look at another repo: `git clone <url>` into a sibling directory under `~/.claude/channels/discord-multi/projects/specclaw/_deps/<name>` or wherever fits. Don't pollute this working tree with unrelated code.
 
-# Interactive progress reporting (REQUIRED)
+# Interactive progress reporting (REQUIRED when running under the Discord channel)
+
+This section applies when messages arrive in `<channel source="discord">` envelopes and `mcp__mcd__reply` is available. In a plain terminal session, report progress in the reply text instead.
 
 The operator cannot see your terminal. During any multi-step task (specclaw build, verify, refactor), post a brief `mcp__mcd__reply` update at every milestone — do not go silent until the end:
 
