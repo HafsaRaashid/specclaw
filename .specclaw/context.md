@@ -1,6 +1,6 @@
 # Project Context
 
-_Last updated: 2026-09-20 — codex-plugin-packaging_
+_Last updated: 2026-09-27 — azdo-pr-description-limit_
 
 ## Architecture Overview
 
@@ -56,6 +56,12 @@ liveness; a dispatch spans separately invoked processes and has no meaningful si
   auto-bumps their patch version when `plugin.version_files` says the base version is unchanged.
 - **Hand-written Bash JSON must escape values.** `specclaw-party`'s `json_str` and
   `specclaw-change-lock`'s `json_esc` escape backslashes/quotes before interpolation.
+- **Azure DevOps PR descriptions have a character budget.** `specclaw-azdo-pr`'s `fit_description`
+  keeps the description ≤ `azdo.pr_description_max` (default 3900, floor 1000; ADO rejects > 4000).
+  Sections shrink lowest-value first (time accounting → staged files → verify excerpt → tests →
+  acceptance criteria → summary). Each is cut at a newline and ends in a pointer into the change dir.
+  The verdict line and footer are outside every shrinkable body. Under-budget output is
+  byte-identical to the pre-041 format, pinned by `tests/fixtures/azdo-pr-description/small.golden`.
 - Where a helper must be duplicated between standalone executables, copies stay byte-identical and
   a test pins that identity.
 
