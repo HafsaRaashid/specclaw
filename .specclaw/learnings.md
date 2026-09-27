@@ -305,3 +305,18 @@ specclaw-build finalize (branch-per-change) merged the feature branch into LOCAL
 Propose a fix so finalize under branch-per-change never merges into base
 
 ---
+
+## [L21] agent_issue — specclaw-pr stages the whole change dir while holding the...
+
+**When:** 2026-09-27 04:49 UTC
+**Category:** agent_issue
+**Priority:** high
+**Status:** pending
+
+### Detail
+specclaw-pr stages the whole change dir while holding the change lock, so .lock/meta.json gets committed. Its internal 'git push' also fails silently when the branch tracks origin/main (set by specclaw-build setup), and gh pr create then aborts.
+
+### Action
+Exclude .lock/ from artifact staging; push with -u origin <branch>
+
+---
