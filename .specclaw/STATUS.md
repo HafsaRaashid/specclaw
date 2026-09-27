@@ -1,13 +1,14 @@
 # 🦞 SpecClaw Dashboard
 
 **Project:** specclaw
-**Last Updated:** 2026-09-20 10:46 UTC
+**Last Updated:** 2026-09-27 04:48 UTC
 
 _4 unnumbered changes · run `/specclaw:renumber` to order them_
 
 ## Active Changes
 
-_No active changes._
+
+- 🔍 **041-azdo-pr-description-limit** ▫ — verify PASS | 3/3 tasks (100%) | 0 failed | 16m
 
 ## Pending Proposals
 
@@ -63,6 +64,6 @@ _None._
 
 ## Stats
 
-- **Total changes:** 44
-- **Active:** 0
+- **Total changes:** 45
+- **Active:** 1
 - **Completed:** 44
