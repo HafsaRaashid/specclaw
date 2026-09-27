@@ -49,7 +49,7 @@ fail() { echo "FAIL: $1"; FAIL=$((FAIL + 1)); }
 
 FNS="$WORK/fns.sh"
 extract_fn() { sed -n "/^$1() {/,/^}/p" "$2"; }
-for fn in yaml_val extract_section fit_description build_pr_description; do
+for fn in yaml_val extract_section assemble_description fit_description build_pr_description; do
   extract_fn "$fn" "$AZDO_PR_BIN" >> "$FNS"
 done
 grep -q '^build_pr_description() {' "$FNS" || { echo "FATAL: could not extract build_pr_description()" >&2; exit 2; }
